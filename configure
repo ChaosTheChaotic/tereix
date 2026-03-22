@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Generated configure wrapper for tereix
+set -euo pipefail
+
+SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_DIR="${BUILD_DIR:-"$SRC_DIR/build"}"
+GEN=""
+CLEAN=false
+CMAKE_EXTRA_ARGS=()
+
+show_help() {
+    cat <<EOH
+Configure script for tereix
+
+Usage: $0 [OPTIONS] -- [CMAKE_OPTIONS]
+
+Options:
+  -h, --help            Show this help message
+  -b, --build-dir DIR   Set build directory (default: ./build)
+  -c, --clean           Clean the build dir if it already exists
+  -g, --generator GEN   Specify CMake generator (e.g., Ninja, Unix Makefiles)
+  --no-ninja            Don't use Ninja even if available
+
+CMake Options (can be passed after --):
+  -DCMAKE_BUILD_TYPE=[Release|Debug]
+  -DUSE_CCACHE=[ON|OFF]    Try to use ccache for faster builds (default: OFF)
+  -DUSE_LTO=[ON|OFF]    Use linktime optimizations if available (default: ON)
+  -DMARCH_NATIVE=[ON|OFF]    Build library optimized for native arch (default: OFF)
+  -DDO_INSTALL=[ON|OFF]    Try to install library after it is build (default: OFF)
+EOH
+}
+
+if ! command -v cmake &>/dev/null; then
+    echo "Error: cmake is not installed." >&2
+    exit 1
+fi
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)      show_help; exit 0 ;;
+-b|--build-dir)
+  [[ -z "" ]] && echo "Error: -b requires an argument" && exit 1
+  BUILD_DIR=""
+  shift 2
+  ;;
+        -c|--clean)     CLEAN=true; shift ;;
+        -g|--generator) GEN="$2"; shift 2 ;;
+        --no-ninja)     GEN="Unix Makefiles"; shift ;;
+        --)             shift; CMAKE_EXTRA_ARGS+=("$@"); break ;;
+        -D*)            CMAKE_EXTRA_ARGS+=("$1"); shift ;;
+        *)              echo "Unknown option: $1" >&2; show_help; exit 1 ;;
+    esac
+done
+
+if [[ "$CLEAN" == true && -n "$BUILD_DIR" && "$BUILD_DIR" != "/" ]]; then
+    echo "Cleaning build directory: $BUILD_DIR"
+    rm -rf "$BUILD_DIR"
+else
+  echo "Refusing to clean dangerous dir"
+fi
+
+if [[ -z "$GEN" ]] && command -v ninja &>/dev/null; then
+    GEN="Ninja"
+fi
+
+CMAKE_CMD=("cmake" "-S" "$SRC_DIR" "-B" "$BUILD_DIR")
+[[ -n "$GEN" ]] && CMAKE_CMD+=("-G" "$GEN")
+[[ ${#CMAKE_EXTRA_ARGS[@]} -gt 0 ]] && CMAKE_CMD+=("${CMAKE_EXTRA_ARGS[@]}")
+
+echo "=== Configuring tereix ==="
+echo "Build Dir: $BUILD_DIR"
+echo "Generator: ${GEN:-Default}"
+echo "Command:   ${CMAKE_CMD[*]}"
+echo "========================"
+
+if "${CMAKE_CMD[@]}"; then
+    echo "Configuration successful. Run 'cmake --build $BUILD_DIR' to compile."
+else
+    exit 1
+fi
