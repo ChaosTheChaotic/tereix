@@ -11,9 +11,8 @@
 #define AS_FLOAT(n)    "f" #n ,
 
 typedef enum {
-  TOKEN_MATHOP,
   TOKEN_ASSIGN,
-  TOKEN_BITWISE,
+  TOKEN_OP,
   TOKEN_IDENTIF,
   TOKEN_LIT,
   TOKEN_KW,
@@ -35,6 +34,95 @@ typedef struct {
   unsigned int line;
   unsigned int col;
 } LexCtx;
+
+typedef struct {
+  bool is_static;
+  bool is_mut;
+  TOKEN_TYPE base_type;
+  unsigned int array_dimens; // 0 not an array 1 for [] etc
+} DataType;
+
+typedef enum {
+  AST_BINOP,
+  AST_UOP,
+  AST_IDENTIF,
+  AST_VAR_DECL,
+  AST_NUM_LIT,
+  AST_STR_LIT,
+  AST_CHAR_LIT,
+  AST_IF,
+  AST_BLOCK,
+  AST_STRUCT,
+  AST_UNION,
+  AST_DEFER,
+  AST_FOR,
+  AST_WHILE,
+  AST_FUNC,
+  AST_PARAM,
+} ASTN_TYPE;
+
+typedef struct {
+  ASTN_TYPE type;
+  struct AstNode *next;
+  union {
+    struct { Token val; } num_lit;
+    struct { Token val; } str_lit;
+    struct { Token val; } char_lit;
+    struct { Token val; } identif;
+    struct {
+      Token op;
+      struct AstNode *left;
+      struct AstNode *right;
+    } binop;
+    struct {
+      Token op;
+      struct AstNode *operand;
+    } unop;
+    struct {
+      Token id;
+      DataType type;
+      struct AstNode *init; // Expr assigned
+    } var_decl;
+    struct {
+      Token if_stmt;
+      struct AstNode *check;
+      struct AstNode *action;
+    } if_check;
+    struct {
+      Token structn;
+      struct AstNode *contents;
+    } struct_def;
+    struct {
+      Token unionn;
+      struct AstNode *contents;
+    } union_def;
+    struct {
+      Token defer;
+      struct AstNode *contents;
+    } defer_stmt;
+    struct {
+      Token for_stmt;
+      struct AstNode *check;
+      struct AstNode *action;
+    } for_loop;
+    struct {
+      Token while_stmt;
+      struct AstNode *check;
+      struct AstNode *action;
+    } while_loop;
+    struct {
+      DataType type;
+      Token id;
+    } fn_param;
+    struct {
+      Token fn_name;
+      DataType ret_type;
+      struct AstNode *params;
+      struct AstNode *block;
+    } func_def;
+    struct { struct AstNode *first_stmt; } block;
+  } as;
+} AstNode;
 
 bool check_exists(const char *path) {
   FILE *fp = NULL;
@@ -132,23 +220,19 @@ const char *kwlist[] = {
 };
 const size_t kwlistlen = sizeof(kwlist) / sizeof(kwlist[0]);
 
-const char *mathoplist[] = {
-  "+",
-  "-",
-  "/",
-  "*",
-};
-const size_t mathoplistlen = sizeof(mathoplist) / sizeof(mathoplist[0]);
-
-const char *bitoplist[] = {
+const char *oplist[] = {
   "^",
   "&",
   "|",
   "!",
   "<<",
   ">>",
+  "+",
+  "-",
+  "/",
+  "*",
 };
-const size_t bitoplistlen = sizeof(bitoplist) / sizeof(bitoplist[0]);
+const size_t oplistlen = sizeof(oplist) / sizeof(oplist[0]);
 
 const char *complist[] = {
   "==", "!=", "<=", ">=", "<", ">"
@@ -164,18 +248,9 @@ inline bool is_kw(char *start, unsigned int len) {
   return false;
 }
 
-inline bool is_mathop(char op) {
-  for (unsigned int i = 0; i < mathoplistlen; i++) {
-    if (op == *mathoplist[i]) {
-      return true;
-    }
-  }
-  return false;
-}
-
-inline bool is_bitopt(char *start, unsigned int len) {
-  for (unsigned int i = 0; i < bitoplistlen; i++) {
-    if (strlen(bitoplist[i]) == len && strncmp(start, bitoplist[i], len) == 0) {
+inline bool is_op(char *start, unsigned int len) {
+  for (unsigned int i = 0; i < oplistlen; i++) {
+    if (strlen(oplist[i]) == len && strncmp(start, oplist[i], len) == 0) {
       return true;
     }
   }
@@ -355,17 +430,16 @@ Token next_token(LexCtx *ctx) {
 
   // Operators and Punctuation
   else {
-    if (is_compare(ctx->curr, 2) || is_bitopt(ctx->curr, 2)) {
-      type = is_compare(ctx->curr, 2) ? TOKEN_COMPARE : TOKEN_BITWISE;
+    if (is_compare(ctx->curr, 2) || is_op(ctx->curr, 2)) {
+      type = is_compare(ctx->curr, 2) ? TOKEN_COMPARE : TOKEN_OP;
       len = 2;
     } else if (*ctx->curr == '=') {
       type = TOKEN_ASSIGN;
       len = 1;
-    } else if (is_compare(ctx->curr, 1) || is_bitopt(ctx->curr, 1) || is_mathop(*ctx->curr) || is_punc(*ctx->curr)) {
+    } else if (is_compare(ctx->curr, 1) || is_op(ctx->curr, 1) || is_punc(*ctx->curr)) {
       len = 1;
       if (is_compare(ctx->curr, 1)) type = TOKEN_COMPARE;
-      else if (is_bitopt(ctx->curr, 1)) type = TOKEN_BITWISE;
-      else if (is_mathop(*ctx->curr)) type = TOKEN_MATHOP;
+      else if (is_op(ctx->curr, 1)) type = TOKEN_OP;
       else if (is_punc(*ctx->curr)) type = TOKEN_PUNC;
       else type = TOKEN_UNKNOWN;
     } else {
@@ -417,11 +491,7 @@ void try_compile(const char *path) {
 	fprintf(stderr, "Encountered unknown token %.*s at line %u, col %u", t.len, t.start, ctx->line, ctx->col);
 	goto err_cleanup;
       }
-      case TOKEN_BITWISE: {
-
-	break;
-      }
-      case TOKEN_MATHOP: {
+      case TOKEN_OP: {
 
 	break;
       }
