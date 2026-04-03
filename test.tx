@@ -1,13 +1,26 @@
 i32 a = 0 - 1;
 
-i32 get_a() {
-  ret a;
+i32 get_a(bool x) {
+	ret {
+		if (x) {
+			a - 1
+		} else {
+			a
+		}
+	};
 }
 
 // The main function
 u8 main(u32 argc, str[] argv) {
   i32 va = get_a();
   i32 b = get_a() + 1;
+
+	for (mut u32 i = 0; i < argc; i++) {
+		va++;
+		b += i;
+	}
+
+	b = 0;
 
   ret b;
 }
