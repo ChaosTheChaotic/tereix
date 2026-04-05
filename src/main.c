@@ -230,6 +230,7 @@ typedef enum {
   STATE_GLOBAL, // Looking for funcs, structs, global vars
   STATE_IN_FUNC,
   STATE_IN_EXPR,
+	STATE_EXPR_STMT_DONE,
   STATE_IN_STRUCT_DEF,
   STATE_IN_UNION_DEF,
   STATE_IN_ENUM_DEF,
@@ -244,6 +245,8 @@ typedef enum {
   STATE_FOR_INIT_DONE,
   STATE_FOR_COND_DONE,
   STATE_FOR_BODY_DONE,
+  STATE_FOR_INIT_START,
+  STATE_FOR_INIT_DECL_DONE,
   STATE_IN_FUNC_ARGS,
   STATE_ARG_DONE,
   STATE_DEFER_DONE,
@@ -1035,6 +1038,46 @@ void print_ast(AstNode *root) {
             (AstPrintItem){node->as.ret_stmt.expr, next_depth, "Expr"};
       break;
 
+    case AST_FOR:
+      printf("FOR_LOOP\n");
+      if (node->as.for_loop.action)
+        stack[top++] =
+            (AstPrintItem){node->as.for_loop.action, next_depth, "Body"};
+      if (node->as.for_loop.inc)
+        stack[top++] = (AstPrintItem){node->as.for_loop.inc, next_depth, "Inc"};
+      if (node->as.for_loop.check)
+        stack[top++] =
+            (AstPrintItem){node->as.for_loop.check, next_depth, "Cond"};
+      if (node->as.for_loop.init)
+        stack[top++] =
+            (AstPrintItem){node->as.for_loop.init, next_depth, "Init"};
+      break;
+
+    case AST_FUNC_CALL:
+      printf("FUNC_CALL\n");
+      if (node->as.func_call.args)
+        stack[top++] =
+            (AstPrintItem){node->as.func_call.args, next_depth, "Args"};
+      if (node->as.func_call.caller)
+        stack[top++] =
+            (AstPrintItem){node->as.func_call.caller, next_depth, "Caller"};
+      break;
+
+    case AST_WHILE:
+      printf("WHILE_LOOP\n");
+      if (node->as.while_loop.action)
+        stack[top++] =
+            (AstPrintItem){node->as.while_loop.action, next_depth, "Body"};
+      if (node->as.while_loop.check)
+        stack[top++] =
+            (AstPrintItem){node->as.while_loop.check, next_depth, "Cond"};
+      break;
+
+    case AST_BOOL_LIT:
+      printf("BOOL_LIT: %.*s\n", node->as.bool_lit.val.len,
+             node->as.bool_lit.val.start);
+      break;
+
     default:
       printf("AST_NODE_TYPE_%d\n", node->type);
       break;
@@ -1067,7 +1110,7 @@ bool parse(ParseCtx *ctx) {
             return false;
           }
           push_node(ctx, snode);
-          append_stmt(&root, snode);
+          append_stmt(&root->as.block.first_stmt, snode);
           push_state(ctx, STATE_GLOBAL);
           push_state(ctx, STATE_IN_STRUCT_DEF);
           adv(ctx);
@@ -1178,7 +1221,7 @@ bool parse(ParseCtx *ctx) {
           if (ctx->curr.type == TOKEN_ASSIGN) {
             adv(ctx);
             push_node(ctx, vnode);
-            append_stmt(&root, vnode);
+            append_stmt(&root->as.block.first_stmt, vnode);
 
             push_state(ctx, STATE_GLOBAL);
             push_state(ctx, STATE_VAR_INIT_DONE);
@@ -1193,6 +1236,22 @@ bool parse(ParseCtx *ctx) {
       }
       fprintf(stderr, "Unexpected token %.*s in global scope at line %u\n",
               ctx->curr.len, ctx->curr.start, ctx->lex->line);
+      break;
+    }
+    case STATE_EXPR_STMT_DONE: {
+      AstNode *expr_node = pop_node(ctx);
+      AstNode *current_block = ctx->node_stack[ctx->node_count - 1];
+      if (current_block->type != AST_BLOCK &&
+          current_block->type != AST_PROGRAM) {
+        fprintf(stderr, "Parser Error: Expected block context at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
+      append_stmt(&current_block->as.block.first_stmt, expr_node);
+
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+        adv(ctx);
+      }
       break;
     }
     case STATE_IN_EXPR: {
@@ -1212,6 +1271,8 @@ bool parse(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
         if (!ctx->expect_operand) {
+					Token open_paren = ctx->curr;
+
           AstNode *caller = pop_node(ctx);
           AstNode *call_node = new_node(ctx->arena, AST_FUNC_CALL);
           call_node->as.func_call.caller = caller;
@@ -1223,6 +1284,7 @@ bool parse(ParseCtx *ctx) {
             push_state(ctx, STATE_IN_EXPR);
             break;
           }
+          push_op(ctx, open_paren, false, false);
           ctx->expect_operand = true;
           push_state(ctx, STATE_IN_FUNC_ARGS);
           break;
@@ -1445,8 +1507,8 @@ bool parse(ParseCtx *ctx) {
           push_state(ctx, STATE_IN_EXPR);
           push_state(ctx, STATE_FOR_COND_DONE);
           push_state(ctx, STATE_IN_EXPR);
-          push_state(ctx, STATE_FOR_INIT_DONE);
-          push_state(ctx, STATE_IN_EXPR);
+
+          push_state(ctx, STATE_FOR_INIT_START);
 
           if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
             adv(ctx);
@@ -1474,6 +1536,7 @@ bool parse(ParseCtx *ctx) {
             adv(ctx);
             push_node(ctx, vnode);
             push_state(ctx, STATE_VAR_INIT_DONE);
+						ctx->expect_operand = true;
             push_state(ctx, STATE_IN_EXPR);
           } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
             adv(ctx);
@@ -1494,6 +1557,7 @@ bool parse(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_IDENTIF || is_lit_type(ctx->curr.type) ||
           ctx->curr.type == TOKEN_OP) {
+        push_state(ctx, STATE_EXPR_STMT_DONE);
         push_state(ctx, STATE_IN_EXPR);
       } else {
         fprintf(stderr, "Unexpected token %.*s in block at line %u\n",
@@ -1514,6 +1578,83 @@ bool parse(ParseCtx *ctx) {
       } else {
         fprintf(stderr,
                 "Expected ';' after for-loop initialization at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
+      break;
+    }
+
+    case STATE_FOR_INIT_START: {
+      bool is_decl = false;
+
+      if (is_builtin_type_kw(ctx->curr) ||
+          (ctx->curr.type == TOKEN_KW &&
+           (strncmp(ctx->curr.start, "mut", 3) == 0 ||
+            strncmp(ctx->curr.start, "static", 6) == 0))) {
+        is_decl = true;
+      } else if (ctx->curr.type == TOKEN_IDENTIF) {
+        Token next = peek_token(ctx->lex);
+        if (next.type == TOKEN_IDENTIF) {
+          is_decl = true;
+        }
+      }
+
+      if (is_decl) {
+        DataType type = parse_type(ctx);
+        if (ctx->curr.type != TOKEN_IDENTIF) {
+          fprintf(stderr, "Expected identifier after type at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+        Token name = ctx->curr;
+        adv(ctx);
+
+        AstNode *vnode = new_node(ctx->arena, AST_VAR_DECL);
+        vnode->as.var_decl.type = type;
+        vnode->as.var_decl.id = name;
+
+        push_node(ctx, vnode);
+
+        if (ctx->curr.type == TOKEN_ASSIGN) {
+          adv(ctx);
+          push_state(ctx, STATE_FOR_INIT_DECL_DONE);
+          push_state(ctx, STATE_IN_EXPR);
+        } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+          AstNode *var_node = pop_node(ctx);
+          AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
+          for_node->as.for_loop.init = var_node;
+          adv(ctx);
+        } else {
+          fprintf(stderr,
+                  "Expected '=' or ';' after variable declaration in for loop "
+                  "at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+      } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+        AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
+        for_node->as.for_loop.init = NULL;
+        adv(ctx);
+      } else {
+        push_state(ctx, STATE_FOR_INIT_DONE);
+        push_state(ctx, STATE_IN_EXPR);
+      }
+      break;
+    }
+
+    case STATE_FOR_INIT_DECL_DONE: {
+      AstNode *init_expr = pop_node(ctx);
+      AstNode *var_node = pop_node(ctx);
+      var_node->as.var_decl.init = init_expr;
+
+      AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
+      for_node->as.for_loop.init = var_node;
+
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+        adv(ctx);
+      } else {
+        fprintf(stderr,
+                "Expected ';' after for-loop variable declaration at line %u\n",
                 ctx->lex->line);
         return false;
       }
@@ -1579,6 +1720,14 @@ bool parse(ParseCtx *ctx) {
         return false;
       }
 
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+        adv(ctx);
+        AstNode *body_block = new_node(ctx->arena, AST_BLOCK);
+        push_node(ctx, body_block);
+      } else {
+        fprintf(stderr, "Expected '{' for while body\n");
+        return false;
+      }
       break;
     }
 
@@ -1789,7 +1938,7 @@ bool parse(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
         adv(ctx);
-      } else {
+      } else if (expr_result->type != AST_BLOCK) {
         fprintf(stderr,
                 "Error: Expected ';' after return expression at line %u\n",
                 ctx->lex->line);
@@ -1817,6 +1966,11 @@ bool parse(ParseCtx *ctx) {
     case STATE_IN_FUNC_ARGS: {
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
         adv(ctx);
+        if (ctx->op_count > 0 &&
+            *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+          ctx->op_count--;
+        }
+				ctx->expect_operand = false;
         push_state(ctx, STATE_IN_EXPR);
         break;
       }
