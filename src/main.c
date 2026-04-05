@@ -154,6 +154,7 @@ typedef struct AstNode {
     struct {
       Token op;
       struct AstNode *operand;
+			bool is_postfix;
     } unop;
     struct {
       Token id;
@@ -251,6 +252,12 @@ typedef enum {
 } ParseState;
 
 typedef struct {
+  Token op;
+  bool is_unary;
+  bool is_postfix;
+} OpInfo;
+
+typedef struct {
   LexCtx *lex;
   Token curr;
   Token prev;
@@ -264,9 +271,11 @@ typedef struct {
   size_t node_count;
   size_t node_cap;
 
-  Token *op_stack;
+  OpInfo *op_stack;
   size_t op_count;
   size_t op_cap;
+
+	bool expect_operand;
 } ParseCtx;
 
 void push_state(ParseCtx *ctx, ParseState state) {
@@ -316,17 +325,48 @@ AstNode *pop_node(ParseCtx *ctx) {
   return ctx->node_stack[--ctx->node_count];
 }
 
-void push_op(ParseCtx *ctx, Token op) {
+void push_op(ParseCtx *ctx, Token op, bool is_unary, bool is_postfix) {
   if (ctx->op_count >= ctx->op_cap) {
     size_t new_cap = (ctx->op_cap == 0) ? 32 : ctx->op_cap * 2;
-    Token *new_stack = realloc(ctx->op_stack, sizeof(Token) * new_cap);
-    if (!new_stack) {
+    OpInfo *new_stack = realloc(ctx->op_stack, sizeof(OpInfo) * new_cap);
+    if (!new_stack)
       exit(1);
-    }
     ctx->op_stack = new_stack;
     ctx->op_cap = new_cap;
   }
-  ctx->op_stack[ctx->op_count++] = op;
+  ctx->op_stack[ctx->op_count++] = (OpInfo){op, is_unary, is_postfix};
+}
+
+void apply_op(ParseCtx *ctx) {
+  if (ctx->op_count == 0)
+    return;
+
+  OpInfo info = ctx->op_stack[--ctx->op_count];
+
+  if (info.is_unary) {
+    if (ctx->node_count < 1)
+      return;
+    AstNode *operand = pop_node(ctx);
+
+    AstNode *unop = new_node(ctx->arena, AST_UOP);
+    unop->as.unop.op = info.op;
+    unop->as.unop.operand = operand;
+    unop->as.unop.is_postfix = info.is_postfix;
+
+    push_node(ctx, unop);
+  } else {
+    if (ctx->node_count < 2)
+      return;
+    AstNode *right = pop_node(ctx);
+    AstNode *left = pop_node(ctx);
+
+    AstNode *binop = new_node(ctx->arena, AST_BINOP);
+    binop->as.binop.op = info.op;
+    binop->as.binop.left = left;
+    binop->as.binop.right = right;
+
+    push_node(ctx, binop);
+  }
 }
 
 bool check_exists(const char *path) {
@@ -742,9 +782,12 @@ bool is_type(ParseCtx *ctx) {
   return false;
 }
 
-int get_precedence(Token op, bool is_unary) {
+int get_precedence(Token op, bool is_unary, bool is_postfix) {
+  if (is_postfix)
+    return 11;
   if (is_unary)
-    return 10; // Highest precedence for !, -, etc.
+    return 10;
+
   if (op.type == TOKEN_ASSIGN)
     return 1;
 
@@ -774,6 +817,7 @@ int get_precedence(Token op, bool is_unary) {
       return 5;
     if (strncmp(op.start, "==", 2) == 0 || strncmp(op.start, "!=", 2) == 0)
       return 4;
+
     bool assign_matches = false;
     switch (*op.start) {
     case '*':
@@ -784,27 +828,10 @@ int get_precedence(Token op, bool is_unary) {
     case '^':
       assign_matches = true;
     }
-    if (assign_matches && *op.start + 1 == '=') {
+    if (assign_matches && op.start[1] == '=')
       return 1; // += etc
-    }
   }
   return 0;
-}
-
-void apply_op(ParseCtx *ctx) {
-  if (ctx->op_count == 0 || ctx->node_count < 2)
-    return;
-
-  Token op = ctx->op_stack[--ctx->op_count];
-  AstNode *right = pop_node(ctx);
-  AstNode *left = pop_node(ctx);
-
-  AstNode *binop = new_node(ctx->arena, AST_BINOP);
-  binop->as.binop.op = op;
-  binop->as.binop.left = left;
-  binop->as.binop.right = right;
-
-  push_node(ctx, binop);
 }
 
 DataType parse_type(ParseCtx *ctx) {
@@ -956,6 +983,18 @@ void print_ast(AstNode *root) {
       printf("BINOP (%.*s)\n", node->as.binop.op.len, node->as.binop.op.start);
       stack[top++] = (AstPrintItem){node->as.binop.right, next_depth, "Right"};
       stack[top++] = (AstPrintItem){node->as.binop.left, next_depth, "Left"};
+      break;
+
+    case AST_UOP:
+      if (node->as.unop.is_postfix) {
+        printf("POSTFIX_UOP (%.*s)\n", node->as.unop.op.len,
+               node->as.unop.op.start);
+      } else {
+        printf("PREFIX_UOP (%.*s)\n", node->as.unop.op.len,
+               node->as.unop.op.start);
+      }
+      stack[top++] =
+          (AstPrintItem){node->as.unop.operand, next_depth, "Operand"};
       break;
 
     case AST_NUM_LIT:
@@ -1162,20 +1201,21 @@ bool parse(ParseCtx *ctx) {
            (*ctx->curr.start == ';' || *ctx->curr.start == ')' ||
             *ctx->curr.start == ',' || *ctx->curr.start == '}'))) {
 
+        ctx->expect_operand = true;
+
         while (ctx->op_count > 0 &&
-               *ctx->op_stack[ctx->op_count - 1].start != '(') {
+               *ctx->op_stack[ctx->op_count - 1].op.start != '(') {
           apply_op(ctx);
         }
         break;
       }
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
-        if (ctx->prev.type == TOKEN_IDENTIF) {
+        if (!ctx->expect_operand) {
           AstNode *caller = pop_node(ctx);
           AstNode *call_node = new_node(ctx->arena, AST_FUNC_CALL);
           call_node->as.func_call.caller = caller;
           push_node(ctx, call_node);
-
           adv(ctx);
 
           if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
@@ -1183,15 +1223,16 @@ bool parse(ParseCtx *ctx) {
             push_state(ctx, STATE_IN_EXPR);
             break;
           }
-
+          ctx->expect_operand = true;
           push_state(ctx, STATE_IN_FUNC_ARGS);
           break;
+        } else {
+          push_op(ctx, ctx->curr, false, false);
+          ctx->expect_operand = true;
+          adv(ctx);
+          push_state(ctx, STATE_IN_EXPR);
+          break;
         }
-
-        push_op(ctx, ctx->curr);
-        adv(ctx);
-        push_state(ctx, STATE_IN_EXPR);
-        break;
       }
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
@@ -1206,6 +1247,7 @@ bool parse(ParseCtx *ctx) {
       }
 
       if (ctx->curr.type == TOKEN_IDENTIF || is_lit_type(ctx->curr.type)) {
+				ctx->expect_operand = false;
 
         ASTN_TYPE node_type;
 
@@ -1248,17 +1290,41 @@ bool parse(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_OP || ctx->curr.type == TOKEN_COMPARE ||
           ctx->curr.type == TOKEN_ASSIGN) {
-        int current_prec = get_precedence(ctx->curr, false);
+        bool is_unary = false;
+        bool is_postfix = false;
+
+        if (ctx->expect_operand) {
+          is_unary = true;
+        } else {
+          if (ctx->curr.len == 2 && (strncmp(ctx->curr.start, "++", 2) == 0 ||
+                                     strncmp(ctx->curr.start, "--", 2) == 0)) {
+            is_unary = true;
+            is_postfix = true;
+          } else {
+            ctx->expect_operand = true;
+          }
+        }
+
+        int current_prec = get_precedence(ctx->curr, is_unary, is_postfix);
+
+        bool left_assoc =
+            !(is_unary && !is_postfix) && (ctx->curr.type != TOKEN_ASSIGN);
+
         while (ctx->op_count > 0 &&
-               *ctx->op_stack[ctx->op_count - 1].start != '(') {
-          if (get_precedence(ctx->op_stack[ctx->op_count - 1], false) >=
-              current_prec) {
+               *ctx->op_stack[ctx->op_count - 1].op.start != '(') {
+          OpInfo top_op = ctx->op_stack[ctx->op_count - 1];
+          int top_prec =
+              get_precedence(top_op.op, top_op.is_unary, top_op.is_postfix);
+
+          if ((left_assoc && top_prec >= current_prec) ||
+              (!left_assoc && top_prec > current_prec)) {
             apply_op(ctx);
           } else {
             break;
           }
         }
-        push_op(ctx, ctx->curr);
+
+        push_op(ctx, ctx->curr, is_unary, is_postfix);
         adv(ctx);
         push_state(ctx, STATE_IN_EXPR);
         break;
