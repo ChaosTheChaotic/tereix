@@ -24,7 +24,7 @@ u8 main(u32 argc, str[] argv) {
 		b *= 3;
 	}
 
-	b = 0;
+	b = { 0 };
 
   ret b;
 }

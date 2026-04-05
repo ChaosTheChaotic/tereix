@@ -239,6 +239,8 @@ typedef enum {
   STATE_IF_BODY_DONE,
   STATE_ELSE_BODY_DONE,
   STATE_PARSE_BLOCK, // Reusable state to parse { ... }
+	STATE_BLOCK_DONE,
+	STATE_BLOCK_EXPR_DONE,
   STATE_WHILE_COND_DONE,
   STATE_WHILE_BODY_DONE,
   STATE_FOR_INC_DONE,
@@ -1234,20 +1236,29 @@ bool parse(ParseCtx *ctx) {
           // Var definitions could be if statement based etc.
         }
       }
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+        adv(ctx);
+        push_state(ctx, STATE_GLOBAL);
+        break;
+      }
       fprintf(stderr, "Unexpected token %.*s in global scope at line %u\n",
               ctx->curr.len, ctx->curr.start, ctx->lex->line);
       break;
     }
     case STATE_EXPR_STMT_DONE: {
       AstNode *expr_node = pop_node(ctx);
-      AstNode *current_block = ctx->node_stack[ctx->node_count - 1];
-      if (current_block->type != AST_BLOCK &&
-          current_block->type != AST_PROGRAM) {
-        fprintf(stderr, "Parser Error: Expected block context at line %u\n",
+      AstNode *parent = ctx->node_stack[ctx->node_count - 1];
+
+      if (parent->type == AST_VAR_DECL) {
+        parent->as.var_decl.init = expr_node;
+      } else if (parent->type == AST_BLOCK || parent->type == AST_PROGRAM) {
+        append_stmt(&parent->as.block.first_stmt, expr_node);
+      } else {
+        fprintf(stderr,
+                "Parser Error: Unexpected context for expression at line %u\n",
                 ctx->lex->line);
         return false;
       }
-      append_stmt(&current_block->as.block.first_stmt, expr_node);
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
         adv(ctx);
@@ -1298,13 +1309,21 @@ bool parse(ParseCtx *ctx) {
       }
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+        adv(ctx);
         AstNode *block_node = new_node(ctx->arena, AST_BLOCK);
         push_node(ctx, block_node);
-        adv(ctx);
 
         push_state(ctx, STATE_IN_EXPR);
 
+        push_state(ctx, STATE_BLOCK_EXPR_DONE);
+
         push_state(ctx, STATE_PARSE_BLOCK);
+
+				// Ensure block internals dont consume outer operators
+        Token dummy = {.start = "(", .len = 1, .type = TOKEN_PUNC};
+        push_op(ctx, dummy, false, false);
+
+        ctx->expect_operand = false;
         break;
       }
 
@@ -1396,6 +1415,14 @@ bool parse(ParseCtx *ctx) {
               ctx->curr.len, ctx->curr.start, ctx->lex->line);
       return false;
     }
+    case STATE_BLOCK_EXPR_DONE: {
+			// Remove dummy
+      if (ctx->op_count > 0 &&
+          *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+        ctx->op_count--;
+      }
+      break;
+    }
     case STATE_IN_FUNC: {
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
         AstNode *func_node = ctx->node_stack[ctx->node_count - 1];
@@ -1410,6 +1437,11 @@ bool parse(ParseCtx *ctx) {
                 ctx->lex->line);
         return false;
       }
+      break;
+    }
+
+    case STATE_BLOCK_DONE: {
+      pop_node(ctx);
       break;
     }
 
@@ -1428,6 +1460,7 @@ bool parse(ParseCtx *ctx) {
         append_stmt(&current_block->as.block.first_stmt, nested_block);
 
         push_state(ctx, STATE_PARSE_BLOCK);
+        push_state(ctx, STATE_BLOCK_DONE);
         push_node(ctx, nested_block);
         push_state(ctx, STATE_PARSE_BLOCK);
         break;
