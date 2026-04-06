@@ -115,7 +115,7 @@ typedef enum {
   AST_STR_LIT,
   AST_CHAR_LIT,
   AST_BOOL_LIT,
-	AST_ARRAY_LIT,
+  AST_ARRAY_LIT,
   AST_IF,
   AST_BLOCK,
   AST_STRUCT,
@@ -129,6 +129,8 @@ typedef enum {
   AST_FUNC_CALL,
   AST_PARAM,
   AST_RET,
+  AST_INDEX,
+  AST_MEMBER,
   AST_PROGRAM, // The root node
 } ASTN_TYPE;
 
@@ -231,6 +233,14 @@ typedef struct AstNode {
       struct AstNode *caller;
       struct AstNode *args;
     } func_call;
+    struct {
+      struct AstNode *base;
+      struct AstNode *index;
+    } index;
+    struct {
+      struct AstNode *base;
+      Token name;
+    } member;
   } as;
 } AstNode;
 
@@ -245,6 +255,7 @@ typedef enum {
   STATE_GLOBAL, // Looking for funcs, structs, global vars
   STATE_IN_FUNC,
   STATE_IN_EXPR,
+	STATE_INDEX_DONE,
 	STATE_IN_ARRAY_LIT,
 	STATE_ARRAY_ELEMENT_DONE,
 	STATE_EXPR_STMT_DONE,
@@ -1162,6 +1173,41 @@ void print_ast(AstNode *root) {
       }
       break;
 
+    case AST_INDEX:
+      printf("INDEX_ACCESS\n");
+      stack[top++] = (AstPrintItem){node->as.index.index, next_depth, "Index"};
+      stack[top++] = (AstPrintItem){node->as.index.base, next_depth, "Base"};
+      break;
+
+    case AST_MEMBER:
+      printf("MEMBER_ACCESS: .%.*s\n", node->as.member.name.len,
+             node->as.member.name.start);
+      stack[top++] = (AstPrintItem){node->as.member.base, next_depth, "Base"};
+      break;
+
+    case AST_DEFER:
+      printf("DEFER\n");
+      if (node->as.defer_stmt.contents)
+        stack[top++] =
+            (AstPrintItem){node->as.defer_stmt.contents, next_depth, "Action"};
+      break;
+
+    case AST_STRUCT:
+      printf("STRUCT: %.*s\n", node->as.struct_def.structn.len,
+             node->as.struct_def.structn.start);
+      if (node->as.struct_def.contents)
+        stack[top++] =
+            (AstPrintItem){node->as.struct_def.contents, next_depth, "Fields"};
+      break;
+
+    case AST_UNION:
+      printf("UNION: %.*s\n", node->as.union_def.unionn.len,
+             node->as.union_def.unionn.start);
+      if (node->as.union_def.contents)
+        stack[top++] =
+            (AstPrintItem){node->as.union_def.contents, next_depth, "Fields"};
+      break;
+
     default:
       printf("AST_NODE_TYPE_%d\n", node->type);
       break;
@@ -1209,6 +1255,7 @@ bool parse_step(ParseCtx *ctx) {
           return false;
         }
         push_node(ctx, unode);
+        append_stmt(&root->as.block.first_stmt, unode);
         push_state(ctx, STATE_GLOBAL);
         push_state(ctx, STATE_IN_UNION_DEF);
         break;
@@ -1536,18 +1583,82 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '[') {
       if (ctx->expect_operand) {
+				// Array lit
         adv(ctx);
         AstNode *array_node = new_node(ctx->arena, AST_ARRAY_LIT);
         push_node(ctx, array_node);
-
         push_state(ctx, STATE_IN_ARRAY_LIT);
-        return true;
+        break;
+      } else {
+				// Indexing
+        adv(ctx);
+        AstNode *base = pop_node(ctx);
+        AstNode *idx_node = new_node(ctx->arena, AST_INDEX);
+        idx_node->as.index.base = base;
+        push_node(ctx, idx_node);
+
+				// Preventing from eating outer opts
+        Token dummy = {.start = "(", .len = 1, .type = TOKEN_PUNC};
+        push_op(ctx, dummy, false, false);
+
+        push_state(ctx, STATE_IN_EXPR);
+        push_state(ctx, STATE_INDEX_DONE);
+        ctx->expect_operand = true;
+        push_state(ctx, STATE_IN_EXPR);
+        break;
       }
+    }
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '.') {
+      if (ctx->expect_operand) {
+        fprintf(stderr, "Error: Expected identifier before '.'\n");
+        return false;
+      }
+      adv(ctx);
+      if (ctx->curr.type != TOKEN_IDENTIF) {
+        fprintf(stderr, "Error: Expected identifier after '.' at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
+
+      AstNode *base = pop_node(ctx);
+      AstNode *mem_node = new_node(ctx->arena, AST_MEMBER);
+      mem_node->as.member.base = base;
+      mem_node->as.member.name = ctx->curr;
+
+      push_node(ctx, mem_node);
+      adv(ctx);
+
+      ctx->expect_operand = false;
+      push_state(ctx,
+                 STATE_IN_EXPR); // Check for more
+      break;
     }
 
     fprintf(stderr, "Unexpected token %.*s in expression at line %u\n",
             ctx->curr.len, ctx->curr.start, ctx->lex->line);
     return false;
+  }
+
+  case STATE_INDEX_DONE: {
+    AstNode *index_expr = pop_node(ctx);
+    AstNode *idx_node = ctx->node_stack[ctx->node_count - 1];
+    idx_node->as.index.index = index_expr;
+
+		// Remove the dummy
+    if (ctx->op_count > 0 &&
+        *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+      ctx->op_count--;
+    }
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ']') {
+      adv(ctx);
+      ctx->expect_operand = false;
+    } else {
+      fprintf(stderr, "Expected ']' after index at line %u\n", ctx->lex->line);
+      return false;
+    }
+    break;
   }
 
   case STATE_IN_ARRAY_LIT: {

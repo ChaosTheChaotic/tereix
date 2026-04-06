@@ -11,6 +11,11 @@ struct Xexor {
 	str yes;
 }
 
+union Testor {
+	i32 faah;
+	u8 grug;
+}
+
 async inline i32 get_a(bool x) {
 	ret {
 		if (x) {
@@ -36,8 +41,12 @@ u8 main(u32 argc, str[] argv) {
 	while (b < 100) {
 		b *= 3;
 	}
+	rarray[a] += b;
 
 	b = { 0 };
+
+	defer { b + 3 };
+	defer  b + 3;
 
 	ret b;
 }
