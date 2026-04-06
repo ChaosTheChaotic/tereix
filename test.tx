@@ -45,6 +45,8 @@ u8 main(u32 argc, str[] argv) {
 
 	b = { 0 };
 
+	*i32 athing = &b;
+
 	defer { b + 3 };
 	defer  b + 3;
 

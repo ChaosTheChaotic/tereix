@@ -101,6 +101,8 @@ typedef struct {
 	bool is_async;
 	bool is_threadlocal;
 	bool is_inline;
+	unsigned int ptr_depth; // 2 for **type etc
+	bool is_reference; // true with &type
   Token name;
   unsigned int array_dimens;  // 0 for not an array 1 for [] etc.
   struct AstNode **dim_sizes; // Per dimensions [][][] etc.
@@ -109,6 +111,8 @@ typedef struct {
 typedef enum {
   AST_BINOP,
   AST_UOP,
+	AST_ADDR_OF,
+	AST_DEREF,
   AST_IDENTIF,
   AST_VAR_DECL,
   AST_NUM_LIT,
@@ -382,7 +386,17 @@ void apply_op(ParseCtx *ctx) {
       return;
     AstNode *operand = pop_node(ctx);
 
-    AstNode *unop = new_node(ctx->arena, AST_UOP);
+    ASTN_TYPE type = AST_UOP;
+
+    // Specialization logic
+    if (info.op.len == 1) {
+      if (*info.op.start == '&')
+        type = AST_ADDR_OF;
+      else if (*info.op.start == '*')
+        type = AST_DEREF;
+    }
+
+    AstNode *unop = new_node(ctx->arena, type);
     unop->as.unop.op = info.op;
     unop->as.unop.operand = operand;
     unop->as.unop.is_postfix = info.is_postfix;
@@ -790,6 +804,11 @@ bool is_builtin_type_kw(Token t) {
 
 bool is_type(ParseCtx *ctx) {
   Token t = ctx->curr;
+  
+  // Skip over any pointers or references
+  while (t.type == TOKEN_OP && (*t.start == '*' || *t.start == '&')) {
+      t = peek_token(ctx->lex);
+  }
 
   if (t.type == TOKEN_KW) {
     if (strncmp(t.start, "static", t.len) == 0 ||
@@ -801,8 +820,8 @@ bool is_type(ParseCtx *ctx) {
   if (is_builtin_type_kw(t))
     return true;
 
-  // Might be a custom type
-  if (t.type == TOKEN_IDENTIF)
+	// Might be a custom type
+  if (t.type == TOKEN_IDENTIF && peek_token(ctx->lex).type == TOKEN_IDENTIF)
     return true;
 
   return false;
@@ -864,6 +883,23 @@ bool parse_step(ParseCtx *ctx);
 
 DataType parse_type(ParseCtx *ctx) {
   DataType type = {0};
+
+  while (ctx->curr.type == TOKEN_OP) {
+    if (strncmp(ctx->curr.start, "*", 1) == 0) {
+      type.ptr_depth++;
+      adv(ctx);
+    } else if (strncmp(ctx->curr.start, "&", 1) == 0) {
+      if (type.is_reference) {
+        fprintf(stderr,
+                "Error: Cannot have multiple references '&&' at line %u\n",
+                ctx->lex->line);
+      }
+      type.is_reference = true;
+      adv(ctx);
+    } else {
+      break;
+    }
+  }
 
   while (ctx->curr.type == TOKEN_KW) {
     if (strncmp(ctx->curr.start, "static", ctx->curr.len) == 0) {
@@ -956,13 +992,21 @@ typedef struct {
 } AstPrintItem;
 
 void print_type_info(DataType type) {
+  if (type.is_reference)
+    printf("&");
+  for (unsigned int i = 0; i < type.ptr_depth; i++) {
+    printf("*");
+  }
+
   if (type.is_static)
     printf("static ");
   if (type.is_mut)
     printf("mut ");
   if (type.is_threadlocal)
     printf("threadlocal ");
+
   printf("%.*s", type.name.len, type.name.start);
+
   for (unsigned int i = 0; i < type.array_dimens; i++) {
     printf("[]");
   }
@@ -1069,6 +1113,11 @@ void print_ast(AstNode *root) {
     case AST_NUM_LIT:
       printf("NUM_LIT: %.*s\n", node->as.num_lit.val.len,
              node->as.num_lit.val.start);
+      break;
+
+    case AST_CHAR_LIT:
+      printf("CHAR_LIT: %.*s\n", node->as.char_lit.val.len,
+             node->as.char_lit.val.start);
       break;
 
     case AST_IDENTIF:
@@ -1206,6 +1255,18 @@ void print_ast(AstNode *root) {
       if (node->as.union_def.contents)
         stack[top++] =
             (AstPrintItem){node->as.union_def.contents, next_depth, "Fields"};
+      break;
+
+    case AST_ADDR_OF:
+      printf("ADDRESS_OF\n");
+      stack[top++] =
+          (AstPrintItem){node->as.unop.operand, next_depth, "Operand"};
+      break;
+
+    case AST_DEREF:
+      printf("DEREF\n");
+      stack[top++] =
+          (AstPrintItem){node->as.unop.operand, next_depth, "Operand"};
       break;
 
     default:
@@ -1837,49 +1898,49 @@ bool parse_step(ParseCtx *ctx) {
           return false;
         }
         break;
-      } else if (is_type(ctx)) {
-        DataType type = parse_type(ctx);
-        if (type.is_async) {
-          fprintf(stderr,
-                  "Error: 'async' cannot be applied to variables at line %u\n",
-                  ctx->lex->line);
-          return false;
-        }
-        if (type.is_inline) {
-          fprintf(stderr,
-                  "Error: 'inline' cannot be applied to variables at line %u\n",
-                  ctx->lex->line);
-          return false;
-        }
-        if (ctx->curr.type != TOKEN_IDENTIF) {
-          fprintf(stderr, "Expected identifier after type at line %u\n",
-                  ctx->lex->line);
-          return false;
-        }
-        Token name = ctx->curr;
-        adv(ctx);
-
-        AstNode *vnode = new_node(ctx->arena, AST_VAR_DECL);
-        vnode->as.var_decl.type = type;
-        vnode->as.var_decl.id = name;
-        append_stmt(&current_block->as.block.first_stmt, vnode);
-
-        if (ctx->curr.type == TOKEN_ASSIGN) {
-          adv(ctx);
-          push_node(ctx, vnode);
-          push_state(ctx, STATE_VAR_INIT_DONE);
-          ctx->expect_operand = true;
-          push_state(ctx, STATE_IN_EXPR);
-        } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
-          adv(ctx);
-        } else {
-          fprintf(stderr,
-                  "Expected ';' or '=' after variable name at line %u\n",
-                  ctx->lex->line);
-          return false;
-        }
-        break;
+      } 
+    }
+    if (is_type(ctx)) {
+      DataType type = parse_type(ctx);
+      if (type.is_async) {
+        fprintf(stderr,
+                "Error: 'async' cannot be applied to variables at line %u\n",
+                ctx->lex->line);
+        return false;
       }
+      if (type.is_inline) {
+        fprintf(stderr,
+                "Error: 'inline' cannot be applied to variables at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
+      if (ctx->curr.type != TOKEN_IDENTIF) {
+        fprintf(stderr, "Expected identifier after type at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
+      Token name = ctx->curr;
+      adv(ctx);
+
+      AstNode *vnode = new_node(ctx->arena, AST_VAR_DECL);
+      vnode->as.var_decl.type = type;
+      vnode->as.var_decl.id = name;
+      append_stmt(&current_block->as.block.first_stmt, vnode);
+
+      if (ctx->curr.type == TOKEN_ASSIGN) {
+        adv(ctx);
+        push_node(ctx, vnode);
+        push_state(ctx, STATE_VAR_INIT_DONE);
+        ctx->expect_operand = true;
+        push_state(ctx, STATE_IN_EXPR);
+      } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+        adv(ctx);
+      } else {
+        fprintf(stderr, "Expected ';' or '=' after variable name at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
+      break;
     }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
