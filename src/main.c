@@ -98,6 +98,8 @@ typedef struct {
   bool is_static;
   bool is_mut;
   bool is_custom;
+	bool is_async;
+	bool is_threadlocal;
   Token name;
   unsigned int array_dimens;  // 0 for not an array 1 for [] etc.
   struct AstNode **dim_sizes; // Per dimensions [][][] etc.
@@ -211,6 +213,7 @@ typedef struct AstNode {
     struct {
       Token fn_name;
       DataType ret_type;
+      bool is_async;
       struct AstNode *params;
       struct AstNode *block;
     } func_def;
@@ -220,6 +223,7 @@ typedef struct AstNode {
     } ret_stmt;
     struct {
       struct AstNode *first_stmt;
+			bool is_async;
     } block;
     struct {
       struct AstNode *caller;
@@ -474,6 +478,8 @@ const char *kwlist[] = {
     "struct",
     "union",
     "enum",
+		"async",
+		"threadlocal"
 };
 const size_t kwlistlen = sizeof(kwlist) / sizeof(kwlist[0]);
 
@@ -852,6 +858,12 @@ DataType parse_type(ParseCtx *ctx) {
     } else if (strncmp(ctx->curr.start, "mut", ctx->curr.len) == 0) {
       type.is_mut = true;
       adv(ctx);
+    } else if (strncmp(ctx->curr.start, "async", ctx->curr.len) == 0) {
+      type.is_async = true;
+      adv(ctx);
+    } else if (strncmp(ctx->curr.start, "threadlocal", ctx->curr.len) == 0) {
+			type.is_threadlocal = true;
+			adv(ctx);
     } else {
       break;
     }
@@ -931,6 +943,8 @@ void print_type_info(DataType type) {
     printf("static ");
   if (type.is_mut)
     printf("mut ");
+  if (type.is_threadlocal)
+    printf("threadlocal ");
   printf("%.*s", type.name.len, type.name.start);
   for (unsigned int i = 0; i < type.array_dimens; i++) {
     printf("[]");
@@ -981,6 +995,9 @@ void print_ast(AstNode *root) {
       break;
 
     case AST_FUNC:
+      if (node->as.func_def.is_async) {
+        printf("ASYNC ");
+      }
       printf("FUNC (Return: ");
       print_type_info(node->as.func_def.ret_type);
       printf("): %.*s\n", node->as.func_def.fn_name.len,
@@ -1040,6 +1057,9 @@ void print_ast(AstNode *root) {
       break;
 
     case AST_BLOCK:
+      if (node->as.block.is_async) {
+        printf("ASYNC ");
+      }
       printf("BLOCK\n");
       if (node->as.block.first_stmt) {
         stack[top++] =
@@ -1214,9 +1234,17 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
+        if (type.is_threadlocal) {
+          fprintf(stderr,
+                  "Error: 'threadlocal' cannot be applied to function '%.*s' "
+                  "at line %u\n",
+                  name.len, name.start, ctx->lex->line);
+          return false;
+        }
         AstNode *fnode = new_node(ctx->arena, AST_FUNC);
         fnode->as.func_def.fn_name = name;
         fnode->as.func_def.ret_type = type;
+				fnode->as.func_def.is_async = type.is_async;
         adv(ctx);
 
         AstNode *params_head = NULL;
@@ -1234,6 +1262,13 @@ bool parse_step(ParseCtx *ctx) {
             fprintf(stderr,
                     "Expected identifier after type in params at line %u\n",
                     ctx->lex->line);
+            return false;
+          }
+          if (p_type.is_async) {
+            fprintf(
+                stderr,
+                "Error: 'async' cannot be applied to parameter at line %u\n",
+                ctx->lex->line);
             return false;
           }
           Token p_name = ctx->curr;
@@ -1263,6 +1298,13 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, STATE_IN_FUNC);
         break;
       } else {
+        if (type.is_async) {
+          fprintf(stderr,
+                  "Error: 'async' cannot be applied to variable '%.*s' at line "
+                  "%u\n",
+                  name.len, name.start, ctx->lex->line);
+          return false;
+        }
         // Construct VAR ast node and push
         AstNode *vnode = new_node(ctx->arena, AST_VAR_DECL);
         vnode->as.var_decl.type = type;
@@ -1356,15 +1398,24 @@ bool parse_step(ParseCtx *ctx) {
       }
     }
 
+    bool is_async_block = false;
+    if (ctx->curr.type == TOKEN_KW && ctx->curr.len == 5 &&
+        strncmp(ctx->curr.start, "async", 5) == 0) {
+      Token next = peek_token(ctx->lex);
+      if (next.type == TOKEN_PUNC && *next.start == '{') {
+        is_async_block = true;
+        adv(ctx);
+      }
+    }
+
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
       adv(ctx);
       AstNode *block_node = new_node(ctx->arena, AST_BLOCK);
+      block_node->as.block.is_async = is_async_block;
       push_node(ctx, block_node);
 
       push_state(ctx, STATE_IN_EXPR);
-
       push_state(ctx, STATE_BLOCK_EXPR_DONE);
-
       push_state(ctx, STATE_PARSE_BLOCK);
 
       // Ensure block internals dont consume outer operators
@@ -1653,6 +1704,12 @@ bool parse_step(ParseCtx *ctx) {
         break;
       } else if (is_type(ctx)) {
         DataType type = parse_type(ctx);
+        if (type.is_async) {
+          fprintf(stderr,
+                  "Error: 'async' cannot be applied to variables at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
         if (ctx->curr.type != TOKEN_IDENTIF) {
           fprintf(stderr, "Expected identifier after type at line %u\n",
                   ctx->lex->line);
@@ -1734,6 +1791,12 @@ bool parse_step(ParseCtx *ctx) {
 
     if (is_decl) {
       DataType type = parse_type(ctx);
+      if (type.is_async) {
+        fprintf(stderr,
+                "Error: 'async' cannot be applied to variables at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
       if (ctx->curr.type != TOKEN_IDENTIF) {
         fprintf(stderr, "Expected identifier after type at line %u\n",
                 ctx->lex->line);
@@ -1989,6 +2052,14 @@ bool parse_step(ParseCtx *ctx) {
     }
 
     DataType field_type = parse_type(ctx);
+
+    if (field_type.is_async) {
+      fprintf(stderr,
+              "Error: 'async' cannot be applied to struct/union fields at line "
+              "%u\n",
+              ctx->lex->line);
+      return false;
+    }
 
     if (ctx->curr.type != TOKEN_IDENTIF) {
       fprintf(stderr, "Expected field identifier at line %u\n", ctx->lex->line);
