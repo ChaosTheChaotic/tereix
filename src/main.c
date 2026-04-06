@@ -100,6 +100,7 @@ typedef struct {
   bool is_custom;
 	bool is_async;
 	bool is_threadlocal;
+	bool is_inline;
   Token name;
   unsigned int array_dimens;  // 0 for not an array 1 for [] etc.
   struct AstNode **dim_sizes; // Per dimensions [][][] etc.
@@ -214,6 +215,7 @@ typedef struct AstNode {
       Token fn_name;
       DataType ret_type;
       bool is_async;
+			bool is_inline;
       struct AstNode *params;
       struct AstNode *block;
     } func_def;
@@ -479,7 +481,8 @@ const char *kwlist[] = {
     "union",
     "enum",
 		"async",
-		"threadlocal"
+		"threadlocal",
+		"inline",
 };
 const size_t kwlistlen = sizeof(kwlist) / sizeof(kwlist[0]);
 
@@ -861,9 +864,12 @@ DataType parse_type(ParseCtx *ctx) {
     } else if (strncmp(ctx->curr.start, "async", ctx->curr.len) == 0) {
       type.is_async = true;
       adv(ctx);
+    } else if (strncmp(ctx->curr.start, "inline", ctx->curr.len) == 0) {
+      type.is_inline = true;
+      adv(ctx);
     } else if (strncmp(ctx->curr.start, "threadlocal", ctx->curr.len) == 0) {
-			type.is_threadlocal = true;
-			adv(ctx);
+      type.is_threadlocal = true;
+      adv(ctx);
     } else {
       break;
     }
@@ -997,6 +1003,9 @@ void print_ast(AstNode *root) {
     case AST_FUNC:
       if (node->as.func_def.is_async) {
         printf("ASYNC ");
+      }
+      if (node->as.func_def.is_inline) {
+        printf("INLINE ");
       }
       printf("FUNC (Return: ");
       print_type_info(node->as.func_def.ret_type);
@@ -1245,6 +1254,7 @@ bool parse_step(ParseCtx *ctx) {
         fnode->as.func_def.fn_name = name;
         fnode->as.func_def.ret_type = type;
 				fnode->as.func_def.is_async = type.is_async;
+				fnode->as.func_def.is_inline = type.is_inline;
         adv(ctx);
 
         AstNode *params_head = NULL;
@@ -1268,6 +1278,13 @@ bool parse_step(ParseCtx *ctx) {
             fprintf(
                 stderr,
                 "Error: 'async' cannot be applied to parameter at line %u\n",
+                ctx->lex->line);
+            return false;
+          }
+          if (p_type.is_inline) {
+            fprintf(
+                stderr,
+                "Error: 'inline' cannot be applied to parameter at line %u\n",
                 ctx->lex->line);
             return false;
           }
@@ -1301,6 +1318,13 @@ bool parse_step(ParseCtx *ctx) {
         if (type.is_async) {
           fprintf(stderr,
                   "Error: 'async' cannot be applied to variable '%.*s' at line "
+                  "%u\n",
+                  name.len, name.start, ctx->lex->line);
+          return false;
+        }
+        if (type.is_inline) {
+          fprintf(stderr,
+                  "Error: 'inline' cannot be applied to variable '%.*s' at line "
                   "%u\n",
                   name.len, name.start, ctx->lex->line);
           return false;
@@ -1710,6 +1734,12 @@ bool parse_step(ParseCtx *ctx) {
                   ctx->lex->line);
           return false;
         }
+        if (type.is_inline) {
+          fprintf(stderr,
+                  "Error: 'inline' cannot be applied to variables at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
         if (ctx->curr.type != TOKEN_IDENTIF) {
           fprintf(stderr, "Expected identifier after type at line %u\n",
                   ctx->lex->line);
@@ -1794,6 +1824,12 @@ bool parse_step(ParseCtx *ctx) {
       if (type.is_async) {
         fprintf(stderr,
                 "Error: 'async' cannot be applied to variables at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
+      if (type.is_inline) {
+        fprintf(stderr,
+                "Error: 'inline' cannot be applied to variables at line %u\n",
                 ctx->lex->line);
         return false;
       }
@@ -2056,6 +2092,13 @@ bool parse_step(ParseCtx *ctx) {
     if (field_type.is_async) {
       fprintf(stderr,
               "Error: 'async' cannot be applied to struct/union fields at line "
+              "%u\n",
+              ctx->lex->line);
+      return false;
+    }
+    if (field_type.is_inline) {
+      fprintf(stderr,
+              "Error: 'inline' cannot be applied to struct/union fields at line "
               "%u\n",
               ctx->lex->line);
       return false;

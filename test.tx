@@ -11,7 +11,7 @@ struct Xexor {
 	str yes;
 }
 
-async i32 get_a(bool x) {
+async inline i32 get_a(bool x) {
 	ret {
 		if (x) {
 			a - 1
