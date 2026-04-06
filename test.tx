@@ -1,5 +1,16 @@
 i32 a = 0 - 1;
 
+enum Bee {
+	What = { 1 << 3 },
+	Gwhor = 1 << 3 ,
+	How,
+}
+
+struct Xexor {
+	bool no;
+	str yes;
+}
+
 i32 get_a(bool x) {
 	ret {
 		if (x) {
@@ -12,13 +23,15 @@ i32 get_a(bool x) {
 
 // The main function
 u8 main(u32 argc, str[] argv) {
-  i32 va = get_a(false);
-  i32 b = get_a(true) + 1;
+	i32 va = get_a(false);
+	i32 b = get_a(true) + 1;
 
 	for (mut u32 i = 0; i < argc; i++) {
 		va++;
 		b += i;
 	}
+
+	u8[3] rarray =  [ 3, 5, { 5 } ];
 
 	while (b < 100) {
 		b *= 3;
@@ -26,5 +39,5 @@ u8 main(u32 argc, str[] argv) {
 
 	b = { 0 };
 
-  ret b;
+	ret b;
 }
