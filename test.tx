@@ -1,5 +1,21 @@
 threadlocal i32 a = 0 - 1;
 
+extern {
+	char foo(char bar) {
+		return bar;
+	}
+}
+
+extern char bar(char foo) {
+	return foo;
+}
+
+extern {
+	str baz(str gleep);
+}
+
+extern char glorp(char glap);
+
 enum Bee {
 	What = { 1 << 3 },
 	Gwhor = 1 << 3 ,
@@ -42,6 +58,17 @@ u8 main(u32 argc, str[] argv) {
 		b *= 3;
 	}
 	rarray[a] += b;
+	switch (rarray[a]) {
+		case (1) {
+			b++;
+		}
+		case (b > 4) {
+			b /= 2;
+		}
+		default {
+			b--;
+		}
+	}
 
 	b = { 0 };
 

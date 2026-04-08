@@ -98,11 +98,12 @@ typedef struct {
   bool is_static;
   bool is_mut;
   bool is_custom;
-	bool is_async;
-	bool is_threadlocal;
-	bool is_inline;
-	unsigned int ptr_depth; // 2 for **type etc
-	bool is_reference; // true with &type
+  bool is_async;
+  bool is_threadlocal;
+  bool is_inline;
+  bool is_extern;
+  unsigned int ptr_depth; // 2 for **type etc
+  bool is_reference;      // true with &type
   Token name;
   unsigned int array_dimens;  // 0 for not an array 1 for [] etc.
   struct AstNode **dim_sizes; // Per dimensions [][][] etc.
@@ -111,8 +112,8 @@ typedef struct {
 typedef enum {
   AST_BINOP,
   AST_UOP,
-	AST_ADDR_OF,
-	AST_DEREF,
+  AST_ADDR_OF,
+  AST_DEREF,
   AST_IDENTIF,
   AST_VAR_DECL,
   AST_NUM_LIT,
@@ -135,6 +136,9 @@ typedef enum {
   AST_RET,
   AST_INDEX,
   AST_MEMBER,
+  AST_SWITCH,
+  AST_CASE,
+  AST_EXTERN,
   AST_PROGRAM, // The root node
 } ASTN_TYPE;
 
@@ -222,6 +226,7 @@ typedef struct AstNode {
       DataType ret_type;
       bool is_async;
 			bool is_inline;
+			bool is_extern;
       struct AstNode *params;
       struct AstNode *block;
     } func_def;
@@ -245,6 +250,18 @@ typedef struct AstNode {
       struct AstNode *base;
       Token name;
     } member;
+    struct {
+      struct AstNode *check;
+      struct AstNode *cases;
+      struct AstNode *default_case;
+    } switch_stmt;
+    struct {
+      struct AstNode *val;
+      struct AstNode *action;
+    } case_stmt;
+    struct {
+      struct AstNode *contents;
+    } extern_block;
   } as;
 } AstNode;
 
@@ -258,11 +275,12 @@ AstNode *new_node(Arena *arena, ASTN_TYPE type) {
 typedef enum {
   STATE_GLOBAL, // Looking for funcs, structs, global vars
   STATE_IN_FUNC,
+	STATE_FUNC_BODY_DONE,
   STATE_IN_EXPR,
-	STATE_INDEX_DONE,
-	STATE_IN_ARRAY_LIT,
-	STATE_ARRAY_ELEMENT_DONE,
-	STATE_EXPR_STMT_DONE,
+  STATE_INDEX_DONE,
+  STATE_IN_ARRAY_LIT,
+  STATE_ARRAY_ELEMENT_DONE,
+  STATE_EXPR_STMT_DONE,
   STATE_IN_STRUCT_DEF,
   STATE_IN_UNION_DEF,
   STATE_IN_ENUM_DEF,
@@ -272,8 +290,8 @@ typedef enum {
   STATE_IF_BODY_DONE,
   STATE_ELSE_BODY_DONE,
   STATE_PARSE_BLOCK, // Reusable state to parse { ... }
-	STATE_BLOCK_DONE,
-	STATE_BLOCK_EXPR_DONE,
+  STATE_BLOCK_DONE,
+  STATE_BLOCK_EXPR_DONE,
   STATE_WHILE_COND_DONE,
   STATE_WHILE_BODY_DONE,
   STATE_FOR_INC_DONE,
@@ -287,6 +305,12 @@ typedef enum {
   STATE_DEFER_DONE,
   STATE_RET_DONE,
   STATE_VAR_INIT_DONE,
+  STATE_IN_EXTERN_BLOCK,
+  STATE_SWITCH_COND_DONE,
+  STATE_PARSE_SWITCH_BODY,
+  STATE_CASE_EXPR_DONE,
+  STATE_CASE_BODY_DONE,
+  STATE_SWITCH_DONE,
 } ParseState;
 
 typedef struct {
@@ -508,6 +532,10 @@ const char *kwlist[] = {
 		"async",
 		"threadlocal",
 		"inline",
+		"switch",
+		"case",
+		"default",
+		"extern",
 };
 const size_t kwlistlen = sizeof(kwlist) / sizeof(kwlist[0]);
 
@@ -812,7 +840,8 @@ bool is_type(ParseCtx *ctx) {
 
   if (t.type == TOKEN_KW) {
     if (strncmp(t.start, "static", t.len) == 0 ||
-        strncmp(t.start, "mut", t.len) == 0) {
+        strncmp(t.start, "mut", t.len) == 0 ||
+        strncmp(t.start, "extern", t.len) == 0) {
       return true;
     }
   }
@@ -917,6 +946,9 @@ DataType parse_type(ParseCtx *ctx) {
     } else if (strncmp(ctx->curr.start, "threadlocal", ctx->curr.len) == 0) {
       type.is_threadlocal = true;
       adv(ctx);
+    } else if (strncmp(ctx->curr.start, "extern", ctx->curr.len) == 0) {
+      type.is_extern = true;
+      adv(ctx);
     } else {
       break;
     }
@@ -1004,6 +1036,8 @@ void print_type_info(DataType type) {
     printf("mut ");
   if (type.is_threadlocal)
     printf("threadlocal ");
+  if (type.is_extern)
+    printf("extern ");
 
   printf("%.*s", type.name.len, type.name.start);
 
@@ -1056,6 +1090,9 @@ void print_ast(AstNode *root) {
       break;
 
     case AST_FUNC:
+      if (node->as.func_def.is_extern) {
+        printf("EXTERN ");
+      }
       if (node->as.func_def.is_async) {
         printf("ASYNC ");
       }
@@ -1067,8 +1104,13 @@ void print_ast(AstNode *root) {
       printf("): %.*s\n", node->as.func_def.fn_name.len,
              node->as.func_def.fn_name.start);
 
-      stack[top++] =
-          (AstPrintItem){node->as.func_def.block, next_depth, "Body"};
+      if (node->as.func_def.block) {
+        stack[top++] =
+            (AstPrintItem){node->as.func_def.block, next_depth, "Body"};
+      } else {
+        for (int i = 0; i < next_depth; i++) printf("  | ");
+        printf("[Prototype]\n");
+      }
       if (node->as.func_def.params) {
         stack[top++] =
             (AstPrintItem){node->as.func_def.params, next_depth, "Param"};
@@ -1269,6 +1311,36 @@ void print_ast(AstNode *root) {
           (AstPrintItem){node->as.unop.operand, next_depth, "Operand"};
       break;
 
+    case AST_EXTERN:
+      printf("EXTERN_BLOCK\n");
+      if (node->as.extern_block.contents)
+        stack[top++] = (AstPrintItem){node->as.extern_block.contents,
+                                      next_depth, "Contents"};
+      break;
+
+    case AST_SWITCH:
+      printf("SWITCH\n");
+      if (node->as.switch_stmt.default_case)
+        stack[top++] = (AstPrintItem){node->as.switch_stmt.default_case,
+                                      next_depth, "Default"};
+      if (node->as.switch_stmt.cases)
+        stack[top++] =
+            (AstPrintItem){node->as.switch_stmt.cases, next_depth, "Cases"};
+      if (node->as.switch_stmt.check)
+        stack[top++] =
+            (AstPrintItem){node->as.switch_stmt.check, next_depth, "Cond"};
+      break;
+
+    case AST_CASE:
+      printf("CASE\n");
+      if (node->as.case_stmt.action)
+        stack[top++] =
+            (AstPrintItem){node->as.case_stmt.action, next_depth, "Action"};
+      if (node->as.case_stmt.val)
+        stack[top++] =
+            (AstPrintItem){node->as.case_stmt.val, next_depth, "Value"};
+      break;
+
     default:
       printf("AST_NODE_TYPE_%d\n", node->type);
       break;
@@ -1283,62 +1355,92 @@ bool parse_step(ParseCtx *ctx) {
   ParseState current_state = pop_state(ctx);
 
   switch (current_state) {
+  case STATE_IN_EXTERN_BLOCK:
   case STATE_GLOBAL: {
-    AstNode *root = ctx->node_stack[0];
+    AstNode *container = ctx->node_stack[ctx->node_count - 1];
+    AstNode **target_list = (container->type == AST_EXTERN)
+                                ? &container->as.extern_block.contents
+                                : &container->as.block.first_stmt;
+
+    if (container->type == AST_EXTERN && ctx->curr.type == TOKEN_PUNC &&
+        *ctx->curr.start == '}') {
+      adv(ctx);
+      pop_node(ctx);
+      break;
+    }
+
+    if (ctx->curr.type == TOKEN_KW &&
+        strncmp(ctx->curr.start, "extern", 6) == 0) {
+      Token next = peek_token(ctx->lex);
+      if (next.type == TOKEN_PUNC && *next.start == '{') {
+        adv(ctx);
+        adv(ctx);
+
+        AstNode *enode = new_node(ctx->arena, AST_EXTERN);
+        append_stmt(target_list, enode);
+        push_node(ctx, enode);
+
+        push_state(ctx, current_state);
+        push_state(ctx, STATE_IN_EXTERN_BLOCK);
+        break;
+      }
+    }
+
     if (ctx->curr.type == TOKEN_KW) {
-      if (strncmp(ctx->curr.start, "struct", ctx->curr.len) == 0) {
+      if (strncmp(ctx->curr.start, "struct", 6) == 0) {
         adv(ctx);
         AstNode *snode = new_node(ctx->arena, AST_STRUCT);
         snode->as.struct_def.structn = ctx->curr;
         adv(ctx);
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
           adv(ctx);
-        } else {
+        else {
           fprintf(stderr, "Expected '{' after struct name at line %u\n",
                   ctx->lex->line);
           return false;
         }
         push_node(ctx, snode);
-        append_stmt(&root->as.block.first_stmt, snode);
-        push_state(ctx, STATE_GLOBAL);
+        append_stmt(target_list, snode);
+        push_state(ctx, current_state);
         push_state(ctx, STATE_IN_STRUCT_DEF);
         break;
-      } else if (strncmp(ctx->curr.start, "union", ctx->curr.len) == 0) {
+      } else if (strncmp(ctx->curr.start, "union", 5) == 0) {
         adv(ctx);
         AstNode *unode = new_node(ctx->arena, AST_UNION);
         unode->as.union_def.unionn = ctx->curr;
         adv(ctx);
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
           adv(ctx);
-        } else {
+        else {
           fprintf(stderr, "Expected '{' after union name at line %u\n",
                   ctx->lex->line);
           return false;
         }
         push_node(ctx, unode);
-        append_stmt(&root->as.block.first_stmt, unode);
-        push_state(ctx, STATE_GLOBAL);
+        append_stmt(target_list, unode);
+        push_state(ctx, current_state);
         push_state(ctx, STATE_IN_UNION_DEF);
         break;
-      } else if (strncmp(ctx->curr.start, "enum", ctx->curr.len) == 0) {
+      } else if (strncmp(ctx->curr.start, "enum", 4) == 0) {
         adv(ctx);
         AstNode *enode = new_node(ctx->arena, AST_ENUM);
         enode->as.enum_def.enumn = ctx->curr;
         adv(ctx);
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
           adv(ctx);
-        } else {
-          fprintf(stderr, "Expected '{' after struct enum at line %u\n",
+        else {
+          fprintf(stderr, "Expected '{' after enum at line %u\n",
                   ctx->lex->line);
           return false;
         }
         push_node(ctx, enode);
-        append_stmt(&root->as.block.first_stmt, enode);
-        push_state(ctx, STATE_GLOBAL);
+        append_stmt(target_list, enode);
+        push_state(ctx, current_state);
         push_state(ctx, STATE_IN_ENUM_DEF);
         break;
       }
     }
+
     if (is_type(ctx)) {
       DataType type = parse_type(ctx);
 
@@ -1361,8 +1463,11 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *fnode = new_node(ctx->arena, AST_FUNC);
         fnode->as.func_def.fn_name = name;
         fnode->as.func_def.ret_type = type;
-				fnode->as.func_def.is_async = type.is_async;
-				fnode->as.func_def.is_inline = type.is_inline;
+        fnode->as.func_def.is_async = type.is_async;
+        fnode->as.func_def.is_inline = type.is_inline;
+        if (current_state == STATE_IN_EXTERN_BLOCK || type.is_extern) {
+          fnode->as.func_def.is_extern = true;
+        }
         adv(ctx);
 
         AstNode *params_head = NULL;
@@ -1370,9 +1475,8 @@ bool parse_step(ParseCtx *ctx) {
         while (ctx->curr.type != TOKEN_EOF &&
                !(ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')')) {
           if (!is_type(ctx)) {
-            fprintf(stderr,
-                    "Expected type in function parameters at line %u, col %u\n",
-                    ctx->lex->line, ctx->lex->col);
+            fprintf(stderr, "Expected type in function parameters at line %u\n",
+                    ctx->lex->line);
             return false;
           }
           DataType p_type = parse_type(ctx);
@@ -1382,18 +1486,9 @@ bool parse_step(ParseCtx *ctx) {
                     ctx->lex->line);
             return false;
           }
-          if (p_type.is_async) {
-            fprintf(
-                stderr,
-                "Error: 'async' cannot be applied to parameter at line %u\n",
-                ctx->lex->line);
-            return false;
-          }
-          if (p_type.is_inline) {
-            fprintf(
-                stderr,
-                "Error: 'inline' cannot be applied to parameter at line %u\n",
-                ctx->lex->line);
+          if (p_type.is_async || p_type.is_inline) {
+            fprintf(stderr, "Error: Invalid modifier on parameter at line %u\n",
+                    ctx->lex->line);
             return false;
           }
           Token p_name = ctx->curr;
@@ -1416,37 +1511,46 @@ bool parse_step(ParseCtx *ctx) {
         fnode->as.func_def.params = params_head;
         adv(ctx);
 
-        push_node(ctx, fnode);
-        append_stmt(&root, fnode);
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+          if (!fnode->as.func_def.is_extern) {
+            fprintf(stderr,
+                    "Error: Function prototype '%.*s' must be marked 'extern' "
+                    "at line %u\n",
+                    name.len, name.start, ctx->lex->line);
+            return false;
+          }
+          adv(ctx);
+          fnode->as.func_def.block = NULL;
+          append_stmt(target_list, fnode);
+          push_state(ctx, current_state);
+          break;
+        }
 
-        push_state(ctx, STATE_GLOBAL);
+        push_node(ctx, fnode);
+        append_stmt(target_list,
+                    fnode);
+
+        push_state(ctx, current_state);
         push_state(ctx, STATE_IN_FUNC);
         break;
       } else {
-        if (type.is_async) {
+        if (type.is_async || type.is_inline) {
           fprintf(stderr,
-                  "Error: 'async' cannot be applied to variable '%.*s' at line "
-                  "%u\n",
+                  "Error: Invalid modifier on variable '%.*s' at line %u\n",
                   name.len, name.start, ctx->lex->line);
           return false;
         }
-        if (type.is_inline) {
-          fprintf(stderr,
-                  "Error: 'inline' cannot be applied to variable '%.*s' at line "
-                  "%u\n",
-                  name.len, name.start, ctx->lex->line);
-          return false;
-        }
-        // Construct VAR ast node and push
         AstNode *vnode = new_node(ctx->arena, AST_VAR_DECL);
         vnode->as.var_decl.type = type;
         vnode->as.var_decl.id = name;
+
+        append_stmt(target_list,
+                    vnode);
+
         if (ctx->curr.type == TOKEN_ASSIGN) {
           adv(ctx);
           push_node(ctx, vnode);
-          append_stmt(&root->as.block.first_stmt, vnode);
-
-          push_state(ctx, STATE_GLOBAL);
+          push_state(ctx, current_state);
           push_state(ctx, STATE_VAR_INIT_DONE);
           push_state(ctx, STATE_IN_EXPR);
           break;
@@ -1454,17 +1558,16 @@ bool parse_step(ParseCtx *ctx) {
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';')
           adv(ctx);
         break;
-        // Var definitions could be if statement based etc.
       }
     }
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
-      push_state(ctx, STATE_GLOBAL);
+      push_state(ctx, current_state);
       break;
     }
     fprintf(stderr, "Unexpected token %.*s in global scope at line %u\n",
             ctx->curr.len, ctx->curr.start, ctx->lex->line);
-    break;
+    return false;
   }
   case STATE_EXPR_STMT_DONE: {
     AstNode *expr_node = pop_node(ctx);
@@ -1778,6 +1881,8 @@ bool parse_step(ParseCtx *ctx) {
       func_node->as.func_def.block = block_node;
 
       push_node(ctx, block_node);
+      push_state(ctx, STATE_FUNC_BODY_DONE);
+      push_state(ctx, STATE_BLOCK_DONE);
       push_state(ctx, STATE_PARSE_BLOCK);
       adv(ctx);
     } else {
@@ -1785,6 +1890,11 @@ bool parse_step(ParseCtx *ctx) {
               ctx->lex->line);
       return false;
     }
+    break;
+  }
+
+  case STATE_FUNC_BODY_DONE: {
+    pop_node(ctx);
     break;
   }
 
@@ -1898,7 +2008,26 @@ bool parse_step(ParseCtx *ctx) {
           return false;
         }
         break;
-      } 
+      } else if (strncmp(ctx->curr.start, "switch", 6) == 0) {
+        adv(ctx);
+        AstNode *switch_node = new_node(ctx->arena, AST_SWITCH);
+        append_stmt(&current_block->as.block.first_stmt, switch_node);
+        push_node(ctx, switch_node);
+
+        push_state(ctx, STATE_SWITCH_DONE);
+        push_state(ctx, STATE_PARSE_SWITCH_BODY);
+        push_state(ctx, STATE_SWITCH_COND_DONE);
+        push_state(ctx, STATE_IN_EXPR);
+
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
+          adv(ctx);
+        } else {
+          fprintf(stderr, "Expected '(' after switch at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+        break;
+      }
     }
     if (is_type(ctx)) {
       DataType type = parse_type(ctx);
@@ -2432,6 +2561,129 @@ bool parse_step(ParseCtx *ctx) {
         tail = tail->next;
       tail->next = arg_expr;
     }
+    break;
+  }
+  case STATE_SWITCH_COND_DONE: {
+    AstNode *cond_expr = pop_node(ctx);
+    AstNode *switch_node = ctx->node_stack[ctx->node_count - 1];
+    switch_node->as.switch_stmt.check = cond_expr;
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+      adv(ctx);
+    } else {
+      fprintf(stderr, "Expected ')' after switch condition at line %u\n",
+              ctx->lex->line);
+      return false;
+    }
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+      adv(ctx);
+    } else {
+      fprintf(stderr, "Expected '{' to start switch body at line %u\n",
+              ctx->lex->line);
+      return false;
+    }
+    break;
+  }
+
+  case STATE_PARSE_SWITCH_BODY: {
+    AstNode *switch_node = ctx->node_stack[ctx->node_count - 1];
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
+      adv(ctx);
+      break;
+    }
+
+    if (ctx->curr.type == TOKEN_KW) {
+      if (strncmp(ctx->curr.start, "case", 4) == 0) {
+        adv(ctx);
+
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
+          adv(ctx);
+        } else {
+          fprintf(stderr, "Expected '(' after case at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+
+        AstNode *case_node = new_node(ctx->arena, AST_CASE);
+
+        if (switch_node->as.switch_stmt.cases == NULL) {
+          switch_node->as.switch_stmt.cases = case_node;
+        } else {
+          AstNode *tail = switch_node->as.switch_stmt.cases;
+          while (tail->next != NULL)
+            tail = tail->next;
+          tail->next = case_node;
+        }
+
+        push_node(ctx, case_node);
+        push_state(ctx, STATE_PARSE_SWITCH_BODY);
+        push_state(ctx, STATE_CASE_BODY_DONE);
+        push_state(ctx, STATE_CASE_EXPR_DONE);
+        push_state(ctx, STATE_IN_EXPR);
+        break;
+      } else if (strncmp(ctx->curr.start, "default", 7) == 0) {
+        adv(ctx);
+
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+          AstNode *default_block = new_node(ctx->arena, AST_BLOCK);
+          switch_node->as.switch_stmt.default_case = default_block;
+
+          push_state(ctx, STATE_PARSE_SWITCH_BODY);
+          push_state(ctx, STATE_BLOCK_DONE);
+          push_node(ctx, default_block);
+          push_state(ctx, STATE_PARSE_BLOCK);
+          adv(ctx);
+        } else {
+          fprintf(stderr, "Expected '{' for default body at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+        break;
+      }
+    }
+
+    fprintf(stderr, "Unexpected token %.*s in switch body at line %u\n",
+            ctx->curr.len, ctx->curr.start, ctx->lex->line);
+    return false;
+  }
+
+  case STATE_CASE_EXPR_DONE: {
+    AstNode *expr = pop_node(ctx);
+    AstNode *case_node = ctx->node_stack[ctx->node_count - 1];
+    case_node->as.case_stmt.val = expr;
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+      adv(ctx);
+    } else {
+      fprintf(stderr, "Expected ')' after case expression at line %u\n",
+              ctx->lex->line);
+      return false;
+    }
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+      AstNode *case_block = new_node(ctx->arena, AST_BLOCK);
+      push_node(ctx, case_block);
+      push_state(ctx, STATE_PARSE_BLOCK);
+      adv(ctx);
+    } else {
+      fprintf(stderr, "Expected '{' to start case body at line %u\n",
+              ctx->lex->line);
+      return false;
+    }
+    break;
+  }
+
+  case STATE_CASE_BODY_DONE: {
+    AstNode *case_block = pop_node(ctx);
+    AstNode *case_node = pop_node(ctx);
+    case_node->as.case_stmt.action = case_block;
+    break;
+  }
+
+  case STATE_SWITCH_DONE: {
+    pop_node(ctx);
     break;
   }
   }
