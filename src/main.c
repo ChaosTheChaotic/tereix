@@ -158,9 +158,9 @@ typedef struct AstNode {
     struct {
       Token val;
     } bool_lit;
-		struct {
-			struct AstNode *elements;
-		} array_lit;
+    struct {
+      struct AstNode *elements;
+    } array_lit;
     struct {
       Token val;
     } identif;
@@ -172,7 +172,7 @@ typedef struct AstNode {
     struct {
       Token op;
       struct AstNode *operand;
-			bool is_postfix;
+      bool is_postfix;
     } unop;
     struct {
       Token id;
@@ -225,8 +225,8 @@ typedef struct AstNode {
       Token fn_name;
       DataType ret_type;
       bool is_async;
-			bool is_inline;
-			bool is_extern;
+      bool is_inline;
+      bool is_extern;
       struct AstNode *params;
       struct AstNode *block;
     } func_def;
@@ -236,7 +236,7 @@ typedef struct AstNode {
     } ret_stmt;
     struct {
       struct AstNode *first_stmt;
-			bool is_async;
+      bool is_async;
     } block;
     struct {
       struct AstNode *caller;
@@ -275,7 +275,7 @@ AstNode *new_node(Arena *arena, ASTN_TYPE type) {
 typedef enum {
   STATE_GLOBAL, // Looking for funcs, structs, global vars
   STATE_IN_FUNC,
-	STATE_FUNC_BODY_DONE,
+  STATE_FUNC_BODY_DONE,
   STATE_IN_EXPR,
   STATE_INDEX_DONE,
   STATE_IN_ARRAY_LIT,
@@ -337,7 +337,7 @@ typedef struct {
   size_t op_count;
   size_t op_cap;
 
-	bool expect_operand;
+  bool expect_operand;
 } ParseCtx;
 
 void push_state(ParseCtx *ctx, ParseState state) {
@@ -529,13 +529,13 @@ const char *kwlist[] = {
     "struct",
     "union",
     "enum",
-		"async",
-		"threadlocal",
-		"inline",
-		"switch",
-		"case",
-		"default",
-		"extern",
+    "async",
+    "threadlocal",
+    "inline",
+    "switch",
+    "case",
+    "default",
+    "extern",
 };
 const size_t kwlistlen = sizeof(kwlist) / sizeof(kwlist[0]);
 
@@ -832,10 +832,10 @@ bool is_builtin_type_kw(Token t) {
 
 bool is_type(ParseCtx *ctx) {
   Token t = ctx->curr;
-  
+
   // Skip over any pointers or references
   while (t.type == TOKEN_OP && (*t.start == '*' || *t.start == '&')) {
-      t = peek_token(ctx->lex);
+    t = peek_token(ctx->lex);
   }
 
   if (t.type == TOKEN_KW) {
@@ -849,7 +849,7 @@ bool is_type(ParseCtx *ctx) {
   if (is_builtin_type_kw(t))
     return true;
 
-	// Might be a custom type
+  // Might be a custom type
   if (t.type == TOKEN_IDENTIF && peek_token(ctx->lex).type == TOKEN_IDENTIF)
     return true;
 
@@ -983,8 +983,7 @@ DataType parse_type(ParseCtx *ctx) {
     AstNode *expr_node = pop_node(ctx);
 
     if (type.dim_sizes == NULL) {
-      type.dim_sizes =
-          arena_alloc(ctx->arena, sizeof(AstNode *) * 8);
+      type.dim_sizes = arena_alloc(ctx->arena, sizeof(AstNode *) * 8);
     }
 
     type.dim_sizes[type.array_dimens] = expr_node;
@@ -1108,7 +1107,8 @@ void print_ast(AstNode *root) {
         stack[top++] =
             (AstPrintItem){node->as.func_def.block, next_depth, "Body"};
       } else {
-        for (int i = 0; i < next_depth; i++) printf("  | ");
+        for (int i = 0; i < next_depth; i++)
+          printf("  | ");
         printf("[Prototype]\n");
       }
       if (node->as.func_def.params) {
@@ -1527,8 +1527,7 @@ bool parse_step(ParseCtx *ctx) {
         }
 
         push_node(ctx, fnode);
-        append_stmt(target_list,
-                    fnode);
+        append_stmt(target_list, fnode);
 
         push_state(ctx, current_state);
         push_state(ctx, STATE_IN_FUNC);
@@ -1544,8 +1543,7 @@ bool parse_step(ParseCtx *ctx) {
         vnode->as.var_decl.type = type;
         vnode->as.var_decl.id = name;
 
-        append_stmt(target_list,
-                    vnode);
+        append_stmt(target_list, vnode);
 
         if (ctx->curr.type == TOKEN_ASSIGN) {
           adv(ctx);
@@ -1747,21 +1745,21 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '[') {
       if (ctx->expect_operand) {
-				// Array lit
+        // Array lit
         adv(ctx);
         AstNode *array_node = new_node(ctx->arena, AST_ARRAY_LIT);
         push_node(ctx, array_node);
         push_state(ctx, STATE_IN_ARRAY_LIT);
         break;
       } else {
-				// Indexing
+        // Indexing
         adv(ctx);
         AstNode *base = pop_node(ctx);
         AstNode *idx_node = new_node(ctx->arena, AST_INDEX);
         idx_node->as.index.base = base;
         push_node(ctx, idx_node);
 
-				// Preventing from eating outer opts
+        // Preventing from eating outer opts
         Token dummy = {.start = "(", .len = 1, .type = TOKEN_PUNC};
         push_op(ctx, dummy, false, false);
 
@@ -1809,7 +1807,7 @@ bool parse_step(ParseCtx *ctx) {
     AstNode *idx_node = ctx->node_stack[ctx->node_count - 1];
     idx_node->as.index.index = index_expr;
 
-		// Remove the dummy
+    // Remove the dummy
     if (ctx->op_count > 0 &&
         *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
       ctx->op_count--;
@@ -2374,7 +2372,7 @@ bool parse_step(ParseCtx *ctx) {
   case STATE_IN_UNION_DEF: {
     AstNode *parent = ctx->node_stack[ctx->node_count - 1];
 
-		skip_irrelevant(ctx->lex);
+    skip_irrelevant(ctx->lex);
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
       adv(ctx);
@@ -2398,10 +2396,11 @@ bool parse_step(ParseCtx *ctx) {
       return false;
     }
     if (field_type.is_inline) {
-      fprintf(stderr,
-              "Error: 'inline' cannot be applied to struct/union fields at line "
-              "%u\n",
-              ctx->lex->line);
+      fprintf(
+          stderr,
+          "Error: 'inline' cannot be applied to struct/union fields at line "
+          "%u\n",
+          ctx->lex->line);
       return false;
     }
 
@@ -2465,8 +2464,7 @@ bool parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_ASSIGN) {
       adv(ctx);
       push_state(ctx, STATE_IN_ENUM_DEF);
-      push_state(ctx,
-                 STATE_ENUM_MEMBER_DONE);
+      push_state(ctx, STATE_ENUM_MEMBER_DONE);
 
       push_node(ctx, enum_member);
 
