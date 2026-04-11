@@ -1,13 +1,16 @@
+use file;
+
 threadlocal i32 a = 0 - 1;
+extern threadlocal i32 ea = 0 - 1;
 
 extern {
 	char foo(char bar) {
-		return bar;
+		ret bar;
 	}
 }
 
 extern char bar(char foo) {
-	return foo;
+	ret foo;
 }
 
 extern {
@@ -31,6 +34,9 @@ struct Xexor {
 	i32 size() {
 		ret 3;
 	}
+	void setThing(*mut self) {
+		self.no = true;
+	}
 }
 
 union Testor {
@@ -52,6 +58,10 @@ async inline i32 get_a(bool x) {
 u8 main(u32 argc, str[] argv) {
 	i32 va = get_a(false);
 	i32 b = get_a(true) + 1;
+	i32 faah = Xexor.size();
+	Xexor ber;
+	ber.onion.idkman = 32;
+	ber.no = true;
 
 	for (mut u32 i = 0; i < argc; i++) {
 		va++;
@@ -62,6 +72,10 @@ u8 main(u32 argc, str[] argv) {
 
 	while (b < 100) {
 		b *= 3;
+		if (b % 2 == 0) {
+			break;
+		}
+		continue;
 	}
 	rarray[a] += b;
 	switch (rarray[a]) {
@@ -82,6 +96,7 @@ u8 main(u32 argc, str[] argv) {
 
 	defer { b + 3 };
 	defer  b + 3;
+	defer rarray = null;
 
 	ret b;
 }

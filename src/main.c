@@ -450,21 +450,43 @@ void apply_op(ParseCtx *ctx) {
     AstNode *left = pop_node(ctx);
 
     if (info.op.len == 1 && *info.op.start == '.') {
-      if (right->type != AST_IDENTIF) {
-        fprintf(stderr, "Error: Expected identifier after '.'\n");
+      if (right->type != AST_IDENTIF && right->type != AST_FUNC_CALL) {
+        fprintf(stderr,
+                "Error: Expected identifier after '.' at line %u, col %u\n",
+                ctx->lex->line, ctx->lex->col);
         exit(1);
       }
+
+      Token member_name;
+      if (right->type == AST_IDENTIF) {
+        member_name = right->as.identif.val;
+      } else {
+        if (right->as.func_call.caller->type != AST_IDENTIF) {
+          fprintf(stderr,
+                  "Error: Member call must be an identifier at line %u\n",
+                  ctx->lex->line);
+          exit(1);
+        }
+        member_name = right->as.func_call.caller->as.identif.val;
+      }
+
       AstNode *m_node = new_node(ctx->arena, AST_MEMBER);
       m_node->as.member.base = left;
-      m_node->as.member.name = right->as.identif.val;
-      push_node(ctx, m_node);
-    } else {
-      AstNode *binop = new_node(ctx->arena, AST_BINOP);
-      binop->as.binop.op = info.op;
-      binop->as.binop.left = left;
-      binop->as.binop.right = right;
-      push_node(ctx, binop);
+      m_node->as.member.name = member_name;
+
+      if (right->type == AST_FUNC_CALL) {
+        right->as.func_call.caller = m_node;
+        push_node(ctx, right);
+      } else {
+        push_node(ctx, m_node);
+      }
+			return;
     }
+    AstNode *binop = new_node(ctx->arena, AST_BINOP);
+    binop->as.binop.op = info.op;
+    binop->as.binop.left = left;
+    binop->as.binop.right = right;
+    push_node(ctx, binop);
   }
 }
 
@@ -879,7 +901,7 @@ bool is_type(ParseCtx *ctx) {
   Token t = ctx->curr;
 
   // Skip over any pointers or references
-  while (t.type == TOKEN_OP && t.len == 1 && *t.start == '*') {
+  while (t.type == TOKEN_OP && t.len == 1 && (*t.start == '*' || *t.start == '&')) {
     t = next_token(&tmp_lex);
   }
 
@@ -1088,7 +1110,7 @@ typedef struct {
 
 void print_type_info(DataType type) {
   if (type.ptr_depth != 0) {
-    char symbol = (type.ptr_depth > 0) ? '*' : '&';
+    char symbol = (type.ptr_depth < 0) ? '*' : '&';
     int count = (type.ptr_depth > 0) ? type.ptr_depth : -type.ptr_depth;
 
     for (int i = 0; i < count; i++) {
@@ -1887,32 +1909,6 @@ bool parse_step(ParseCtx *ctx) {
       }
     }
 
-    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '.') {
-      if (ctx->expect_operand) {
-        fprintf(stderr, "Error: Expected identifier before '.'\n");
-        return false;
-      }
-      adv(ctx);
-      if (ctx->curr.type != TOKEN_IDENTIF) {
-        fprintf(stderr, "Error: Expected identifier after '.' at line %u\n",
-                ctx->lex->line);
-        return false;
-      }
-
-      AstNode *base = pop_node(ctx);
-      AstNode *mem_node = new_node(ctx->arena, AST_MEMBER);
-      mem_node->as.member.base = base;
-      mem_node->as.member.name = ctx->curr;
-
-      push_node(ctx, mem_node);
-      adv(ctx);
-
-      ctx->expect_operand = false;
-      push_state(ctx,
-                 STATE_IN_EXPR); // Check for more
-      break;
-    }
-
     fprintf(stderr, "Unexpected token %.*s in expression at line %u\n",
             ctx->curr.len, ctx->curr.start, ctx->lex->line);
     return false;
@@ -2041,7 +2037,40 @@ bool parse_step(ParseCtx *ctx) {
     push_state(ctx, STATE_PARSE_BLOCK);
 
     if (ctx->curr.type == TOKEN_KW) {
-      if (strncmp(ctx->curr.start, "if", 2) == 0) {
+      if (strncmp(ctx->curr.start, "struct", 6) == 0 ||
+          strncmp(ctx->curr.start, "union", 5) == 0 ||
+          strncmp(ctx->curr.start, "enum", 4) == 0) {
+        Token type_kw = ctx->curr;
+        adv(ctx);
+        AstNode *local_type = NULL;
+        if (strncmp(type_kw.start, "struct", 6) == 0) {
+          local_type = new_node(ctx->arena, AST_STRUCT);
+          local_type->as.struct_def.structn = ctx->curr;
+          adv(ctx);
+        } else if (strncmp(type_kw.start, "union", 5) == 0) {
+          local_type = new_node(ctx->arena, AST_UNION);
+          local_type->as.union_def.unionn = ctx->curr;
+          adv(ctx);
+        } else {
+          local_type = new_node(ctx->arena, AST_ENUM);
+          local_type->as.enum_def.enumn = ctx->curr;
+          adv(ctx);
+        }
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+          adv(ctx);
+        else {
+          fprintf(stderr, "Expected '{' after local type name at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+        append_stmt(&current_block->as.block.first_stmt, local_type);
+        push_node(ctx, local_type);
+        push_state(ctx, STATE_PARSE_BLOCK);
+        push_state(ctx, (local_type->type == AST_STRUCT)  ? STATE_IN_STRUCT_DEF
+                        : (local_type->type == AST_UNION) ? STATE_IN_UNION_DEF
+                                                          : STATE_IN_ENUM_DEF);
+        break;
+      } else if (strncmp(ctx->curr.start, "if", 2) == 0) {
         adv(ctx);
         AstNode *if_node = new_node(ctx->arena, AST_IF);
         append_stmt(&current_block->as.block.first_stmt, if_node);
@@ -2517,12 +2546,50 @@ bool parse_step(ParseCtx *ctx) {
   case STATE_IN_UNION_DEF: {
     AstNode *parent = ctx->node_stack[ctx->node_count - 1];
 
-    skip_irrelevant(ctx->lex);
-
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
       adv(ctx);
       pop_node(ctx);
       break;
+    }
+
+    if (ctx->curr.type == TOKEN_KW) {
+      if (strncmp(ctx->curr.start, "struct", 6) == 0 ||
+          strncmp(ctx->curr.start, "union", 5) == 0 ||
+          strncmp(ctx->curr.start, "enum", 4) == 0) {
+        Token type_kw = ctx->curr;
+        adv(ctx);
+        AstNode *nested_type = NULL;
+        if (strncmp(type_kw.start, "struct", 6) == 0) {
+          nested_type = new_node(ctx->arena, AST_STRUCT);
+          nested_type->as.struct_def.structn = ctx->curr;
+          adv(ctx);
+        } else if (strncmp(type_kw.start, "union", 5) == 0) {
+          nested_type = new_node(ctx->arena, AST_UNION);
+          nested_type->as.union_def.unionn = ctx->curr;
+          adv(ctx);
+        } else { // enum
+          nested_type = new_node(ctx->arena, AST_ENUM);
+          nested_type->as.enum_def.enumn = ctx->curr;
+          adv(ctx);
+        }
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+          adv(ctx);
+        else {
+          fprintf(stderr, "Expected '{' after nested type name at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+        AstNode **target_list = (parent->type == AST_STRUCT)
+                                    ? &parent->as.struct_def.contents
+                                    : &parent->as.union_def.contents;
+        append_stmt(target_list, nested_type);
+        push_node(ctx, nested_type);
+        push_state(ctx, current_state);
+        push_state(ctx, (nested_type->type == AST_STRUCT)  ? STATE_IN_STRUCT_DEF
+                        : (nested_type->type == AST_UNION) ? STATE_IN_UNION_DEF
+                                                           : STATE_IN_ENUM_DEF);
+        break;
+      }
     }
 
     if (!is_type(ctx)) {
@@ -2541,42 +2608,117 @@ bool parse_step(ParseCtx *ctx) {
       return false;
     }
     if (field_type.is_inline) {
-      fprintf(
-          stderr,
-          "Error: 'inline' cannot be applied to struct/union fields at line "
-          "%u\n",
-          ctx->lex->line);
-      return false;
-    }
-
-    if (ctx->curr.type != TOKEN_IDENTIF) {
-      fprintf(stderr, "Expected field identifier at line %u\n", ctx->lex->line);
-      return false;
-    }
-
-    Token field_name = ctx->curr;
-    adv(ctx);
-
-    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
-      adv(ctx);
-    } else {
-      fprintf(stderr, "Expected ';' after field declaration at line %u\n",
+      fprintf(stderr,
+              "Error: 'inline' cannot be applied to struct/union fields at "
+              "line %u\n",
               ctx->lex->line);
       return false;
     }
 
-    AstNode *field_node = new_node(ctx->arena, AST_VAR_DECL);
-    field_node->as.var_decl.type = field_type;
-    field_node->as.var_decl.id = field_name;
+    if (ctx->curr.type != TOKEN_IDENTIF) {
+      fprintf(stderr, "Expected field/method identifier at line %u\n",
+              ctx->lex->line);
+      return false;
+    }
+    Token name = ctx->curr;
+    adv(ctx);
 
-    AstNode **target_list = (parent->type == AST_STRUCT)
-                                ? &parent->as.struct_def.contents
-                                : &parent->as.union_def.contents;
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
+      if (field_type.is_threadlocal) {
+        fprintf(stderr,
+                "Error: 'threadlocal' cannot be applied to method '%.*s' at "
+                "line %u\n",
+                name.len, name.start, ctx->lex->line);
+        return false;
+      }
+      AstNode *fnode = new_node(ctx->arena, AST_FUNC);
+      fnode->as.func_def.fn_name = name;
+      fnode->as.func_def.ret_type = field_type;
+      fnode->as.func_def.is_async = field_type.is_async;
+      fnode->as.func_def.is_inline = field_type.is_inline;
+      fnode->as.func_def.is_extern = field_type.is_extern;
+      adv(ctx);
 
-    append_stmt(target_list, field_node);
+      // Parse parameters
+      AstNode *params_head = NULL;
+      AstNode *params_tail = NULL;
+      while (ctx->curr.type != TOKEN_EOF &&
+             !(ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')')) {
+        if (!is_type(ctx)) {
+          fprintf(stderr, "Expected type in method parameters at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+        DataType p_type = parse_type(ctx);
+        Token p_name = ctx->curr;
+        if (ctx->curr.type != TOKEN_IDENTIF && strncmp(p_name.start, "self", 4) != 0) {
+          fprintf(stderr,
+                  "Expected identifier after type in params at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+        adv(ctx);
+        AstNode *pnode = new_node(ctx->arena, AST_PARAM);
+        pnode->as.fn_param.type = p_type;
+        pnode->as.fn_param.id = p_name;
+        if (!params_head)
+          params_head = params_tail = pnode;
+        else {
+          params_tail->next = pnode;
+          params_tail = pnode;
+        }
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',')
+          adv(ctx);
+      }
+      fnode->as.func_def.params = params_head;
+      adv(ctx);
 
-    push_state(ctx, current_state);
-    break;
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+        if (!fnode->as.func_def.is_extern) {
+          fprintf(stderr,
+                  "Error: Method '%.*s' must be marked 'extern' if no body at "
+                  "line %u\n",
+                  name.len, name.start, ctx->lex->line);
+          return false;
+        }
+        adv(ctx);
+        fnode->as.func_def.block = NULL;
+        AstNode **target_list = (parent->type == AST_STRUCT)
+                                    ? &parent->as.struct_def.contents
+                                    : &parent->as.union_def.contents;
+        append_stmt(target_list, fnode);
+        push_state(ctx, current_state);
+        break;
+      } else {
+        // Push method node and let STATE_IN_FUNC parse the body
+        AstNode **target_list = (parent->type == AST_STRUCT)
+                                    ? &parent->as.struct_def.contents
+                                    : &parent->as.union_def.contents;
+        append_stmt(target_list, fnode);
+        push_node(ctx, fnode);
+        push_state(ctx, current_state);
+        push_state(ctx, STATE_IN_FUNC);
+        break;
+      }
+    } else {
+      // Field declaration
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+        adv(ctx);
+      } else {
+        fprintf(stderr, "Expected ';' after field declaration at line %u\n",
+                ctx->lex->line);
+        return false;
+      }
+      AstNode *field_node = new_node(ctx->arena, AST_VAR_DECL);
+      field_node->as.var_decl.type = field_type;
+      field_node->as.var_decl.id = name;
+      AstNode **target_list = (parent->type == AST_STRUCT)
+                                  ? &parent->as.struct_def.contents
+                                  : &parent->as.union_def.contents;
+      append_stmt(target_list, field_node);
+      push_state(ctx, current_state);
+      break;
+    }
   }
   case STATE_IN_ENUM_DEF: {
     AstNode *parent = ctx->node_stack[ctx->node_count - 1];
@@ -2587,6 +2729,55 @@ bool parse_step(ParseCtx *ctx) {
       break;
     }
 
+    // Check for nested type definitions
+    if (ctx->curr.type == TOKEN_KW) {
+      if (strncmp(ctx->curr.start, "struct", 6) == 0 ||
+          strncmp(ctx->curr.start, "union", 5) == 0 ||
+          strncmp(ctx->curr.start, "enum", 4) == 0) {
+        Token type_kw = ctx->curr;
+        adv(ctx);
+        AstNode *nested_type = NULL;
+        if (strncmp(type_kw.start, "struct", 6) == 0) {
+          nested_type = new_node(ctx->arena, AST_STRUCT);
+          nested_type->as.struct_def.structn = ctx->curr;
+          adv(ctx);
+        } else if (strncmp(type_kw.start, "union", 5) == 0) {
+          nested_type = new_node(ctx->arena, AST_UNION);
+          nested_type->as.union_def.unionn = ctx->curr;
+          adv(ctx);
+        } else {
+          nested_type = new_node(ctx->arena, AST_ENUM);
+          nested_type->as.enum_def.enumn = ctx->curr;
+          adv(ctx);
+        }
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+          adv(ctx);
+        else {
+          fprintf(stderr, "Expected '{' after nested type name at line %u\n",
+                  ctx->lex->line);
+          return false;
+        }
+        // Append to enum contents
+        if (parent->as.enum_def.contents == NULL) {
+          parent->as.enum_def.contents = nested_type;
+        } else {
+          AstNode *tail = parent->as.enum_def.contents;
+          while (tail->next != NULL)
+            tail = tail->next;
+          tail->next = nested_type;
+        }
+        push_node(ctx, nested_type);
+        push_state(ctx, current_state);
+        push_state(ctx, (nested_type->type == AST_STRUCT)  ? STATE_IN_STRUCT_DEF
+                        : (nested_type->type == AST_UNION) ? STATE_IN_UNION_DEF
+                                                           : STATE_IN_ENUM_DEF);
+        break;
+      }
+    }
+
+    // Otherwise handle as enum member (or method, if we allow functions inside
+    // enums) For simplicity, we treat functions as enum members with a body?
+    // Not typical. Here we only handle standard enum members.
     if (ctx->curr.type != TOKEN_IDENTIF) {
       fprintf(stderr, "Expected identifier in enum at line %u\n",
               ctx->lex->line);
@@ -2610,9 +2801,7 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
       push_state(ctx, STATE_IN_ENUM_DEF);
       push_state(ctx, STATE_ENUM_MEMBER_DONE);
-
       push_node(ctx, enum_member);
-
       ctx->expect_operand = true;
       push_state(ctx, STATE_IN_EXPR);
       break;
