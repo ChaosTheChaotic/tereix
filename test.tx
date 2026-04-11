@@ -25,6 +25,12 @@ enum Bee {
 struct Xexor {
 	bool no;
 	str yes;
+	union onion {
+		i32 idkman;
+	}
+	i32 size() {
+		ret 3;
+	}
 }
 
 union Testor {

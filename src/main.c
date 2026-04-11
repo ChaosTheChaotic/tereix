@@ -102,8 +102,8 @@ typedef struct {
   bool is_threadlocal;
   bool is_inline;
   bool is_extern;
-  unsigned int ptr_depth; // 2 for **type etc
-  bool is_reference;      // true with &type
+  long int ptr_depth; // 2 for **type etc
+  bool is_reference;  // true with &type
   Token name;
   unsigned int array_dimens;  // 0 for not an array 1 for [] etc.
   struct AstNode **dim_sizes; // Per dimensions [][][] etc.
@@ -139,7 +139,11 @@ typedef enum {
   AST_SWITCH,
   AST_CASE,
   AST_EXTERN,
-  AST_PROGRAM, // The root node
+  AST_USE,
+  AST_NULL_LIT,
+  AST_BREAK,
+  AST_CONTINUE,
+  AST_PROGRAM,  // The root node
 } ASTN_TYPE;
 
 typedef struct AstNode {
@@ -262,6 +266,18 @@ typedef struct AstNode {
     struct {
       struct AstNode *contents;
     } extern_block;
+    struct {
+      Token path;
+    } use_stmt;
+    struct {
+      Token val;
+    } null_lit;
+    struct {
+      Token kw;
+    } break_stmt;
+    struct {
+      Token kw;
+    } continue_stmt;
   } as;
 } AstNode;
 
@@ -311,6 +327,7 @@ typedef enum {
   STATE_CASE_EXPR_DONE,
   STATE_CASE_BODY_DONE,
   STATE_SWITCH_DONE,
+	STATE_IF_ELSE_DONE,
 } ParseState;
 
 typedef struct {
@@ -432,12 +449,22 @@ void apply_op(ParseCtx *ctx) {
     AstNode *right = pop_node(ctx);
     AstNode *left = pop_node(ctx);
 
-    AstNode *binop = new_node(ctx->arena, AST_BINOP);
-    binop->as.binop.op = info.op;
-    binop->as.binop.left = left;
-    binop->as.binop.right = right;
-
-    push_node(ctx, binop);
+    if (info.op.len == 1 && *info.op.start == '.') {
+      if (right->type != AST_IDENTIF) {
+        fprintf(stderr, "Error: Expected identifier after '.'\n");
+        exit(1);
+      }
+      AstNode *m_node = new_node(ctx->arena, AST_MEMBER);
+      m_node->as.member.base = left;
+      m_node->as.member.name = right->as.identif.val;
+      push_node(ctx, m_node);
+    } else {
+      AstNode *binop = new_node(ctx->arena, AST_BINOP);
+      binop->as.binop.op = info.op;
+      binop->as.binop.left = left;
+      binop->as.binop.right = right;
+      push_node(ctx, binop);
+    }
   }
 }
 
@@ -511,11 +538,12 @@ const char *load_file(const char *path) {
   }
 }
 
-const char *kwlist[] = {
+static const char *kwlist[] = {
     SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT) "mut",
     "bool",
     "str", // Technically should be parsed as char[] but oh well
     "void",
+		"null",
     "char",
     "auto",
     "any",
@@ -536,19 +564,22 @@ const char *kwlist[] = {
     "case",
     "default",
     "extern",
+		"use",
+		"break",
+		"continue",
 };
-const size_t kwlistlen = sizeof(kwlist) / sizeof(kwlist[0]);
+static const size_t kwlistlen = sizeof(kwlist) / sizeof(kwlist[0]);
 
-const char *oplist[] = {
+static const char *oplist[] = {
     "^", "&",  "|",  "!",  "<<", ">>", "+",  "-",  "/",  "*",
-    "%", "+=", "-=", "/=", "*=", "%=", "^=", "++", "--",
+    "%", "+=", "-=", "/=", "*=", "%=", "^=", "<<=", ">>=", "++", "--", "&&", "||", "."
 };
-const size_t oplistlen = sizeof(oplist) / sizeof(oplist[0]);
+static const size_t oplistlen = sizeof(oplist) / sizeof(oplist[0]);
 
-const char *complist[] = {"==", "!=", "<=", ">=", "<", ">"};
-const size_t complistlen = sizeof(complist) / sizeof(complist[0]);
+static const char *complist[] = {"==", "!=", "<=", ">=", "<", ">"};
+static const size_t complistlen = sizeof(complist) / sizeof(complist[0]);
 
-inline bool is_kw(char *start, unsigned int len) {
+static inline bool is_kw(char *start, unsigned int len) {
   for (unsigned int i = 0; i < kwlistlen; i++) {
     if (strlen(kwlist[i]) == len && strncmp(start, kwlist[i], len) == 0) {
       return true;
@@ -557,7 +588,7 @@ inline bool is_kw(char *start, unsigned int len) {
   return false;
 }
 
-inline bool is_op(char *start, unsigned int len) {
+static inline bool is_op(char *start, unsigned int len) {
   for (unsigned int i = 0; i < oplistlen; i++) {
     if (strlen(oplist[i]) == len && strncmp(start, oplist[i], len) == 0) {
       return true;
@@ -566,7 +597,7 @@ inline bool is_op(char *start, unsigned int len) {
   return false;
 }
 
-inline bool is_punc(char c) {
+static inline bool is_punc(char c) {
   switch (c) {
   case ',':
   case '{':
@@ -576,7 +607,6 @@ inline bool is_punc(char c) {
   case '[':
   case ']':
   case ';':
-  case '.':
     return true;
   default:
     return false;
@@ -629,7 +659,7 @@ bool is_lit(const char *start, unsigned int len) {
   return is_numeric_slice(start, len);
 }
 
-inline bool is_compare(char *start, unsigned int len) {
+static inline bool is_compare(char *start, unsigned int len) {
   for (unsigned int i = 0; i < complistlen; i++) {
     if (strlen(complist[i]) == len && strncmp(start, complist[i], len) == 0) {
       return true;
@@ -771,7 +801,10 @@ Token next_token(LexCtx *ctx) {
 
   // Operators and Punctuation
   else {
-    if (is_compare(ctx->curr, 2) || is_op(ctx->curr, 2)) {
+    if (is_compare(ctx->curr, 3) || is_op(ctx->curr, 3)) {
+      type = is_compare(ctx->curr, 3) ? TOKEN_COMPARE : TOKEN_OP;
+      len = 3;
+    } else if (is_compare(ctx->curr, 2) || is_op(ctx->curr, 2)) {
       type = is_compare(ctx->curr, 2) ? TOKEN_COMPARE : TOKEN_OP;
       len = 2;
     } else if (*ctx->curr == '=') {
@@ -822,8 +855,19 @@ void adv(ParseCtx *ctx) {
 bool is_builtin_type_kw(Token t) {
   if (t.type != TOKEN_KW)
     return false;
-  for (unsigned int i = 0; i < kwlistlen; i++) {
-    if (strlen(kwlist[i]) == t.len && strncmp(t.start, kwlist[i], t.len) == 0) {
+	static const char *typelist[] = {
+    SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT) "mut",
+    "bool",
+    "str", // Technically should be parsed as char[] but oh well
+    "void",
+		"null",
+    "char",
+    "auto",
+    "any",
+	};
+	static const size_t typelistlen = sizeof(typelist) / sizeof(typelist[0]);
+  for (unsigned int i = 0; i < typelistlen; i++) {
+    if (strlen(typelist[i]) == t.len && strncmp(t.start, typelist[i], t.len) == 0) {
       return true;
     }
   }
@@ -831,16 +875,18 @@ bool is_builtin_type_kw(Token t) {
 }
 
 bool is_type(ParseCtx *ctx) {
+	LexCtx tmp_lex = *ctx->lex;
   Token t = ctx->curr;
 
   // Skip over any pointers or references
-  while (t.type == TOKEN_OP && (*t.start == '*' || *t.start == '&')) {
-    t = peek_token(ctx->lex);
+  while (t.type == TOKEN_OP && t.len == 1 && *t.start == '*') {
+    t = next_token(&tmp_lex);
   }
 
   if (t.type == TOKEN_KW) {
     if (strncmp(t.start, "static", t.len) == 0 ||
         strncmp(t.start, "mut", t.len) == 0 ||
+        strncmp(t.start, "threadlocal", t.len) == 0 ||
         strncmp(t.start, "extern", t.len) == 0) {
       return true;
     }
@@ -850,17 +896,30 @@ bool is_type(ParseCtx *ctx) {
     return true;
 
   // Might be a custom type
-  if (t.type == TOKEN_IDENTIF && peek_token(ctx->lex).type == TOKEN_IDENTIF)
+  if (t.type == TOKEN_IDENTIF && next_token(&tmp_lex).type == TOKEN_IDENTIF && !is_kw(t.start, t.len))
     return true;
 
   return false;
 }
 
+bool is_decl(ParseCtx *ctx) {
+  if (ctx->curr.type == TOKEN_KW) {
+    if (strncmp(ctx->curr.start, "inline", ctx->curr.len) == 0 ||
+        strncmp(ctx->curr.start, "async", ctx->curr.len) == 0) {
+      return true;
+    }
+  }
+  return is_type(ctx);
+}
+
 int get_precedence(Token op, bool is_unary, bool is_postfix) {
+  if (op.len == 1 && *op.start == '.') { // Member access
+    return 14;
+  }
   if (is_postfix)
-    return 11;
+    return 13;
   if (is_unary)
-    return 10;
+    return 12;
 
   if (op.type == TOKEN_ASSIGN)
     return 1;
@@ -870,27 +929,31 @@ int get_precedence(Token op, bool is_unary, bool is_postfix) {
     case '*':
     case '/':
     case '%':
-      return 8;
+      return 11;
     case '+':
     case '-':
-      return 7;
+      return 10;
     case '<':
     case '>':
-      return 5;
+      return 8;
     case '&':
-      return 4;
+      return 6;
     case '^':
-      return 3;
+      return 5;
     case '|':
-      return 2;
+      return 4;
     }
   } else if (op.len == 2) {
     if (strncmp(op.start, "<<", 2) == 0 || strncmp(op.start, ">>", 2) == 0)
-      return 6;
+      return 9;
     if (strncmp(op.start, "<=", 2) == 0 || strncmp(op.start, ">=", 2) == 0)
-      return 5;
+      return 8;
     if (strncmp(op.start, "==", 2) == 0 || strncmp(op.start, "!=", 2) == 0)
-      return 4;
+      return 7;
+    if (strncmp(op.start, "&&", 2) == 0)
+      return 3;
+    if (strncmp(op.start, "||", 2) == 0)
+      return 2;
 
     bool assign_matches = false;
     switch (*op.start) {
@@ -904,6 +967,9 @@ int get_precedence(Token op, bool is_unary, bool is_postfix) {
     }
     if (assign_matches && op.start[1] == '=')
       return 1; // += etc
+  } else if (op.len == 3) {
+    if (strncmp(op.start, "<<=", 3) == 0 || strncmp(op.start, ">>=", 3) == 0)
+      return 1;
   }
   return 0;
 }
@@ -912,23 +978,6 @@ bool parse_step(ParseCtx *ctx);
 
 DataType parse_type(ParseCtx *ctx) {
   DataType type = {0};
-
-  while (ctx->curr.type == TOKEN_OP) {
-    if (strncmp(ctx->curr.start, "*", 1) == 0) {
-      type.ptr_depth++;
-      adv(ctx);
-    } else if (strncmp(ctx->curr.start, "&", 1) == 0) {
-      if (type.is_reference) {
-        fprintf(stderr,
-                "Error: Cannot have multiple references '&&' at line %u\n",
-                ctx->lex->line);
-      }
-      type.is_reference = true;
-      adv(ctx);
-    } else {
-      break;
-    }
-  }
 
   while (ctx->curr.type == TOKEN_KW) {
     if (strncmp(ctx->curr.start, "static", ctx->curr.len) == 0) {
@@ -952,6 +1001,21 @@ DataType parse_type(ParseCtx *ctx) {
     } else {
       break;
     }
+  }
+
+  while (ctx->curr.len == 1 &&
+         (*ctx->curr.start == '*' || *ctx->curr.start == '&')) {
+    switch (*ctx->curr.start) {
+    case '*': {
+      type.ptr_depth--;
+      break;
+    }
+    case '&': {
+      type.ptr_depth++;
+      break;
+    }
+    }
+    adv(ctx);
   }
 
   if (ctx->curr.type == TOKEN_IDENTIF || is_builtin_type_kw(ctx->curr)) {
@@ -1023,10 +1087,14 @@ typedef struct {
 } AstPrintItem;
 
 void print_type_info(DataType type) {
-  if (type.is_reference)
-    printf("&");
-  for (unsigned int i = 0; i < type.ptr_depth; i++) {
-    printf("*");
+  if (type.ptr_depth != 0) {
+    char symbol = (type.ptr_depth > 0) ? '*' : '&';
+    int count = (type.ptr_depth > 0) ? type.ptr_depth : -type.ptr_depth;
+
+    for (int i = 0; i < count; i++) {
+      putchar(symbol);
+    }
+		putchar(' ');
   }
 
   if (type.is_static)
@@ -1238,6 +1306,11 @@ void print_ast(AstNode *root) {
              node->as.bool_lit.val.start);
       break;
 
+    case AST_STR_LIT:
+      printf("STR_LIT: %.*s\n", node->as.str_lit.val.len,
+             node->as.str_lit.val.start);
+      break;
+
     case AST_ENUM:
       printf("ENUM: %.*s\n", node->as.enum_def.enumn.len,
              node->as.enum_def.enumn.start);
@@ -1341,6 +1414,23 @@ void print_ast(AstNode *root) {
             (AstPrintItem){node->as.case_stmt.val, next_depth, "Value"};
       break;
 
+    case AST_USE:
+      printf("USE: %.*s\n", node->as.use_stmt.path.len,
+             node->as.use_stmt.path.start);
+      break;
+
+    case AST_NULL_LIT:
+      printf("NULL_LIT\n");
+      break;
+
+    case AST_BREAK:
+      printf("BREAK\n");
+      break;
+
+    case AST_CONTINUE:
+      printf("CONTINUE\n");
+      break;
+
     default:
       printf("AST_NODE_TYPE_%d\n", node->type);
       break;
@@ -1438,10 +1528,29 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, current_state);
         push_state(ctx, STATE_IN_ENUM_DEF);
         break;
+      } else if (ctx->curr.type == TOKEN_KW &&
+                 strncmp(ctx->curr.start, "use", 3) == 0) {
+        adv(ctx);
+        if (ctx->curr.type == TOKEN_STR_LIT ||
+            ctx->curr.type == TOKEN_IDENTIF) {
+          AstNode *use_node = new_node(ctx->arena, AST_USE);
+          use_node->as.use_stmt.path = ctx->curr;
+          append_stmt(target_list, use_node);
+          adv(ctx);
+          if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';')
+            adv(ctx);
+          else {
+            fprintf(stderr, "Expected ';' after use at line %u\n",
+                    ctx->lex->line);
+            return false;
+          }
+          push_state(ctx, current_state);
+          break;
+        }
       }
     }
 
-    if (is_type(ctx)) {
+    if (is_type(ctx) || is_decl(ctx)) {
       DataType type = parse_type(ctx);
 
       if (ctx->curr.type != TOKEN_IDENTIF) {
@@ -1659,7 +1768,9 @@ bool parse_step(ParseCtx *ctx) {
       break;
     }
 
-    if (ctx->curr.type == TOKEN_IDENTIF || is_lit_type(ctx->curr.type)) {
+    if (ctx->curr.type == TOKEN_IDENTIF || is_lit_type(ctx->curr.type) ||
+        (ctx->curr.type == TOKEN_KW &&
+         strncmp(ctx->curr.start, "null", 4) == 0)) {
       ctx->expect_operand = false;
 
       ASTN_TYPE node_type;
@@ -1680,6 +1791,9 @@ bool parse_step(ParseCtx *ctx) {
       case TOKEN_BOOL_LIT:
         node_type = AST_BOOL_LIT;
         break;
+      case TOKEN_KW:
+        node_type = AST_NULL_LIT;
+        break;
       default:
         return false;
       }
@@ -1692,6 +1806,8 @@ bool parse_step(ParseCtx *ctx) {
         node->as.char_lit.val = ctx->curr;
       else if (node_type == AST_NUM_LIT)
         node->as.num_lit.val = ctx->curr;
+      else if (node_type == AST_NULL_LIT)
+        node->as.null_lit.val = ctx->curr;
       else
         node->as.identif.val = ctx->curr;
 
@@ -1968,7 +2084,32 @@ bool parse_step(ParseCtx *ctx) {
         push_node(ctx, defer_node);
         push_state(ctx, STATE_DEFER_DONE);
 
-        push_state(ctx, STATE_IN_EXPR);
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+          AstNode *body_block = new_node(ctx->arena, AST_BLOCK);
+          push_node(ctx, body_block);
+          push_state(ctx, STATE_PARSE_BLOCK);
+          adv(ctx);
+        } else {
+          push_state(ctx, STATE_IN_EXPR);
+        }
+        break;
+      } else if (strncmp(ctx->curr.start, "break", 5) == 0) {
+        Token kw = ctx->curr;
+        adv(ctx);
+        AstNode *brk = new_node(ctx->arena, AST_BREAK);
+        brk->as.break_stmt.kw = kw;
+        append_stmt(&current_block->as.block.first_stmt, brk);
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';')
+          adv(ctx);
+        break;
+      } else if (strncmp(ctx->curr.start, "continue", 8) == 0) {
+        Token kw = ctx->curr;
+        adv(ctx);
+        AstNode *cnt = new_node(ctx->arena, AST_CONTINUE);
+        cnt->as.continue_stmt.kw = kw;
+        append_stmt(&current_block->as.block.first_stmt, cnt);
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';')
+          adv(ctx);
         break;
       } else if (strncmp(ctx->curr.start, "ret", 3) == 0) {
         Token ret_token = ctx->curr;
@@ -2306,6 +2447,8 @@ bool parse_step(ParseCtx *ctx) {
         strncmp(ctx->curr.start, "else", 4) == 0) {
       adv(ctx);
 
+      push_state(ctx, STATE_IF_ELSE_DONE);
+
       if (ctx->curr.type == TOKEN_KW &&
           strncmp(ctx->curr.start, "if", 2) == 0) {
         // Else if block
@@ -2313,10 +2456,8 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *elif_node = new_node(ctx->arena, AST_IF);
         if_node->as.if_check.elseAct = elif_node;
 
-        // just like a normal if statement
         push_node(ctx, elif_node);
         push_state(ctx, STATE_IF_BODY_DONE);
-        push_state(ctx, STATE_PARSE_BLOCK);
         push_state(ctx, STATE_IF_COND_DONE);
         push_state(ctx, STATE_IN_EXPR);
 
@@ -2350,6 +2491,10 @@ bool parse_step(ParseCtx *ctx) {
 
   case STATE_ELSE_BODY_DONE: {
     pop_node(ctx);
+    break;
+  }
+
+  case STATE_IF_ELSE_DONE: {
     pop_node(ctx);
     break;
   }
