@@ -102,6 +102,7 @@ typedef struct {
   bool is_threadlocal;
   bool is_inline;
   bool is_extern;
+	bool is_self;
   long int ptr_depth; // 2 for **type etc
   bool is_reference;  // true with &type
   Token name;
@@ -355,6 +356,7 @@ typedef struct {
   size_t op_cap;
 
   bool expect_operand;
+	unsigned long int ag_depth;
 } ParseCtx;
 
 void push_state(ParseCtx *ctx, ParseState state) {
@@ -917,6 +919,11 @@ bool is_type(ParseCtx *ctx) {
   if (is_builtin_type_kw(t))
     return true;
 
+  if (t.type == TOKEN_IDENTIF && t.len == 4 &&
+      strncmp(t.start, "self", 4) == 0 && ctx->ag_depth > 0) {
+    return true;
+  }
+
   // Might be a custom type
   if (t.type == TOKEN_IDENTIF && next_token(&tmp_lex).type == TOKEN_IDENTIF && !is_kw(t.start, t.len))
     return true;
@@ -1040,7 +1047,22 @@ DataType parse_type(ParseCtx *ctx) {
     adv(ctx);
   }
 
-  if (ctx->curr.type == TOKEN_IDENTIF || is_builtin_type_kw(ctx->curr)) {
+  if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
+      strncmp(ctx->curr.start, "self", 4) == 0) {
+    if (ctx->ag_depth == 0) {
+      fprintf(stderr,
+              "Error: 'self' type can only be used inside struct/union/enum at "
+              "line %u\n",
+              ctx->lex->line);
+      // Return a dummy type to avoid crashing
+      type.name = ctx->curr;
+      adv(ctx);
+      return type;
+    }
+    type.is_self = true;
+    type.name = ctx->curr;
+    adv(ctx);
+  } else if (ctx->curr.type == TOKEN_IDENTIF || is_builtin_type_kw(ctx->curr)) {
     type.name = ctx->curr;
     if (ctx->curr.type == TOKEN_IDENTIF)
       type.is_custom = true;
@@ -1504,9 +1526,10 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *snode = new_node(ctx->arena, AST_STRUCT);
         snode->as.struct_def.structn = ctx->curr;
         adv(ctx);
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-        else {
+					ctx->ag_depth++;
+				} else {
           fprintf(stderr, "Expected '{' after struct name at line %u\n",
                   ctx->lex->line);
           return false;
@@ -1521,9 +1544,10 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *unode = new_node(ctx->arena, AST_UNION);
         unode->as.union_def.unionn = ctx->curr;
         adv(ctx);
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-        else {
+					ctx->ag_depth++;
+				} else {
           fprintf(stderr, "Expected '{' after union name at line %u\n",
                   ctx->lex->line);
           return false;
@@ -1538,9 +1562,10 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *enode = new_node(ctx->arena, AST_ENUM);
         enode->as.enum_def.enumn = ctx->curr;
         adv(ctx);
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-        else {
+					ctx->ag_depth++;
+				} else {
           fprintf(stderr, "Expected '{' after enum at line %u\n",
                   ctx->lex->line);
           return false;
@@ -1611,19 +1636,27 @@ bool parse_step(ParseCtx *ctx) {
             return false;
           }
           DataType p_type = parse_type(ctx);
-          if (ctx->curr.type != TOKEN_IDENTIF) {
-            fprintf(stderr,
-                    "Expected identifier after type in params at line %u\n",
-                    ctx->lex->line);
-            return false;
+          Token p_name;
+
+          if (p_type.is_self) {
+						fprintf(stderr, "Using self is not allowed when not within a struct union or enum on line %u", ctx->lex->line);
+						return false;
+          } else {
+            if (ctx->curr.type != TOKEN_IDENTIF) {
+              fprintf(stderr,
+                      "Expected identifier after type in params at line %u\n",
+                      ctx->lex->line);
+              return false;
+            }
+            p_name = ctx->curr;
+            adv(ctx);
           }
+
           if (p_type.is_async || p_type.is_inline) {
             fprintf(stderr, "Error: Invalid modifier on parameter at line %u\n",
                     ctx->lex->line);
             return false;
           }
-          Token p_name = ctx->curr;
-          adv(ctx);
 
           AstNode *pnode = new_node(ctx->arena, AST_PARAM);
           pnode->as.fn_param.type = p_type;
@@ -2021,6 +2054,14 @@ bool parse_step(ParseCtx *ctx) {
       break;
     }
 
+    if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
+        strncmp(ctx->curr.start, "self", 4) == 0) {
+      push_state(ctx, STATE_PARSE_BLOCK);
+      push_state(ctx, STATE_EXPR_STMT_DONE);
+      push_state(ctx, STATE_IN_EXPR);
+      break;
+    }
+
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
       adv(ctx);
 
@@ -2056,9 +2097,10 @@ bool parse_step(ParseCtx *ctx) {
           local_type->as.enum_def.enumn = ctx->curr;
           adv(ctx);
         }
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-        else {
+          ctx->ag_depth++;
+        } else {
           fprintf(stderr, "Expected '{' after local type name at line %u\n",
                   ctx->lex->line);
           return false;
@@ -2548,6 +2590,7 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
       adv(ctx);
+      ctx->ag_depth--;
       pop_node(ctx);
       break;
     }
@@ -2572,9 +2615,10 @@ bool parse_step(ParseCtx *ctx) {
           nested_type->as.enum_def.enumn = ctx->curr;
           adv(ctx);
         }
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-        else {
+          ctx->ag_depth++;
+        } else {
           fprintf(stderr, "Expected '{' after nested type name at line %u\n",
                   ctx->lex->line);
           return false;
@@ -2645,19 +2689,39 @@ bool parse_step(ParseCtx *ctx) {
       while (ctx->curr.type != TOKEN_EOF &&
              !(ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')')) {
         if (!is_type(ctx)) {
-          fprintf(stderr, "Expected type in method parameters at line %u\n",
+          fprintf(stderr, "Expected type in function parameters at line %u\n",
                   ctx->lex->line);
           return false;
         }
         DataType p_type = parse_type(ctx);
-        Token p_name = ctx->curr;
-        if (ctx->curr.type != TOKEN_IDENTIF && strncmp(p_name.start, "self", 4) != 0) {
-          fprintf(stderr,
-                  "Expected identifier after type in params at line %u\n",
+        Token p_name;
+
+        if (p_type.is_self) {
+          if (ctx->curr.type == TOKEN_IDENTIF) {
+            p_name = ctx->curr;
+            adv(ctx);
+          } else {
+            p_name.start = "self";
+            p_name.len = 4;
+            p_name.type = TOKEN_IDENTIF;
+          }
+        } else {
+          if (ctx->curr.type != TOKEN_IDENTIF) {
+            fprintf(stderr,
+                    "Expected identifier after type in params at line %u\n",
+                    ctx->lex->line);
+            return false;
+          }
+          p_name = ctx->curr;
+          adv(ctx);
+        }
+
+        if (p_type.is_async || p_type.is_inline) {
+          fprintf(stderr, "Error: Invalid modifier on parameter at line %u\n",
                   ctx->lex->line);
           return false;
         }
-        adv(ctx);
+
         AstNode *pnode = new_node(ctx->arena, AST_PARAM);
         pnode->as.fn_param.type = p_type;
         pnode->as.fn_param.id = p_name;
@@ -2725,6 +2789,7 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
       adv(ctx);
+      ctx->ag_depth--;
       pop_node(ctx);
       break;
     }
@@ -2750,9 +2815,10 @@ bool parse_step(ParseCtx *ctx) {
           nested_type->as.enum_def.enumn = ctx->curr;
           adv(ctx);
         }
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{')
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-        else {
+          ctx->ag_depth++;
+        } else {
           fprintf(stderr, "Expected '{' after nested type name at line %u\n",
                   ctx->lex->line);
           return false;
@@ -3050,6 +3116,7 @@ void try_compile(const char *path) {
   pctx.curr = next_token(&lex);
   pctx.state_cap = 64;
   pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
+	pctx.ag_depth = 0;
 
   AstNode *root = new_node(pctx.arena, AST_PROGRAM);
   push_node(&pctx, root);

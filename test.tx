@@ -37,11 +37,36 @@ struct Xexor {
 	void setThing(*mut self) {
 		self.no = true;
 	}
+	void setNo(self this, bool val) {
+		this.no = val;
+	}
+	bool getNo(&self) {
+		ret self.no;
+	}
+	void toggle(&mut self) {
+		self.no = !self.no;
+	}
+	void reset(mut self) {
+		self.no = false;
+		self.yes = "";
+	}
+	self clone() {
+		ret self(self.no, self.yes);
+	}
 }
 
 union Testor {
 	i32 faah;
 	u8 grug;
+	void setFaah(mut self, i32 val) {
+		self.faah = val;
+	}
+	i32 getFaah(&self) {
+		ret self.faah;
+	}
+	void clear(*mut self) {
+		self.faah = 0;
+	}
 }
 
 async inline i32 get_a(bool x) {
@@ -54,7 +79,6 @@ async inline i32 get_a(bool x) {
 	};
 }
 
-// The main function
 u8 main(u32 argc, str[] argv) {
 	i32 va = get_a(false);
 	i32 b = get_a(true) + 1;
