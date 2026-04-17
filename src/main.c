@@ -89,7 +89,37 @@ void map_init(HashMap *map, Arena *arena, size_t capacity) {
   memset(map->buckets, 0, sizeof(HashEntry *) * capacity);
 }
 
+void map_resize(HashMap *map) {
+  size_t new_capacity = map->capacity * 2;
+  HashEntry **new_buckets =
+      arena_alloc(map->arena, sizeof(HashEntry *) * new_capacity);
+  memset(new_buckets, 0, sizeof(HashEntry *) * new_capacity);
+
+  // Rehash existing entries
+  for (size_t i = 0; i < map->capacity; i++) {
+    HashEntry *entry = map->buckets[i];
+    while (entry) {
+      HashEntry *next = entry->next;
+
+      uint32_t hash = hash_string(entry->key, entry->key_len);
+      size_t index = hash % new_capacity;
+
+      entry->next = new_buckets[index];
+      new_buckets[index] = entry;
+
+      entry = next;
+    }
+  }
+
+  map->buckets = new_buckets;
+  map->capacity = new_capacity;
+}
+
 void map_set(HashMap *map, const char *key, size_t key_len, void *value) {
+	// Resize if map exceeds 75% of capacity
+  if (map->count >= (map->capacity * 3) / 4) {
+    map_resize(map);
+  }
   uint32_t hash = hash_string(key, key_len);
   size_t index = hash % map->capacity;
 
@@ -3345,6 +3375,21 @@ bool parse(ParseCtx *ctx) {
   }
 
   return ctx->err_count == 0;
+}
+
+typedef struct {
+	Arena *arena;
+	HashMap mod_cache;
+	HashMap global_symbols;
+
+	const char *std_lib_env_path; // In case the user specifies a dir to go through for libraries in addition to the default one
+} SemCtx;
+
+void sem_init(SemCtx *ctx, Arena *arena) {
+	ctx->arena = arena;
+	map_init(&ctx->mod_cache, arena, 128);
+	map_init(&ctx->global_symbols, arena, 1024);
+	ctx->std_lib_env_path = getenv("TX_LIB_SEARCH_PATH");
 }
 
 void try_compile(const char *path) {
