@@ -58,6 +58,74 @@ void arena_free_all(Arena *arena) {
   arena->current = NULL;
 }
 
+uint32_t hash_string(const char *key, size_t len) {
+  uint32_t hash = 2166136261u;
+  for (size_t i = 0; i < len; i++) {
+    hash ^= (uint8_t)key[i];
+    hash *= 16777619;
+  }
+  return hash;
+}
+
+typedef struct HashEntry {
+  const char *key;
+  size_t key_len;
+  void *value;
+  struct HashEntry *next;
+} HashEntry;
+
+typedef struct {
+  HashEntry **buckets;
+  size_t capacity;
+  size_t count;
+  Arena *arena;
+} HashMap;
+
+void map_init(HashMap *map, Arena *arena, size_t capacity) {
+  map->arena = arena;
+  map->capacity = capacity;
+  map->count = 0;
+  map->buckets = arena_alloc(arena, sizeof(HashEntry *) * capacity);
+  memset(map->buckets, 0, sizeof(HashEntry *) * capacity);
+}
+
+void map_set(HashMap *map, const char *key, size_t key_len, void *value) {
+  uint32_t hash = hash_string(key, key_len);
+  size_t index = hash % map->capacity;
+
+  HashEntry *entry = map->buckets[index];
+  while (entry) {
+    if (entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
+      entry->value = value;
+      return;
+    }
+    entry = entry->next;
+  }
+
+  HashEntry *new_entry = arena_alloc(map->arena, sizeof(HashEntry));
+  new_entry->key = key;
+  new_entry->key_len = key_len;
+  new_entry->value = value;
+
+  new_entry->next = map->buckets[index];
+  map->buckets[index] = new_entry;
+  map->count++;
+}
+
+void *map_get(HashMap *map, const char *key, size_t key_len) {
+  uint32_t hash = hash_string(key, key_len);
+  size_t index = hash % map->capacity;
+
+  HashEntry *entry = map->buckets[index];
+  while (entry) {
+    if (entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
+      return entry->value;
+    }
+    entry = entry->next;
+  }
+  return NULL; // Not found
+}
+
 #define SIZES(X) X(8) X(16) X(32) X(64) X(128) X(size)
 
 #define AS_UNSIGNED(n) "u" #n,
@@ -90,6 +158,11 @@ typedef struct {
   char *curr;
   unsigned int line;
   unsigned int col;
+
+  HashMap kw_map;
+  HashMap op_map;
+  HashMap comp_map;
+  HashMap type_kw_map;
 } LexCtx;
 
 struct AstNode;
@@ -102,7 +175,7 @@ typedef struct {
   bool is_threadlocal;
   bool is_inline;
   bool is_extern;
-	bool is_self;
+  bool is_self;
   long int ptr_depth; // 2 for **type etc
   bool is_reference;  // true with &type
   Token name;
@@ -144,7 +217,7 @@ typedef enum {
   AST_NULL_LIT,
   AST_BREAK,
   AST_CONTINUE,
-  AST_PROGRAM,  // The root node
+  AST_PROGRAM, // The root node
 } ASTN_TYPE;
 
 typedef struct AstNode {
@@ -328,7 +401,7 @@ typedef enum {
   STATE_CASE_EXPR_DONE,
   STATE_CASE_BODY_DONE,
   STATE_SWITCH_DONE,
-	STATE_IF_ELSE_DONE,
+  STATE_IF_ELSE_DONE,
 } ParseState;
 
 typedef struct {
@@ -356,10 +429,10 @@ typedef struct {
   size_t op_cap;
 
   bool expect_operand;
-	unsigned long int ag_depth;
+  unsigned long int ag_depth;
 
-	unsigned int err_count;
-	bool panic_mode;
+  unsigned int err_count;
+  bool panic_mode;
 } ParseCtx;
 
 void report_error(ParseCtx *ctx, const char *message) {
@@ -369,7 +442,7 @@ void report_error(ParseCtx *ctx, const char *message) {
   fprintf(stderr, "Error at line %u, col %u: %s\n", ctx->lex->line,
           ctx->lex->col, message);
   ctx->err_count++;
-	ctx->panic_mode = true;
+  ctx->panic_mode = true;
 }
 
 void push_state(ParseCtx *ctx, ParseState state) {
@@ -495,7 +568,7 @@ void apply_op(ParseCtx *ctx) {
       } else {
         push_node(ctx, m_node);
       }
-			return;
+      return;
     }
     AstNode *binop = new_node(ctx->arena, AST_BINOP);
     binop->as.binop.op = info.op;
@@ -580,7 +653,7 @@ static const char *kwlist[] = {
     "bool",
     "str", // Technically should be parsed as char[] but oh well
     "void",
-		"null",
+    "null",
     "char",
     "auto",
     "any",
@@ -601,37 +674,31 @@ static const char *kwlist[] = {
     "case",
     "default",
     "extern",
-		"use",
-		"break",
-		"continue",
+    "use",
+    "break",
+    "continue",
 };
 static const size_t kwlistlen = sizeof(kwlist) / sizeof(kwlist[0]);
 
-static const char *oplist[] = {
-    "^", "&",  "|",  "!",  "<<", ">>", "+",  "-",  "/",  "*",
-    "%", "+=", "-=", "/=", "*=", "%=", "^=", "<<=", ">>=", "++", "--", "&&", "||", "."
-};
+static const char *oplist[] = {"^",  "&",   "|",   "!",  "<<", ">>", "+",  "-",
+                               "/",  "*",   "%",   "+=", "-=", "/=", "*=", "%=",
+                               "^=", "<<=", ">>=", "++", "--", "&&", "||", "."};
 static const size_t oplistlen = sizeof(oplist) / sizeof(oplist[0]);
 
 static const char *complist[] = {"==", "!=", "<=", ">=", "<", ">"};
 static const size_t complistlen = sizeof(complist) / sizeof(complist[0]);
 
-static inline bool is_kw(char *start, unsigned int len) {
-  for (unsigned int i = 0; i < kwlistlen; i++) {
-    if (strlen(kwlist[i]) == len && strncmp(start, kwlist[i], len) == 0) {
-      return true;
-    }
-  }
-  return false;
+static inline bool is_kw(LexCtx *ctx, const char *start, unsigned int len) {
+  return map_get(&ctx->kw_map, start, len) != NULL;
 }
 
-static inline bool is_op(char *start, unsigned int len) {
-  for (unsigned int i = 0; i < oplistlen; i++) {
-    if (strlen(oplist[i]) == len && strncmp(start, oplist[i], len) == 0) {
-      return true;
-    }
-  }
-  return false;
+static inline bool is_op(LexCtx *ctx, const char *start, unsigned int len) {
+  return map_get(&ctx->op_map, start, len) != NULL;
+}
+
+static inline bool is_compare(LexCtx *ctx, const char *start,
+                              unsigned int len) {
+  return map_get(&ctx->comp_map, start, len) != NULL;
 }
 
 static inline bool is_punc(char c) {
@@ -696,15 +763,6 @@ bool is_lit(const char *start, unsigned int len) {
   return is_numeric_slice(start, len);
 }
 
-static inline bool is_compare(char *start, unsigned int len) {
-  for (unsigned int i = 0; i < complistlen; i++) {
-    if (strlen(complist[i]) == len && strncmp(start, complist[i], len) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
 void skip_irrelevant(LexCtx *ctx) {
   while (*ctx->curr != '\0') {
     if (isspace(*ctx->curr)) {
@@ -748,7 +806,7 @@ Token next_token(LexCtx *ctx) {
     if ((len == 4 && strncmp(ctx->start, "true", 4) == 0) ||
         (len == 5 && strncmp(ctx->start, "false", 5) == 0)) {
       type = TOKEN_BOOL_LIT;
-    } else if (is_kw(ctx->start, len)) {
+    } else if (is_kw(ctx, ctx->start, len)) {
       type = TOKEN_KW;
     } else {
       type = TOKEN_IDENTIF;
@@ -838,21 +896,21 @@ Token next_token(LexCtx *ctx) {
 
   // Operators and Punctuation
   else {
-    if (is_compare(ctx->curr, 3) || is_op(ctx->curr, 3)) {
-      type = is_compare(ctx->curr, 3) ? TOKEN_COMPARE : TOKEN_OP;
+    if (is_compare(ctx, ctx->curr, 3) || is_op(ctx, ctx->curr, 3)) {
+      type = is_compare(ctx, ctx->curr, 3) ? TOKEN_COMPARE : TOKEN_OP;
       len = 3;
-    } else if (is_compare(ctx->curr, 2) || is_op(ctx->curr, 2)) {
-      type = is_compare(ctx->curr, 2) ? TOKEN_COMPARE : TOKEN_OP;
+    } else if (is_compare(ctx, ctx->curr, 2) || is_op(ctx, ctx->curr, 2)) {
+      type = is_compare(ctx, ctx->curr, 2) ? TOKEN_COMPARE : TOKEN_OP;
       len = 2;
     } else if (*ctx->curr == '=') {
       type = TOKEN_ASSIGN;
       len = 1;
-    } else if (is_compare(ctx->curr, 1) || is_op(ctx->curr, 1) ||
+    } else if (is_compare(ctx, ctx->curr, 1) || is_op(ctx, ctx->curr, 1) ||
                is_punc(*ctx->curr)) {
       len = 1;
-      if (is_compare(ctx->curr, 1))
+      if (is_compare(ctx, ctx->curr, 1))
         type = TOKEN_COMPARE;
-      else if (is_op(ctx->curr, 1))
+      else if (is_op(ctx, ctx->curr, 1))
         type = TOKEN_OP;
       else if (is_punc(*ctx->curr))
         type = TOKEN_PUNC;
@@ -894,7 +952,7 @@ void sync(ParseCtx *ctx) {
   while (ctx->curr.type != TOKEN_EOF) {
     if (ctx->prev.type == TOKEN_PUNC && *ctx->prev.start == ';') {
       ctx->panic_mode = false;
-			adv(ctx);
+      adv(ctx);
       return;
     }
 
@@ -935,7 +993,7 @@ void recover_state(ParseCtx *ctx, ParseState current_state) {
 
   ctx->op_count = 0;
 
-	// Pop expressions until in safe area
+  // Pop expressions until in safe area
   while (ctx->node_count > 0) {
     ASTN_TYPE t = ctx->node_stack[ctx->node_count - 1]->type;
     if (t == AST_PROGRAM || t == AST_BLOCK || t == AST_EXTERN ||
@@ -944,37 +1002,54 @@ void recover_state(ParseCtx *ctx, ParseState current_state) {
     }
     ctx->node_count--;
   }
-	ctx->panic_mode = false;
+  ctx->panic_mode = false;
 }
 
-bool is_builtin_type_kw(Token t) {
-  if (t.type != TOKEN_KW)
-    return false;
-	static const char *typelist[] = {
+static const char *typelist[] = {
     SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT) "mut",
     "bool",
     "str", // Technically should be parsed as char[] but oh well
     "void",
-		"null",
+    "null",
     "char",
     "auto",
     "any",
-	};
-	static const size_t typelistlen = sizeof(typelist) / sizeof(typelist[0]);
-  for (unsigned int i = 0; i < typelistlen; i++) {
-    if (strlen(typelist[i]) == t.len && strncmp(t.start, typelist[i], t.len) == 0) {
-      return true;
-    }
-  }
-  return false;
+};
+static const size_t typelistlen = sizeof(typelist) / sizeof(typelist[0]);
+
+bool is_builtin_type_kw(ParseCtx *ctx, Token t) {
+  if (t.type != TOKEN_KW)
+    return false;
+  return map_get(&ctx->lex->type_kw_map, t.start, t.len) != NULL;
+}
+
+void init_lex_maps(LexCtx *ctx, Arena *arena) {
+  // Capacities padded to powers of 2 for minimal collisions
+  map_init(&ctx->kw_map, arena, 64);
+  map_init(&ctx->op_map, arena, 64);
+  map_init(&ctx->comp_map, arena, 16);
+  map_init(&ctx->type_kw_map, arena, 64);
+
+  for (size_t i = 0; i < kwlistlen; i++)
+    map_set(&ctx->kw_map, kwlist[i], strlen(kwlist[i]), (void *)1);
+
+  for (size_t i = 0; i < oplistlen; i++)
+    map_set(&ctx->op_map, oplist[i], strlen(oplist[i]), (void *)1);
+
+  for (size_t i = 0; i < complistlen; i++)
+    map_set(&ctx->comp_map, complist[i], strlen(complist[i]), (void *)1);
+
+  for (size_t i = 0; i < typelistlen; i++)
+    map_set(&ctx->type_kw_map, typelist[i], strlen(typelist[i]), (void *)1);
 }
 
 bool is_type(ParseCtx *ctx) {
-	LexCtx tmp_lex = *ctx->lex;
+  LexCtx tmp_lex = *ctx->lex;
   Token t = ctx->curr;
 
   // Skip over any pointers or references
-  while (t.type == TOKEN_OP && t.len == 1 && (*t.start == '*' || *t.start == '&')) {
+  while (t.type == TOKEN_OP && t.len == 1 &&
+         (*t.start == '*' || *t.start == '&')) {
     t = next_token(&tmp_lex);
   }
 
@@ -987,7 +1062,7 @@ bool is_type(ParseCtx *ctx) {
     }
   }
 
-  if (is_builtin_type_kw(t))
+  if (is_builtin_type_kw(ctx, t))
     return true;
 
   if (t.type == TOKEN_IDENTIF && t.len == 4 &&
@@ -996,7 +1071,8 @@ bool is_type(ParseCtx *ctx) {
   }
 
   // Might be a custom type
-  if (t.type == TOKEN_IDENTIF && next_token(&tmp_lex).type == TOKEN_IDENTIF && !is_kw(t.start, t.len))
+  if (t.type == TOKEN_IDENTIF && next_token(&tmp_lex).type == TOKEN_IDENTIF &&
+      !is_kw(ctx->lex, t.start, t.len))
     return true;
 
   return false;
@@ -1133,7 +1209,8 @@ DataType parse_type(ParseCtx *ctx) {
     type.is_self = true;
     type.name = ctx->curr;
     adv(ctx);
-  } else if (ctx->curr.type == TOKEN_IDENTIF || is_builtin_type_kw(ctx->curr)) {
+  } else if (ctx->curr.type == TOKEN_IDENTIF ||
+             is_builtin_type_kw(ctx, ctx->curr)) {
     type.name = ctx->curr;
     if (ctx->curr.type == TOKEN_IDENTIF)
       type.is_custom = true;
@@ -1209,7 +1286,7 @@ void print_type_info(DataType type) {
     for (int i = 0; i < count; i++) {
       putchar(symbol);
     }
-		putchar(' ');
+    putchar(' ');
   }
 
   if (type.is_static)
@@ -1599,8 +1676,8 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-					ctx->ag_depth++;
-				} else {
+          ctx->ag_depth++;
+        } else {
           report_error(ctx, "Expected '{' after struct name");
           adv(ctx);
           sync(ctx);
@@ -1619,8 +1696,8 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-					ctx->ag_depth++;
-				} else {
+          ctx->ag_depth++;
+        } else {
           report_error(ctx, "Expected '{' after union name");
           adv(ctx);
           sync(ctx);
@@ -1639,8 +1716,8 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
-					ctx->ag_depth++;
-				} else {
+          ctx->ag_depth++;
+        } else {
           report_error(ctx, "Expected '{' after enum");
           adv(ctx);
           sync(ctx);
@@ -1722,8 +1799,11 @@ bool parse_step(ParseCtx *ctx) {
           Token p_name;
 
           if (p_type.is_self) {
-						fprintf(stderr, "Using self is not allowed when not within a struct union or enum on line %u", ctx->lex->line);
-						return false;
+            fprintf(stderr,
+                    "Using self is not allowed when not within a struct union "
+                    "or enum on line %u",
+                    ctx->lex->line);
+            return false;
           } else {
             if (ctx->curr.type != TOKEN_IDENTIF) {
               fprintf(stderr,
@@ -2426,7 +2506,7 @@ bool parse_step(ParseCtx *ctx) {
   case STATE_FOR_INIT_START: {
     bool is_decl = false;
 
-    if (is_builtin_type_kw(ctx->curr) ||
+    if (is_builtin_type_kw(ctx, ctx->curr) ||
         (ctx->curr.type == TOKEN_KW &&
          (strncmp(ctx->curr.start, "mut", 3) == 0 ||
           strncmp(ctx->curr.start, "static", 6) == 0))) {
@@ -3268,23 +3348,26 @@ void try_compile(const char *path) {
   lex.col = 1;
 
   Arena arena = {0};
+
+  init_lex_maps(&lex, &arena);
+
   ParseCtx pctx = {0};
   pctx.lex = &lex;
   pctx.arena = &arena;
   pctx.curr = next_token(&lex);
   pctx.state_cap = 64;
   pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
-	pctx.ag_depth = 0;
+  pctx.ag_depth = 0;
 
   AstNode *root = new_node(pctx.arena, AST_PROGRAM);
   push_node(&pctx, root);
 
   if (!parse(&pctx)) {
-		if (pctx.err_count == 1) {
-			fprintf(stderr, "An error occurred while parsing");
-		} else {
-			fprintf(stderr, "%ul errors occured while parsing", pctx.err_count);
-		}
+    if (pctx.err_count == 1) {
+      fprintf(stderr, "An error occurred while parsing");
+    } else {
+      fprintf(stderr, "%ul errors occured while parsing", pctx.err_count);
+    }
     arena_free_all(&arena);
     free((void *)file);
     exit(127);
