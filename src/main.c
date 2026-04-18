@@ -1340,7 +1340,18 @@ void print_type_info(DataType type) {
   printf("%.*s", type.name.len, type.name.start);
 
   for (unsigned int i = 0; i < type.array_dimens; i++) {
-    printf("[]");
+    if (type.dim_sizes != NULL && type.dim_sizes[i] != NULL) {
+      AstNode *dim_node = type.dim_sizes[i];
+
+      if (dim_node->type == AST_NUM_LIT) {
+        printf("[%.*s]", dim_node->as.num_lit.val.len,
+               dim_node->as.num_lit.val.start);
+      } else {
+        printf("[expr]");
+      }
+    } else {
+      printf("[]");
+    }
   }
 }
 

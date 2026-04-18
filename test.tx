@@ -94,6 +94,7 @@ u8 main(u32 argc, str[] argv) {
 	}
 
 	u8[3] rarray =  [ 3, 5, { 5 } ];
+	i8[2][1] stupid = [ [2], [2] ];
 
 	while (b < 100) {
 		b *= 3;
