@@ -1,4 +1,4 @@
-use "test.tx";
+use "test.tx" as t;
 
 // ==========================================
 // 1. Extern Blocks & Global Declarations

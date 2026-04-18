@@ -379,6 +379,7 @@ typedef struct AstNode {
     } extern_block;
     struct {
       Token path;
+      Token alias; // .len == 0 if no alias
     } use_stmt;
     struct {
       Token val;
@@ -1657,8 +1658,13 @@ void print_ast(AstNode *root) {
       break;
 
     case AST_USE:
-      printf("USE: %.*s\n", node->as.use_stmt.path.len,
+      printf("USE: %.*s", node->as.use_stmt.path.len,
              node->as.use_stmt.path.start);
+      if (node->as.use_stmt.alias.len > 0) {
+        printf(" as %.*s", node->as.use_stmt.alias.len,
+               node->as.use_stmt.alias.start);
+      }
+      printf("\n");
       break;
 
     case AST_NULL_LIT:
@@ -1783,10 +1789,32 @@ bool parse_step(ParseCtx *ctx) {
                  strncmp(ctx->curr.start, "use", 3) == 0) {
         adv(ctx);
         if (ctx->curr.type == TOKEN_STR_LIT) {
-          AstNode *use_node = new_node(ctx->arena, AST_USE);
-          use_node->as.use_stmt.path = ctx->curr;
-          append_stmt(target_list, use_node);
+          Token path_token = ctx->curr;
           adv(ctx);
+
+          Token alias_token = {0};
+
+          if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 2 &&
+              strncmp(ctx->curr.start, "as", 2) == 0) {
+            adv(ctx);
+            if (ctx->curr.type == TOKEN_IDENTIF) {
+              alias_token = ctx->curr;
+              adv(ctx);
+            } else {
+              report_error(ctx,
+                           "Expected identifier after 'as' in use statement");
+              adv(ctx);
+              sync(ctx);
+              recover_state(ctx, current_state);
+              break;
+            }
+          }
+
+          AstNode *use_node = new_node(ctx->arena, AST_USE);
+          use_node->as.use_stmt.path = path_token;
+          use_node->as.use_stmt.alias = alias_token;
+          append_stmt(target_list, use_node);
+
           if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';')
             adv(ctx);
           else {
@@ -3504,32 +3532,33 @@ void sem_deinit(SemCtx *ctx) {
 }
 
 void structify_ast(Arena *arena, AstNode *root, char *name) {
-    if (root == NULL || root->type != AST_PROGRAM) return;
+  if (root == NULL || root->type != AST_PROGRAM)
+    return;
 
-    AstNode *mod = new_node(arena, AST_STRUCT);
-    mod->as.struct_def.structn = (Token){
-        .type = TOKEN_IDENTIF,
-        .start = name,
-        .len = strlen(name),
-    };
+  AstNode *mod = new_node(arena, AST_STRUCT);
+  mod->as.struct_def.structn = (Token){
+      .type = TOKEN_IDENTIF,
+      .start = name,
+      .len = strlen(name),
+  };
 
-		// All declarations with root as parent should go in struct
-    AstNode *first = root->as.block.first_stmt;
-    if (first != NULL) {
-        mod->as.struct_def.contents = first;
-    }
+  // All declarations with root as parent should go in struct
+  AstNode *first = root->as.block.first_stmt;
+  if (first != NULL) {
+    mod->as.struct_def.contents = first;
+  }
 
-    // Replace roots first_stmt with the new struct
-    root->as.block.first_stmt = mod;
-    mod->next = NULL; // The struct should be the only top level
+  // Replace roots first_stmt with the new struct
+  root->as.block.first_stmt = mod;
+  mod->next = NULL; // The struct should be the only top level
 }
 
 typedef struct {
   AstNode **link;
 } AstLinkItem;
 
-void link_modules_iterative(Arena *arena, const char *entry_file,
-                            AstNode *root_ast, HashMap *visited_files) {
+void link_modules(Arena *arena, const char *entry_file, AstNode *root_ast,
+                  HashMap *visited_files) {
   size_t stack_cap = 1024;
   AstLinkItem *stack = malloc(sizeof(AstLinkItem) * stack_cap);
   size_t top = 0;
@@ -3558,6 +3587,7 @@ void link_modules_iterative(Arena *arena, const char *entry_file,
     if (curr->type == AST_USE) {
       size_t path_len = curr->as.use_stmt.path.len;
       const char *raw_path = curr->as.use_stmt.path.start;
+      Token alias = curr->as.use_stmt.alias;
 
       if (path_len > 2) {
         char *clean_rel = arena_alloc(arena, path_len - 1);
@@ -3574,7 +3604,15 @@ void link_modules_iterative(Arena *arena, const char *entry_file,
             if (imported_ast && imported_ast->type == AST_PROGRAM) {
               map_set(&linked_mods, abs_path, strlen(abs_path), (void *)1);
 
-              char *mod_name = (char *)extract_mod_name(arena, abs_path);
+              char *mod_name;
+              if (alias.len > 0) {
+                mod_name = arena_alloc(arena, alias.len + 1);
+                strncpy(mod_name, alias.start, alias.len);
+                mod_name[alias.len] = '\0';
+              } else {
+                mod_name = (char *)extract_mod_name(arena, abs_path);
+              }
+
               structify_ast(arena, imported_ast, mod_name);
 
               AstNode *struct_node = imported_ast->as.block.first_stmt;
@@ -3700,7 +3738,7 @@ void compile_project(const char *entry_file) {
       map_get(&state.visited_files, abs_entry, strlen(abs_entry));
 
   if (root_ast) {
-    link_modules_iterative(&arena, entry_file, root_ast, &state.visited_files);
+    link_modules(&arena, entry_file, root_ast, &state.visited_files);
 
     printf("\n--- Final Mega-AST ---\n");
     print_ast(root_ast);
