@@ -3492,6 +3492,131 @@ void sem_deinit(SemCtx *ctx) {
   map_free_buckets(&ctx->global_symbols);
 }
 
+void structify_ast(Arena *arena, AstNode *root, char *name) {
+    if (root == NULL || root->type != AST_PROGRAM) return;
+
+    AstNode *mod = new_node(arena, AST_STRUCT);
+    mod->as.struct_def.structn = (Token){
+        .type = TOKEN_IDENTIF,
+        .start = name,
+        .len = strlen(name),
+    };
+
+		// All declarations with root as parent should go in struct
+    AstNode *first = root->as.block.first_stmt;
+    if (first != NULL) {
+        mod->as.struct_def.contents = first;
+    }
+
+    // Replace roots first_stmt with the new struct
+    root->as.block.first_stmt = mod;
+    mod->next = NULL; // The struct should be the only top level
+}
+
+typedef struct {
+  AstNode **link;
+} AstLinkItem;
+
+void link_modules_iterative(Arena *arena, const char *entry_file,
+                            AstNode *root_ast, HashMap *visited_files) {
+  size_t stack_cap = 1024;
+  AstLinkItem *stack = malloc(sizeof(AstLinkItem) * stack_cap);
+  size_t top = 0;
+
+  HashMap linked_mods;
+  map_init(&linked_mods, arena, 128);
+
+  // Mark the entry file as linked so dependencies dont re-import root
+  const char *abs_entry = resolve_alloc(arena, entry_file);
+  if (abs_entry) {
+    map_set(&linked_mods, abs_entry, strlen(abs_entry), (void *)1);
+  }
+
+  if (root_ast && root_ast->type == AST_PROGRAM) {
+    stack[top++] = (AstLinkItem){&root_ast->as.block.first_stmt};
+  }
+
+  while (top > 0) {
+    AstLinkItem item = stack[--top];
+    AstNode **curr_ptr = item.link;
+    AstNode *curr = *curr_ptr;
+
+    if (!curr)
+      continue;
+
+    if (curr->type == AST_USE) {
+      size_t path_len = curr->as.use_stmt.path.len;
+      const char *raw_path = curr->as.use_stmt.path.start;
+
+      if (path_len > 2) {
+        char *clean_rel = arena_alloc(arena, path_len - 1);
+        strncpy(clean_rel, raw_path + 1, path_len - 2);
+        clean_rel[path_len - 2] = '\0';
+
+        const char *abs_path = resolve_alloc(arena, clean_rel);
+
+        if (abs_path) {
+          if (map_get(&linked_mods, abs_path, strlen(abs_path)) == NULL) {
+            AstNode *imported_ast =
+                map_get(visited_files, abs_path, strlen(abs_path));
+
+            if (imported_ast && imported_ast->type == AST_PROGRAM) {
+              map_set(&linked_mods, abs_path, strlen(abs_path), (void *)1);
+
+              char *mod_name = (char *)extract_mod_name(arena, abs_path);
+              structify_ast(arena, imported_ast, mod_name);
+
+              AstNode *struct_node = imported_ast->as.block.first_stmt;
+
+              // Wire the new struct into the linked list where AST_USE used to
+              // be
+              struct_node->next = curr->next;
+              *curr_ptr = struct_node;
+              curr = struct_node;
+            } else {
+              *curr_ptr = curr->next; // Missing AST
+              continue;
+            }
+          } else {
+            *curr_ptr = curr->next; // Already linked (circular dep)
+            continue;
+          }
+        } else {
+          *curr_ptr = curr->next; // Bad path
+          continue;
+        }
+      } else {
+        *curr_ptr = curr->next; // Empty string
+        continue;
+      }
+    }
+
+    // Push curr->next to continue walking down the current linked list
+    if (curr->next) {
+      if (top >= stack_cap - 2) {
+        stack_cap *= 2;
+        stack = realloc(stack, sizeof(AstLinkItem) * stack_cap);
+      }
+      stack[top++] = (AstLinkItem){&curr->next};
+    }
+
+    // Push contents of block-like nodes so we can traverse down into their
+    // scopes
+    if (curr->type == AST_BLOCK && curr->as.block.first_stmt) {
+      stack[top++] = (AstLinkItem){&curr->as.block.first_stmt};
+    } else if (curr->type == AST_EXTERN && curr->as.extern_block.contents) {
+      stack[top++] = (AstLinkItem){&curr->as.extern_block.contents};
+    } else if (curr->type == AST_STRUCT && curr->as.struct_def.contents) {
+      stack[top++] = (AstLinkItem){&curr->as.struct_def.contents};
+    } else if (curr->type == AST_FUNC && curr->as.func_def.block) {
+      stack[top++] = (AstLinkItem){&curr->as.func_def.block};
+    }
+  }
+
+  map_free_buckets(&linked_mods);
+  free(stack);
+}
+
 void compile_project(const char *entry_file) {
   Arena arena = {0};
 
@@ -3558,6 +3683,17 @@ void compile_project(const char *entry_file) {
   }
 
   printf("AST Construction complete. All files mapped to SemCtx.\n");
+
+  const char *abs_entry = resolve_alloc(&arena, entry_file);
+  AstNode *root_ast =
+      map_get(&state.visited_files, abs_entry, strlen(abs_entry));
+
+  if (root_ast) {
+    link_modules_iterative(&arena, entry_file, root_ast, &state.visited_files);
+
+    printf("\n--- Final Mega-AST ---\n");
+    print_ast(root_ast);
+  }
 
   if (state.pending.paths) {
     free((void *)state.pending.paths);
