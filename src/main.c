@@ -85,22 +85,18 @@ void map_init(HashMap *map, Arena *arena, size_t capacity) {
   map->arena = arena;
   map->capacity = capacity;
   map->count = 0;
-  map->buckets = arena_alloc(arena, sizeof(HashEntry *) * capacity);
-  memset(map->buckets, 0, sizeof(HashEntry *) * capacity);
+  map->buckets = calloc(capacity, sizeof(HashEntry *));
 }
 
 void map_resize(HashMap *map) {
   size_t new_capacity = map->capacity * 2;
-  HashEntry **new_buckets =
-      arena_alloc(map->arena, sizeof(HashEntry *) * new_capacity);
-  memset(new_buckets, 0, sizeof(HashEntry *) * new_capacity);
+  HashEntry **new_buckets = calloc(new_capacity, sizeof(HashEntry *));
 
   // Rehash existing entries
   for (size_t i = 0; i < map->capacity; i++) {
     HashEntry *entry = map->buckets[i];
     while (entry) {
       HashEntry *next = entry->next;
-
       uint32_t hash = hash_string(entry->key, entry->key_len);
       size_t index = hash % new_capacity;
 
@@ -111,8 +107,18 @@ void map_resize(HashMap *map) {
     }
   }
 
+  // Free the old buckets array so no memory is leaked
+  free(map->buckets);
+
   map->buckets = new_buckets;
   map->capacity = new_capacity;
+}
+
+void map_free_buckets(HashMap *map) {
+  if (map->buckets) {
+    free(map->buckets);
+    map->buckets = NULL;
+  }
 }
 
 void map_set(HashMap *map, const char *key, size_t key_len, void *value) {
@@ -1764,8 +1770,7 @@ bool parse_step(ParseCtx *ctx) {
       } else if (ctx->curr.type == TOKEN_KW &&
                  strncmp(ctx->curr.start, "use", 3) == 0) {
         adv(ctx);
-        if (ctx->curr.type == TOKEN_STR_LIT ||
-            ctx->curr.type == TOKEN_IDENTIF) {
+        if (ctx->curr.type == TOKEN_STR_LIT) {
           AstNode *use_node = new_node(ctx->arena, AST_USE);
           use_node->as.use_stmt.path = ctx->curr;
           append_stmt(target_list, use_node);
@@ -1780,6 +1785,12 @@ bool parse_step(ParseCtx *ctx) {
             break;
           }
           push_state(ctx, current_state);
+          break;
+        } else {
+          report_error(ctx, "Expected string literal for module path");
+          adv(ctx);
+          sync(ctx);
+          recover_state(ctx, current_state);
           break;
         }
       }
@@ -3377,6 +3388,38 @@ bool parse(ParseCtx *ctx) {
   return ctx->err_count == 0;
 }
 
+AstNode *file_to_ast(Arena *arena, const char *path) {
+  const char *file = load_file(path);
+  if (!file)
+    return NULL;
+
+  LexCtx lex = {0};
+  lex.start = (char *)file;
+  lex.curr = (char *)file;
+  lex.line = 1;
+  lex.col = 1;
+  init_lex_maps(&lex, arena);
+
+  ParseCtx pctx = {0};
+  pctx.lex = &lex;
+  pctx.arena = arena;
+  pctx.curr = next_token(&lex);
+  pctx.state_cap = 64;
+  pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
+
+  AstNode *root = new_node(arena, AST_PROGRAM);
+  push_node(&pctx, root);
+
+  bool success = parse(&pctx);
+  free(pctx.state_stack);
+
+  if (!success) {
+		fprintf(stderr, "%s failed to compile", path);
+    return NULL;
+  }
+  return root;
+}
+
 typedef struct {
 	Arena *arena;
 	HashMap mod_cache;
@@ -3387,9 +3430,14 @@ typedef struct {
 
 void sem_init(SemCtx *ctx, Arena *arena) {
 	ctx->arena = arena;
-	map_init(&ctx->mod_cache, arena, 128);
-	map_init(&ctx->global_symbols, arena, 1024);
+	map_init(&ctx->mod_cache, arena, 1024);
+	map_init(&ctx->global_symbols, arena, 16384);
 	ctx->std_lib_env_path = getenv("TX_LIB_SEARCH_PATH");
+}
+
+void sem_deinit(SemCtx *ctx) {
+  map_free_buckets(&ctx->mod_cache);
+  map_free_buckets(&ctx->global_symbols);
 }
 
 void try_compile(const char *path) {
@@ -3435,6 +3483,10 @@ void try_compile(const char *path) {
   free(pctx.state_stack);
   free(pctx.node_stack);
   free(pctx.op_stack);
+  map_free_buckets(&lex.kw_map);
+  map_free_buckets(&lex.op_map);
+  map_free_buckets(&lex.comp_map);
+  map_free_buckets(&lex.type_kw_map);
   arena_free_all(&arena);
   free((void *)file);
   return;
