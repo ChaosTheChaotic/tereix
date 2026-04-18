@@ -3666,6 +3666,77 @@ void link_modules(Arena *arena, const char *entry_file, AstNode *root_ast,
   free(stack);
 }
 
+typedef enum {
+  SYM_FUNC,
+  SYM_ENUM,
+  SYM_STRUCT,
+  SYM_UNION,
+  SYM_VAR,
+} SymKind;
+
+typedef struct {
+  SymKind kind;
+  Token name;
+  AstNode *decl_node;
+} Sym;
+
+Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl) {
+  Sym *s = arena_alloc(arena, sizeof(Sym));
+  s->kind = kind;
+  s->name = name;
+  s->decl_node = decl;
+  return s;
+}
+
+void collect_global_symbols(SemCtx *ctx, AstNode *stmt) {
+  while (stmt) {
+    switch (stmt->type) {
+    case AST_FUNC: {
+      Token name = stmt->as.func_def.fn_name;
+      Sym *sym = new_sym(ctx->arena, SYM_FUNC, name, stmt);
+      map_set(&ctx->global_symbols, name.start, name.len, sym);
+      break;
+    }
+    case AST_VAR_DECL: {
+      Token name = stmt->as.var_decl.id;
+      Sym *sym = new_sym(ctx->arena, SYM_VAR, name, stmt);
+      map_set(&ctx->global_symbols, name.start, name.len, sym);
+      break;
+    }
+    case AST_STRUCT: {
+      Token name = stmt->as.struct_def.structn;
+      Sym *sym = new_sym(ctx->arena, SYM_STRUCT, name, stmt);
+      map_set(&ctx->global_symbols, name.start, name.len, sym);
+      break;
+    }
+    case AST_UNION: {
+      Token name = stmt->as.union_def.unionn;
+      Sym *sym = new_sym(ctx->arena, SYM_UNION, name, stmt);
+      map_set(&ctx->global_symbols, name.start, name.len, sym);
+      break;
+    }
+    case AST_ENUM: {
+      Token name = stmt->as.enum_def.enumn;
+      Sym *sym = new_sym(ctx->arena, SYM_ENUM, name, stmt);
+      map_set(&ctx->global_symbols, name.start, name.len, sym);
+      break;
+    }
+    case AST_EXTERN: {
+      // Step into extern blocks to grab the signatures inside
+      collect_global_symbols(ctx, stmt->as.extern_block.contents);
+      break;
+    }
+    default:
+      // Nothing else should be here
+      fprintf(stderr, "Illegal AST symbol detected: %d", stmt->type);
+      break;
+    }
+
+    // Move to the next sibling statement in the AST
+    stmt = stmt->next;
+  }
+}
+
 void compile_project(const char *entry_file) {
   Arena arena = {0};
 
@@ -3742,6 +3813,11 @@ void compile_project(const char *entry_file) {
 
     printf("\n--- Final Mega-AST ---\n");
     print_ast(root_ast);
+
+    printf("Collecting symbols\n");
+    collect_global_symbols(&sem, root_ast->as.block.first_stmt);
+    printf("Found %zu global symbols which have been collected\n",
+           sem.global_symbols.count);
   }
 
   if (state.pending.paths) {
