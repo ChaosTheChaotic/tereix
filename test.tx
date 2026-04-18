@@ -1,4 +1,4 @@
-use "file";
+use "testai.tx";
 
 threadlocal i32 a = 0 - 1;
 extern threadlocal i32 ea = 0 - 1;
@@ -90,6 +90,7 @@ u8 main(u32 argc, str[] argv) {
 	for (mut u32 i = 0; i < argc; i++) {
 		va++;
 		b += i;
+		testai.add(1, 1);
 	}
 
 	u8[3] rarray =  [ 3, 5, { 5 } ];

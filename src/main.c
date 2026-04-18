@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -122,7 +123,7 @@ void map_free_buckets(HashMap *map) {
 }
 
 void map_set(HashMap *map, const char *key, size_t key_len, void *value) {
-	// Resize if map exceeds 75% of capacity
+  // Resize if map exceeds 75% of capacity
   if (map->count >= (map->capacity * 3) / 4) {
     map_resize(map);
   }
@@ -3388,6 +3389,56 @@ bool parse(ParseCtx *ctx) {
   return ctx->err_count == 0;
 }
 
+typedef struct {
+  const char **paths;
+  size_t count;
+  size_t capacity;
+} Worklist;
+
+void wl_push(Worklist *wl, const char *path) {
+  if (wl->count >= wl->capacity) {
+    wl->capacity = (wl->capacity == 0) ? 32 : wl->capacity * 2;
+    wl->paths = realloc((void *)wl->paths, sizeof(const char *) * wl->capacity);
+  }
+  wl->paths[wl->count++] = path;
+}
+
+const char *wl_pop(Worklist *wl) {
+  if (wl->count == 0)
+    return NULL;
+  return wl->paths[--wl->count];
+}
+
+const char *resolve_alloc(Arena *arena, const char *rel_path) {
+  char temp[PATH_MAX];
+  if (realpath(rel_path, temp) == NULL)
+    return NULL;
+  size_t len = strlen(temp) + 1;
+  char *perm_path = arena_alloc(arena, len);
+  memcpy(perm_path, temp, len);
+  return perm_path;
+}
+
+const char *extract_mod_name(Arena *arena, const char *abs_path) {
+  const char *base = strrchr(abs_path, '/');
+  base = base ? base + 1 : abs_path;
+
+  const char *ext = strrchr(base, '.');
+  size_t len = ext ? (size_t)(ext - base) : strlen(base);
+
+  char *mod_name = arena_alloc(arena, len + 1);
+  strncpy(mod_name, base, len);
+  mod_name[len] = '\0';
+
+  return mod_name;
+}
+
+typedef struct {
+  Arena *arena;
+  HashMap visited_files;
+  Worklist pending;
+} CompilerState;
+
 AstNode *file_to_ast(Arena *arena, const char *path) {
   const char *file = load_file(path);
   if (!file)
@@ -3414,25 +3465,26 @@ AstNode *file_to_ast(Arena *arena, const char *path) {
   free(pctx.state_stack);
 
   if (!success) {
-		fprintf(stderr, "%s failed to compile", path);
     return NULL;
   }
   return root;
 }
 
 typedef struct {
-	Arena *arena;
-	HashMap mod_cache;
-	HashMap global_symbols;
+  Arena *arena;
+  HashMap mod_cache;
+  HashMap global_symbols;
 
-	const char *std_lib_env_path; // In case the user specifies a dir to go through for libraries in addition to the default one
+  const char
+      *std_lib_env_path; // In case the user specifies a dir to go through for
+                         // libraries in addition to the default one
 } SemCtx;
 
 void sem_init(SemCtx *ctx, Arena *arena) {
-	ctx->arena = arena;
-	map_init(&ctx->mod_cache, arena, 1024);
-	map_init(&ctx->global_symbols, arena, 16384);
-	ctx->std_lib_env_path = getenv("TX_LIB_SEARCH_PATH");
+  ctx->arena = arena;
+  map_init(&ctx->mod_cache, arena, 1024);
+  map_init(&ctx->global_symbols, arena, 16384);
+  ctx->std_lib_env_path = getenv("TX_LIB_SEARCH_PATH");
 }
 
 void sem_deinit(SemCtx *ctx) {
@@ -3440,56 +3492,79 @@ void sem_deinit(SemCtx *ctx) {
   map_free_buckets(&ctx->global_symbols);
 }
 
-void try_compile(const char *path) {
-  const char *file = load_file(path);
-  if (!file) {
-    fprintf(stderr, "Failed to load file: %s", path);
-    exit(1);
-  }
-  LexCtx lex = {0};
-  lex.start = (char *)file;
-  lex.curr = (char *)file;
-  lex.line = 1;
-  lex.col = 1;
-
+void compile_project(const char *entry_file) {
   Arena arena = {0};
 
-  init_lex_maps(&lex, &arena);
+  CompilerState state = {0};
+  state.arena = &arena;
+  map_init(&state.visited_files, &arena, 128);
 
-  ParseCtx pctx = {0};
-  pctx.lex = &lex;
-  pctx.arena = &arena;
-  pctx.curr = next_token(&lex);
-  pctx.state_cap = 64;
-  pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
-  pctx.ag_depth = 0;
+  SemCtx sem = {0};
+  sem_init(&sem, &arena);
 
-  AstNode *root = new_node(pctx.arena, AST_PROGRAM);
-  push_node(&pctx, root);
+  wl_push(&state.pending, entry_file);
 
-  if (!parse(&pctx)) {
-    if (pctx.err_count == 1) {
-      fprintf(stderr, "An error occurred while parsing");
-    } else {
-      fprintf(stderr, "%ul errors occured while parsing", pctx.err_count);
+  const char *current_path;
+  while ((current_path = wl_pop(&state.pending)) != NULL) {
+
+    const char *abs_path = resolve_alloc(&arena, current_path);
+    if (!abs_path) {
+      fprintf(stderr, "Error: Could not resolve path: %s\n", current_path);
+      continue;
     }
-    arena_free_all(&arena);
-    free((void *)file);
-    exit(127);
+
+    // Skip files already present in map
+    if (map_get(&state.visited_files, abs_path, strlen(abs_path)) != NULL) {
+      continue;
+    }
+
+    // Mark visited files (helps to resolve circular deps)
+    map_set(&state.visited_files, abs_path, strlen(abs_path), (void *)1);
+
+    printf("Compiling %s\n", abs_path);
+
+    AstNode *ast = file_to_ast(&arena, abs_path);
+    if (!ast) {
+      fprintf(stderr, "Error: Failed to compile %s\n", abs_path);
+      exit(1);
+    }
+
+    // Update visited map with actual AST Root
+    map_set(&state.visited_files, abs_path, strlen(abs_path), ast);
+
+    // Get the mod name to be able to use file.method()
+    const char *mod_name = extract_mod_name(&arena, abs_path);
+    map_set(&sem.mod_cache, mod_name, strlen(mod_name), ast);
+
+    // Push deps to worklist
+    AstNode *stmt = ast->as.block.first_stmt;
+    while (stmt) {
+      if (stmt->type == AST_USE) {
+
+        // Strip quotes
+        size_t path_len = stmt->as.use_stmt.path.len;
+        const char *raw_path = stmt->as.use_stmt.path.start;
+
+        if (path_len > 2) {
+          char *clean_rel = arena_alloc(&arena, path_len - 1);
+          strncpy(clean_rel, raw_path + 1, path_len - 2);
+          clean_rel[path_len - 2] = '\0';
+
+          wl_push(&state.pending, clean_rel);
+        }
+      }
+      stmt = stmt->next;
+    }
   }
 
-  print_ast(root);
+  printf("AST Construction complete. All files mapped to SemCtx.\n");
 
-  free(pctx.state_stack);
-  free(pctx.node_stack);
-  free(pctx.op_stack);
-  map_free_buckets(&lex.kw_map);
-  map_free_buckets(&lex.op_map);
-  map_free_buckets(&lex.comp_map);
-  map_free_buckets(&lex.type_kw_map);
+  if (state.pending.paths) {
+    free((void *)state.pending.paths);
+  }
+  map_free_buckets(&state.visited_files);
+  sem_deinit(&sem);
   arena_free_all(&arena);
-  free((void *)file);
-  return;
 }
 
 int main(int argc, char **argv) {
@@ -3498,18 +3573,10 @@ int main(int argc, char **argv) {
     exit(1);
   }
 
-  bool found_file = false;
-  for (unsigned i = 1; i < (unsigned int)argc; i++) {
-    if (check_exists(argv[i])) {
-      found_file = true;
-      printf("Compiling %s\n", argv[i]);
-      try_compile(argv[i]);
-    }
-  }
-
-  if (!found_file) {
-    printf("No valid file found\n");
-    print_help();
+  if (check_exists(argv[1])) {
+    compile_project(argv[1]);
+  } else {
+    printf("Entry file does not exist: %s\n", argv[1]);
     return 1;
   }
 
