@@ -514,6 +514,8 @@ void push_node(ParseCtx *ctx, AstNode *node) {
     size_t new_cap = (ctx->node_cap == 0) ? 32 : ctx->node_cap * 2;
     AstNode **new_stack = realloc(ctx->node_stack, sizeof(AstNode *) * new_cap);
     if (!new_stack) {
+      fprintf(stderr,
+              "No new stack returned after realloc needed for pushing node");
       exit(1);
     }
     ctx->node_stack = new_stack;
@@ -534,8 +536,11 @@ void push_op(ParseCtx *ctx, Token op, bool is_unary, bool is_postfix) {
   if (ctx->op_count >= ctx->op_cap) {
     size_t new_cap = (ctx->op_cap == 0) ? 32 : ctx->op_cap * 2;
     OpInfo *new_stack = realloc(ctx->op_stack, sizeof(OpInfo) * new_cap);
-    if (!new_stack)
+    if (!new_stack) {
+      fprintf(stderr,
+              "No new stack returned after realloc needed for pushing op");
       exit(1);
+    }
     ctx->op_stack = new_stack;
     ctx->op_cap = new_cap;
   }
@@ -3512,7 +3517,6 @@ AstNode *file_to_ast(Arena *arena, const char *path) {
 typedef struct {
   Arena *arena;
   HashMap mod_cache;
-  HashMap global_symbols;
 
   const char
       *std_lib_env_path; // In case the user specifies a dir to go through for
@@ -3522,13 +3526,30 @@ typedef struct {
 void sem_init(SemCtx *ctx, Arena *arena) {
   ctx->arena = arena;
   map_init(&ctx->mod_cache, arena, 1024);
-  map_init(&ctx->global_symbols, arena, 16384);
   ctx->std_lib_env_path = getenv("TX_LIB_SEARCH_PATH");
 }
 
-void sem_deinit(SemCtx *ctx) {
-  map_free_buckets(&ctx->mod_cache);
-  map_free_buckets(&ctx->global_symbols);
+void sem_deinit(SemCtx *ctx) { map_free_buckets(&ctx->mod_cache); }
+
+typedef struct Module {
+  const char *abs_path;
+  const char *mod_name;
+  AstNode *ast_root;
+
+  HashMap local_symbols;
+  HashMap imported_mods;
+} Module;
+
+Module *new_mod(Arena *arena, const char *abs_path, const char *mod_name,
+                AstNode *ast) {
+  Module *m = arena_alloc(arena, sizeof(Module));
+  m->abs_path = abs_path;
+  m->mod_name = mod_name;
+  m->ast_root = ast;
+
+  map_init(&m->local_symbols, arena, 128);
+  map_init(&m->imported_mods, arena, 32);
+  return m;
 }
 
 void structify_ast(Arena *arena, AstNode *root, char *name) {
@@ -3557,8 +3578,8 @@ typedef struct {
   AstNode **link;
 } AstLinkItem;
 
-void link_modules(Arena *arena, const char *entry_file, AstNode *root_ast,
-                  HashMap *visited_files) {
+void link_mods(Arena *arena, const char *entry_file, AstNode *root_ast,
+               HashMap *visited_files) {
   size_t stack_cap = 1024;
   AstLinkItem *stack = malloc(sizeof(AstLinkItem) * stack_cap);
   size_t top = 0;
@@ -3688,142 +3709,183 @@ Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl) {
   return s;
 }
 
-void collect_global_symbols(SemCtx *ctx, AstNode *stmt) {
+void resolve_imports(Arena *arena, SemCtx *sem) {
+  for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
+    HashEntry *entry = sem->mod_cache.buckets[i];
+    while (entry) {
+      Module *current_mod = (Module *)entry->value;
+
+      // Walk the top level AST of this specific mod
+      AstNode *stmt = current_mod->ast_root->as.block.first_stmt;
+      while (stmt) {
+        if (stmt->type == AST_USE) {
+          size_t path_len = stmt->as.use_stmt.path.len;
+          const char *raw_path = stmt->as.use_stmt.path.start;
+          Token alias = stmt->as.use_stmt.alias;
+
+          if (path_len > 2) {
+            // Resolve the path of the imported file
+            char *clean_rel = arena_alloc(arena, path_len - 1);
+            strncpy(clean_rel, raw_path + 1, path_len - 2);
+            clean_rel[path_len - 2] = '\0';
+            const char *abs_import_path = resolve_alloc(arena, clean_rel);
+
+            // Fetch the actual Module* from the global cache
+            Module *imported_mod = map_get(&sem->mod_cache, abs_import_path,
+                                           strlen(abs_import_path));
+
+            if (imported_mod) {
+              // Determine the key alias or mod name
+              const char *import_key = imported_mod->mod_name;
+              size_t key_len = strlen(import_key);
+
+              if (alias.len > 0) {
+                import_key = alias.start;
+                key_len = alias.len;
+              }
+
+              // Collision check
+              if (map_get(&current_mod->imported_mods, import_key, key_len) !=
+                  NULL) {
+                fprintf(stderr,
+                        "Error in %s: Duplicate mod import name '%.*s'. Use an "
+                        "'as' alias.\n",
+                        current_mod->abs_path, (int)key_len, import_key);
+                exit(1);
+              }
+
+              map_set(&current_mod->imported_mods, import_key, key_len,
+                      imported_mod);
+            }
+          }
+        }
+        stmt = stmt->next;
+      }
+      entry = entry->next;
+    }
+  }
+}
+
+void collect_mod_symbols(Arena *arena, Module *mod) {
+  AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
+    Token name = {0};
+    SymKind kind;
+    bool is_valid = true;
+
     switch (stmt->type) {
-    case AST_FUNC: {
-      Token name = stmt->as.func_def.fn_name;
-      Sym *sym = new_sym(ctx->arena, SYM_FUNC, name, stmt);
-      map_set(&ctx->global_symbols, name.start, name.len, sym);
+    case AST_FUNC:
+      name = stmt->as.func_def.fn_name;
+      kind = SYM_FUNC;
       break;
-    }
-    case AST_VAR_DECL: {
-      Token name = stmt->as.var_decl.id;
-      Sym *sym = new_sym(ctx->arena, SYM_VAR, name, stmt);
-      map_set(&ctx->global_symbols, name.start, name.len, sym);
+    case AST_VAR_DECL:
+      name = stmt->as.var_decl.id;
+      kind = SYM_VAR;
       break;
-    }
-    case AST_STRUCT: {
-      Token name = stmt->as.struct_def.structn;
-      Sym *sym = new_sym(ctx->arena, SYM_STRUCT, name, stmt);
-      map_set(&ctx->global_symbols, name.start, name.len, sym);
+    case AST_STRUCT:
+      name = stmt->as.struct_def.structn;
+      kind = SYM_STRUCT;
       break;
-    }
-    case AST_UNION: {
-      Token name = stmt->as.union_def.unionn;
-      Sym *sym = new_sym(ctx->arena, SYM_UNION, name, stmt);
-      map_set(&ctx->global_symbols, name.start, name.len, sym);
+    case AST_UNION:
+      name = stmt->as.union_def.unionn;
+      kind = SYM_UNION;
       break;
-    }
-    case AST_ENUM: {
-      Token name = stmt->as.enum_def.enumn;
-      Sym *sym = new_sym(ctx->arena, SYM_ENUM, name, stmt);
-      map_set(&ctx->global_symbols, name.start, name.len, sym);
+    case AST_ENUM:
+      name = stmt->as.enum_def.enumn;
+      kind = SYM_ENUM;
       break;
-    }
-    case AST_EXTERN: {
-      // Step into extern blocks to grab the signatures inside
-      collect_global_symbols(ctx, stmt->as.extern_block.contents);
-      break;
-    }
     default:
-      // Nothing else should be here
-      fprintf(stderr, "Illegal AST symbol detected: %d", stmt->type);
+      is_valid = false;
       break;
     }
 
-    // Move to the next sibling statement in the AST
+    if (is_valid) {
+      // Check for local redeclarations
+      if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
+        fprintf(stderr, "Error: Symbol '%.*s' already defined in mod %s\n",
+                name.len, name.start, mod->mod_name);
+        exit(1);
+      }
+
+      if (map_get(&mod->imported_mods, name.start, name.len) != NULL) {
+        fprintf(stderr,
+                "Error: Symbol '%.*s' conflicts with an imported module or "
+                "alias in mod %s\n",
+                name.len, name.start, mod->mod_name);
+        exit(1);
+      }
+      Sym *sym = new_sym(arena, kind, name, stmt);
+      map_set(&mod->local_symbols, name.start, name.len, sym);
+    }
     stmt = stmt->next;
   }
 }
 
 void compile_project(const char *entry_file) {
   Arena arena = {0};
-
-  CompilerState state = {0};
-  state.arena = &arena;
-  map_init(&state.visited_files, &arena, 128);
-
   SemCtx sem = {0};
   sem_init(&sem, &arena);
 
-  wl_push(&state.pending, entry_file);
+  Worklist pending = {0};
+  wl_push(&pending, entry_file);
 
   const char *current_path;
-  while ((current_path = wl_pop(&state.pending)) != NULL) {
-
+  while ((current_path = wl_pop(&pending)) != NULL) {
     const char *abs_path = resolve_alloc(&arena, current_path);
-    if (!abs_path) {
-      fprintf(stderr, "Error: Could not resolve path: %s\n", current_path);
+    if (!abs_path || map_get(&sem.mod_cache, abs_path, strlen(abs_path)))
       continue;
-    }
-
-    // Skip files already present in map
-    if (map_get(&state.visited_files, abs_path, strlen(abs_path)) != NULL) {
-      continue;
-    }
-
-    // Mark visited files (helps to resolve circular deps)
-    map_set(&state.visited_files, abs_path, strlen(abs_path), (void *)1);
 
     printf("Compiling %s\n", abs_path);
-
     AstNode *ast = file_to_ast(&arena, abs_path);
     if (!ast) {
-      fprintf(stderr, "Error: Failed to compile %s\n", abs_path);
+      fprintf(stderr, "No ast found after trying to parse %s", abs_path);
       exit(1);
     }
 
-    // Update visited map with actual AST Root
-    map_set(&state.visited_files, abs_path, strlen(abs_path), ast);
-
-    // Get the mod name to be able to use file.method()
     const char *mod_name = extract_mod_name(&arena, abs_path);
-    map_set(&sem.mod_cache, mod_name, strlen(mod_name), ast);
+    Module *mod = new_mod(&arena, abs_path, mod_name, ast);
 
-    // Push deps to worklist
+    printf("Module: %s\n", mod_name);
+    print_ast(ast);
+
+    // Add to global cache
+    map_set(&sem.mod_cache, abs_path, strlen(abs_path), mod);
+
+    // Push dependencies
     AstNode *stmt = ast->as.block.first_stmt;
     while (stmt) {
       if (stmt->type == AST_USE) {
-
-        // Strip quotes
         size_t path_len = stmt->as.use_stmt.path.len;
-        const char *raw_path = stmt->as.use_stmt.path.start;
-
         if (path_len > 2) {
           char *clean_rel = arena_alloc(&arena, path_len - 1);
-          strncpy(clean_rel, raw_path + 1, path_len - 2);
+          strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
           clean_rel[path_len - 2] = '\0';
-
-          wl_push(&state.pending, clean_rel);
+          wl_push(&pending, clean_rel);
         }
       }
       stmt = stmt->next;
     }
   }
 
-  printf("AST Construction complete. All files mapped to SemCtx.\n");
+  printf("AST Construction complete.\n");
 
-  const char *abs_entry = resolve_alloc(&arena, entry_file);
-  AstNode *root_ast =
-      map_get(&state.visited_files, abs_entry, strlen(abs_entry));
+  resolve_imports(&arena, &sem);
+  printf("Import graph resolved.\n");
 
-  if (root_ast) {
-    link_modules(&arena, entry_file, root_ast, &state.visited_files);
-
-    printf("\n--- Final Mega-AST ---\n");
-    print_ast(root_ast);
-
-    printf("Collecting symbols\n");
-    collect_global_symbols(&sem, root_ast->as.block.first_stmt);
-    printf("Found %zu global symbols which have been collected\n",
-           sem.global_symbols.count);
+  // Collect local symbols
+  for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+    HashEntry *entry = sem.mod_cache.buckets[i];
+    while (entry) {
+      Module *mod = (Module *)entry->value;
+      collect_mod_symbols(&arena, mod);
+      entry = entry->next;
+    }
   }
 
-  if (state.pending.paths) {
-    free((void *)state.pending.paths);
-  }
-  map_free_buckets(&state.visited_files);
+  printf("Symbol collection complete.\n");
+
+  if (pending.paths)
+    free((void *)pending.paths);
   sem_deinit(&sem);
   arena_free_all(&arena);
 }
