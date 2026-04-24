@@ -254,6 +254,7 @@ typedef enum {
   AST_NULL_LIT,
   AST_BREAK,
   AST_CONTINUE,
+	AST_CAST,
   AST_PROGRAM, // The root node
 } ASTN_TYPE;
 
@@ -390,6 +391,10 @@ typedef struct AstNode {
     struct {
       Token kw;
     } continue_stmt;
+		struct {
+			DataType target;
+			struct AstNode *op;
+		} cast;
   } as;
 } AstNode;
 
@@ -446,6 +451,7 @@ typedef struct {
   Token op;
   bool is_unary;
   bool is_postfix;
+	DataType cast_type;
 } OpInfo;
 
 typedef struct {
@@ -544,7 +550,7 @@ void push_op(ParseCtx *ctx, Token op, bool is_unary, bool is_postfix) {
     ctx->op_stack = new_stack;
     ctx->op_cap = new_cap;
   }
-  ctx->op_stack[ctx->op_count++] = (OpInfo){op, is_unary, is_postfix};
+  ctx->op_stack[ctx->op_count++] = (OpInfo){op, is_unary, is_postfix, {0}};
 }
 
 void apply_op(ParseCtx *ctx) {
@@ -557,6 +563,14 @@ void apply_op(ParseCtx *ctx) {
     if (ctx->node_count < 1)
       return;
     AstNode *operand = pop_node(ctx);
+
+    if (info.op.len == 0) {
+      AstNode *cast_node = new_node(ctx->arena, AST_CAST);
+      cast_node->as.cast.target = info.cast_type;
+      cast_node->as.cast.op = operand;
+      push_node(ctx, cast_node);
+      return;
+    }
 
     ASTN_TYPE type = AST_UOP;
 
@@ -1133,6 +1147,8 @@ bool is_decl(ParseCtx *ctx) {
 }
 
 int get_precedence(Token op, bool is_unary, bool is_postfix) {
+  if (op.len == 0)
+    return 12; // Casting
   if (op.len == 1 && *op.start == '.') { // Member access
     return 14;
   }
@@ -1684,6 +1700,14 @@ void print_ast(AstNode *root) {
       printf("CONTINUE\n");
       break;
 
+    case AST_CAST:
+      printf("CAST TO (");
+      print_type_info(node->as.cast.target);
+      printf(")\n");
+      stack[top++] =
+          (AstPrintItem){node->as.cast.op, next_depth, "Operand"};
+      break;
+
     default:
       printf("AST_NODE_TYPE_%d\n", node->type);
       break;
@@ -2018,8 +2042,14 @@ bool parse_step(ParseCtx *ctx) {
 
       ctx->expect_operand = true;
 
-      while (ctx->op_count > 0 &&
-             *ctx->op_stack[ctx->op_count - 1].op.start != '(') {
+      while (ctx->op_count > 0) {
+        OpInfo *top = &ctx->op_stack[ctx->op_count - 1];
+
+				// If null its a cast not (
+        if (top->op.start != NULL && *top->op.start == '(') {
+          break;
+        }
+
         apply_op(ctx);
       }
       break;
@@ -2045,6 +2075,48 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, STATE_IN_FUNC_ARGS);
         break;
       } else {
+				// This might be grouping or cast
+        LexCtx saved_lex = *ctx->lex;
+        Token saved_curr = ctx->curr;
+        Token saved_prev = ctx->prev;
+
+        adv(ctx);
+        bool is_cast =
+            is_type(ctx); // Check if the next tokens form a valid type for (type)identifier syntax
+
+				// Go back to the ( that was skipped
+        *ctx->lex = saved_lex;
+        ctx->curr = saved_curr;
+        ctx->prev = saved_prev;
+
+        if (is_cast) {
+          adv(ctx);
+          DataType cast_t = parse_type(ctx);
+
+          if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+            adv(ctx);
+
+            // Push a fake unary operator (len = 0 is a cast)
+            Token fake_op = {.start = NULL, .len = 0, .type = TOKEN_OP};
+            push_op(ctx, fake_op, true, false);
+
+						// Add type info so apply_op can work with it
+            ctx->op_stack[ctx->op_count - 1].cast_type = cast_t;
+
+            ctx->expect_operand =
+                true; // Expect expression to be casted
+            push_state(ctx, STATE_IN_EXPR);
+            break;
+          } else {
+            report_error(ctx, "Expected ')' after cast type");
+            adv(ctx);
+            sync(ctx);
+            recover_state(ctx, current_state);
+            break;
+          }
+        }
+
+				// Grouping brackets
         push_op(ctx, ctx->curr, false, false);
         ctx->expect_operand = true;
         adv(ctx);

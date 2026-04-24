@@ -118,6 +118,10 @@ u8 main(u32 argc, str[] argv) {
 
 	b = { 0 };
 
+	i64 beebee = (i64)b;
+
+	beebee = (i64){ b + 2 };
+
 	*i32 athing = &b;
 
 	defer { b + 3 };
