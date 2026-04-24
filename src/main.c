@@ -185,7 +185,7 @@ typedef enum {
 } TOKEN_TYPE;
 
 typedef struct {
-  char *start;
+  const char *start;
   unsigned int len;
   TOKEN_TYPE type;
 } Token;
@@ -3821,6 +3821,381 @@ void collect_mod_symbols(Arena *arena, Module *mod) {
   }
 }
 
+typedef struct {
+  HashMap symbols; // Maps id strings to Sym*
+} Scope;
+
+typedef struct {
+  Scope *scopes;
+  size_t count;
+  size_t capacity;
+  Arena *arena;
+} ScopeStack;
+
+Sym *scope_lookup(ScopeStack *ss, const char *key, size_t len) {
+  for (int i = ss->count - 1; i >= 0; i--) {
+    Sym *sym = map_get(&ss->scopes[i].symbols, key, len);
+    if (sym != NULL)
+      return sym;
+  }
+  return NULL; // Not found in local scope
+}
+
+bool scope_declare(ScopeStack *ss, Token name, Sym *symbol) {
+  Scope *current_scope = &ss->scopes[ss->count - 1];
+
+  if (map_get(&current_scope->symbols, name.start, name.len) != NULL) {
+    return false; // Dupe in scope
+  }
+
+  map_set(&current_scope->symbols, name.start, name.len, symbol);
+  return true;
+}
+
+void scope_stack_init(ScopeStack *ss, Arena *arena) {
+  ss->arena = arena;
+  ss->capacity = 16;
+  ss->count = 0;
+  ss->scopes = arena_alloc(arena, sizeof(Scope) * ss->capacity);
+}
+
+void push_scope(ScopeStack *ss) {
+  if (ss->count >= ss->capacity) {
+    size_t new_cap = ss->capacity * 2;
+    Scope *new_scopes = arena_alloc(ss->arena, sizeof(Scope) * new_cap);
+    memcpy(new_scopes, ss->scopes, sizeof(Scope) * ss->count);
+    ss->scopes = new_scopes;
+    ss->capacity = new_cap;
+  }
+
+  Scope *new_scope = &ss->scopes[ss->count++];
+  map_init(&new_scope->symbols, ss->arena, 64);
+}
+
+void pop_scope(ScopeStack *ss) {
+  if (ss->count > 0) {
+    // Free the hashmap buckets to prevent memory leaks
+    map_free_buckets(&ss->scopes[ss->count - 1].symbols);
+    ss->count--;
+  }
+}
+
+typedef enum { ACTION_VISIT_NODE, ACTION_POP_SCOPE } TravAction;
+
+typedef struct {
+  AstNode *node;
+  TravAction action;
+} TravItem;
+
+void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
+  if (!mod || !mod->ast_root)
+    return;
+
+  AstNode *root = mod->ast_root;
+
+  size_t stack_cap = 1024;
+  TravItem *stack = malloc(sizeof(TravItem) * stack_cap);
+  size_t top = 0;
+
+  stack[top++] = (TravItem){root, ACTION_VISIT_NODE};
+
+  // Global scope
+  push_scope(ss);
+
+  for (size_t i = 0; i < mod->imported_mods.capacity; i++) {
+    HashEntry *entry = mod->imported_mods.buckets[i];
+    while (entry) {
+      Token import_tok = {
+          .start = entry->key, .len = entry->key_len, .type = TOKEN_IDENTIF};
+      // SYM_VAR acts as a placeholder so the identifier resolves cleanly
+      Sym *import_sym = new_sym(arena, SYM_VAR, import_tok, NULL);
+      scope_declare(ss, import_tok, import_sym);
+      entry = entry->next;
+    }
+  }
+
+// Push to traversal stack
+#define PUSH_TRAV(n, act)                                                      \
+  do {                                                                         \
+    if (top >= stack_cap) {                                                    \
+      stack_cap *= 2;                                                          \
+      stack = realloc(stack, sizeof(TravItem) * stack_cap);                    \
+    }                                                                          \
+    stack[top++] = (TravItem){n, act};                                         \
+  } while (0)
+
+// Push a linked list of statements/expressions in reverse
+#define PUSH_LL_REVERSE(head, act)                                             \
+  do {                                                                         \
+    AstNode *_curr = (head);                                                   \
+    size_t _cnt = 0;                                                           \
+    while (_curr) {                                                            \
+      _cnt++;                                                                  \
+      _curr = _curr->next;                                                     \
+    }                                                                          \
+    if (_cnt > 0) {                                                            \
+      AstNode **_arr = malloc(sizeof(AstNode *) * _cnt);                       \
+      _curr = (head);                                                          \
+      for (size_t _i = 0; _i < _cnt; _i++) {                                   \
+        _arr[_i] = _curr;                                                      \
+        _curr = _curr->next;                                                   \
+      }                                                                        \
+      for (int _i = (int)_cnt - 1; _i >= 0; _i--) {                            \
+        PUSH_TRAV(_arr[_i], act);                                              \
+      }                                                                        \
+      free(_arr);                                                              \
+    }                                                                          \
+  } while (0)
+
+  while (top > 0) {
+    TravItem item = stack[--top];
+
+    if (item.action == ACTION_POP_SCOPE) {
+      pop_scope(ss);
+      continue;
+    }
+
+    AstNode *node = item.node;
+    if (!node)
+      continue;
+
+    switch (node->type) {
+    case AST_PROGRAM:
+    case AST_BLOCK: {
+      push_scope(ss);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+      PUSH_LL_REVERSE(node->as.block.first_stmt, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_FUNC: {
+      // Declare the function in the current scope
+      Sym *func_sym = new_sym(arena, SYM_FUNC, node->as.func_def.fn_name, node);
+      if (!scope_declare(ss, node->as.func_def.fn_name, func_sym)) {
+        fprintf(stderr, "Error: Duplicate function name '%.*s'\n",
+                node->as.func_def.fn_name.len, node->as.func_def.fn_name.start);
+      }
+
+      // Create a new scope for parameters and body
+      push_scope(ss);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+
+      // Push body
+      if (node->as.func_def.block) {
+        PUSH_TRAV(node->as.func_def.block, ACTION_VISIT_NODE);
+      }
+
+      // Push parameters
+      PUSH_LL_REVERSE(node->as.func_def.params, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_PARAM: {
+      Sym *param_sym = new_sym(arena, SYM_VAR, node->as.fn_param.id, node);
+      if (!scope_declare(ss, node->as.fn_param.id, param_sym)) {
+        fprintf(stderr, "Error: Duplicate parameter name '%.*s'\n",
+                node->as.fn_param.id.len, node->as.fn_param.id.start);
+      }
+      break;
+    }
+
+    case AST_VAR_DECL: {
+      // Push the initialization expression to be evaluated first (if it exists)
+      if (node->as.var_decl.init) {
+        PUSH_TRAV(node->as.var_decl.init, ACTION_VISIT_NODE);
+      }
+
+      // Declare the variable in the current scope
+      Sym *var_sym = new_sym(arena, SYM_VAR, node->as.var_decl.id, node);
+      if (!scope_declare(ss, node->as.var_decl.id, var_sym)) {
+        fprintf(stderr,
+                "Error: Variable '%.*s' already declared in this scope.\n",
+                node->as.var_decl.id.len, node->as.var_decl.id.start);
+      }
+      break;
+    }
+
+    case AST_IDENTIF: {
+      // Usage of a variable so verify it exists in scope
+      Token id = node->as.identif.val;
+      Sym *found = scope_lookup(ss, id.start, id.len);
+      if (!found) {
+        fprintf(stderr, "Error: Undeclared identifier '%.*s'\n", id.len,
+                id.start);
+      }
+      break;
+    }
+
+    case AST_BINOP: {
+      PUSH_TRAV(node->as.binop.right, ACTION_VISIT_NODE);
+      PUSH_TRAV(node->as.binop.left, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_UOP:
+    case AST_ADDR_OF:
+    case AST_DEREF: {
+      if (node->as.unop.operand) {
+        PUSH_TRAV(node->as.unop.operand, ACTION_VISIT_NODE);
+      }
+      break;
+    }
+
+    case AST_IF: {
+      if (node->as.if_check.elseAct)
+        PUSH_TRAV(node->as.if_check.elseAct, ACTION_VISIT_NODE);
+      if (node->as.if_check.action)
+        PUSH_TRAV(node->as.if_check.action, ACTION_VISIT_NODE);
+      if (node->as.if_check.check)
+        PUSH_TRAV(node->as.if_check.check, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_WHILE: {
+      if (node->as.while_loop.action)
+        PUSH_TRAV(node->as.while_loop.action, ACTION_VISIT_NODE);
+      if (node->as.while_loop.check)
+        PUSH_TRAV(node->as.while_loop.check, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_FOR: {
+      // For loops create an immediate scope for any variables declared in the
+      // init stage
+      push_scope(ss);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+
+      if (node->as.for_loop.action)
+        PUSH_TRAV(node->as.for_loop.action, ACTION_VISIT_NODE);
+      if (node->as.for_loop.inc)
+        PUSH_TRAV(node->as.for_loop.inc, ACTION_VISIT_NODE);
+      if (node->as.for_loop.check)
+        PUSH_TRAV(node->as.for_loop.check, ACTION_VISIT_NODE);
+      if (node->as.for_loop.init)
+        PUSH_TRAV(node->as.for_loop.init, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_FUNC_CALL: {
+      PUSH_LL_REVERSE(node->as.func_call.args, ACTION_VISIT_NODE);
+      if (node->as.func_call.caller)
+        PUSH_TRAV(node->as.func_call.caller, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_ARRAY_LIT: {
+      PUSH_LL_REVERSE(node->as.array_lit.elements, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_INDEX: {
+      if (node->as.index.index)
+        PUSH_TRAV(node->as.index.index, ACTION_VISIT_NODE);
+      if (node->as.index.base)
+        PUSH_TRAV(node->as.index.base, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_MEMBER: {
+      // The right hand side (name) is a field lookup, not a local identifier so
+      // we only traverse the base.
+      if (node->as.member.base)
+        PUSH_TRAV(node->as.member.base, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_RET: {
+      if (node->as.ret_stmt.expr)
+        PUSH_TRAV(node->as.ret_stmt.expr, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_DEFER: {
+      if (node->as.defer_stmt.contents)
+        PUSH_TRAV(node->as.defer_stmt.contents, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_SWITCH: {
+      if (node->as.switch_stmt.default_case)
+        PUSH_TRAV(node->as.switch_stmt.default_case, ACTION_VISIT_NODE);
+      PUSH_LL_REVERSE(node->as.switch_stmt.cases, ACTION_VISIT_NODE);
+      if (node->as.switch_stmt.check)
+        PUSH_TRAV(node->as.switch_stmt.check, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_CASE: {
+      if (node->as.case_stmt.action)
+        PUSH_TRAV(node->as.case_stmt.action, ACTION_VISIT_NODE);
+      if (node->as.case_stmt.val)
+        PUSH_TRAV(node->as.case_stmt.val, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_STRUCT: {
+      Sym *struct_sym =
+          new_sym(arena, SYM_STRUCT, node->as.struct_def.structn, node);
+      scope_declare(ss, node->as.struct_def.structn, struct_sym);
+
+      push_scope(ss);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+
+      Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
+      scope_declare(ss, self_tok, struct_sym);
+
+      PUSH_LL_REVERSE(node->as.struct_def.contents, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_UNION: {
+      Sym *union_sym =
+          new_sym(arena, SYM_UNION, node->as.union_def.unionn, node);
+      scope_declare(ss, node->as.union_def.unionn, union_sym);
+
+      push_scope(ss);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+
+      Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
+      scope_declare(ss, self_tok, union_sym);
+
+      PUSH_LL_REVERSE(node->as.union_def.contents, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_ENUM: {
+      Sym *enum_sym = new_sym(arena, SYM_ENUM, node->as.enum_def.enumn, node);
+      scope_declare(ss, node->as.enum_def.enumn, enum_sym);
+
+      push_scope(ss);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+
+      Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
+      scope_declare(ss, self_tok, enum_sym);
+
+      PUSH_LL_REVERSE(node->as.enum_def.contents, ACTION_VISIT_NODE);
+      break;
+    }
+
+    case AST_EXTERN: {
+      PUSH_LL_REVERSE(node->as.extern_block.contents, ACTION_VISIT_NODE);
+      break;
+    }
+
+    default:
+      // Other literal nodes do not need scope resolution
+      break;
+    }
+  }
+
+#undef PUSH_TRAV
+#undef PUSH_LL_REVERSE
+
+  // Pop the global scope
+  pop_scope(ss);
+  free(stack);
+}
+
 void compile_project(const char *entry_file) {
   Arena arena = {0};
   SemCtx sem = {0};
@@ -3883,6 +4258,27 @@ void compile_project(const char *entry_file) {
   }
 
   printf("Symbol collection complete.\n");
+
+  ScopeStack ss;
+  scope_stack_init(&ss, &arena);
+
+  for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+    HashEntry *entry = sem.mod_cache.buckets[i];
+    while (entry) {
+      Module *mod = (Module *)entry->value;
+
+      // Reset the scope stack count for each new module so scopes dont bleed
+      // over from the previous module.
+      ss.count = 0;
+
+      // Resolve scopes for this specific modules AST
+      resolve_scopes(&arena, mod, &ss);
+
+      entry = entry->next;
+    }
+  }
+
+  printf("Scope resolution complete.\n");
 
   if (pending.paths)
     free((void *)pending.paths);
