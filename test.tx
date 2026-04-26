@@ -28,6 +28,7 @@ enum Bee {
 struct Xexor {
 	bool no;
 	str yes;
+	self next;
 	union onion {
 		i32 idkman;
 	}
@@ -128,5 +129,5 @@ u8 main(u32 argc, str[] argv) {
 	defer  b + 3;
 	defer rarray = null;
 
-	ret b;
+	ret (u8)b;
 }

@@ -188,6 +188,7 @@ typedef struct {
   const char *start;
   unsigned int len;
   TOKEN_TYPE type;
+	unsigned int line, col;
 } Token;
 
 typedef struct {
@@ -214,7 +215,6 @@ typedef struct {
   bool is_extern;
   bool is_self;
   long int ptr_depth; // 2 for **type etc
-  bool is_reference;  // true with &type
   Token name;
   unsigned int array_dimens;  // 0 for not an array 1 for [] etc.
   struct AstNode **dim_sizes; // Per dimensions [][][] etc.
@@ -254,13 +254,16 @@ typedef enum {
   AST_NULL_LIT,
   AST_BREAK,
   AST_CONTINUE,
-	AST_CAST,
+  AST_CAST,
   AST_PROGRAM, // The root node
 } ASTN_TYPE;
+
+struct Sym;
 
 typedef struct AstNode {
   ASTN_TYPE type;
   struct AstNode *next;
+  DataType eval_type;
   union {
     struct {
       Token val;
@@ -279,6 +282,7 @@ typedef struct AstNode {
     } array_lit;
     struct {
       Token val;
+      struct Sym *res_sm;
     } identif;
     struct {
       Token op;
@@ -391,10 +395,10 @@ typedef struct AstNode {
     struct {
       Token kw;
     } continue_stmt;
-		struct {
-			DataType target;
-			struct AstNode *op;
-		} cast;
+    struct {
+      DataType target;
+      struct AstNode *op;
+    } cast;
   } as;
 } AstNode;
 
@@ -451,7 +455,7 @@ typedef struct {
   Token op;
   bool is_unary;
   bool is_postfix;
-	DataType cast_type;
+  DataType cast_type;
 } OpInfo;
 
 typedef struct {
@@ -842,12 +846,86 @@ void skip_irrelevant(LexCtx *ctx) {
   }
 }
 
+bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float) {
+  // Pointers and arrays arent simple numbers
+  if (t.ptr_depth > 0 || t.array_dimens > 0 || t.is_custom)
+    return false;
+  if (t.name.len < 2)
+    return false;
+
+  char kind = t.name.start[0];
+  if (kind == 'u' || kind == 'i' || kind == 'f') {
+    *is_signed = (kind == 'i' || kind == 'f');
+    *is_float = (kind == 'f');
+    *width = atoi(t.name.start + 1);
+    return true;
+  }
+  return false;
+}
+
+bool is_type_compatible(DataType target, DataType source, bool is_explicit) {
+  if (target.name.len == 3 && strncmp(target.name.start, "any", 3) == 0) {
+    return true;
+  }
+  if (source.name.len == 3 && strncmp(source.name.start, "any", 3) == 0) {
+    return true;
+  }
+  if (source.name.len == 4 && strncmp(source.name.start, "null", 4) == 0) {
+    return true;
+  }
+  // Exact match
+  if (target.ptr_depth == source.ptr_depth &&
+      target.array_dimens == source.array_dimens &&
+      target.name.len == source.name.len &&
+      strncmp(target.name.start, source.name.start, target.name.len) == 0) {
+    return true;
+  }
+
+  // Explicit casts bypass standard protections
+  // We pray developer understands risks
+  if (is_explicit) {
+    return true;
+  }
+
+  // Implicit cast logic (bigger conversions only)
+  int t_width = 0, s_width = 0;
+  bool t_signed = false, s_signed = false, t_float = false, s_float = false;
+
+  bool t_is_num = get_numeric_info(target, &t_width, &t_signed, &t_float);
+  bool s_is_num = get_numeric_info(source, &s_width, &s_signed, &s_float);
+
+  if (t_is_num && s_is_num) {
+    // Dont implicitly convert floats to ints (loss of precision)
+    if (s_float && !t_float)
+      return false;
+
+    // Dont implicitly convert signed to unsigned (loss of negative values)
+    if (!t_signed && s_signed)
+      return false;
+
+    // Target must be able to hold the source safely
+    return t_width >= s_width;
+  }
+
+  // No implicit conversion
+  fprintf(
+      stderr,
+      "Types %.*s (ptr_depth: %ld) and %.*s (ptr_depth: %ld) are not "
+      "compatible (safely) at %u:%u, try explicit casting to get around this\n",
+      (int)target.name.len, target.name.start, target.ptr_depth,
+      (int)source.name.len, source.name.start, source.ptr_depth,
+      target.name.line, target.name.col);
+  return false;
+}
+
 Token next_token(LexCtx *ctx) {
   skip_irrelevant(ctx);
 
   ctx->start = ctx->curr;
+	unsigned int tk_line = ctx->line;
+	unsigned int tk_col = ctx->col;
   if (*ctx->curr == '\0') {
-    return (Token){.start = ctx->start, .len = 0, .type = TOKEN_EOF};
+    return (Token){.start = ctx->start, .len = 0, .type = TOKEN_EOF, .line = tk_line, .col = tk_col};
   }
 
   TOKEN_TYPE type;
@@ -983,7 +1061,7 @@ Token next_token(LexCtx *ctx) {
     ctx->col += len;
   }
 
-  return (Token){.start = ctx->start, .len = len, .type = type};
+  return (Token){.start = ctx->start, .len = len, .type = type, .line = tk_line, .col = tk_col};
 }
 
 Token peek_token(LexCtx *ctx) {
@@ -1148,7 +1226,7 @@ bool is_decl(ParseCtx *ctx) {
 
 int get_precedence(Token op, bool is_unary, bool is_postfix) {
   if (op.len == 0)
-    return 12; // Casting
+    return 12;                           // Casting
   if (op.len == 1 && *op.start == '.') { // Member access
     return 14;
   }
@@ -1243,18 +1321,18 @@ DataType parse_type(ParseCtx *ctx) {
          (*ctx->curr.start == '*' || *ctx->curr.start == '&')) {
     switch (*ctx->curr.start) {
     case '*': {
-      type.ptr_depth--;
+      type.ptr_depth++;
       break;
     }
     case '&': {
-      type.ptr_depth++;
+      type.ptr_depth--;
       break;
     }
     }
     adv(ctx);
   }
 
-  if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
+if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
       strncmp(ctx->curr.start, "self", 4) == 0) {
     if (ctx->ag_depth == 0) {
       fprintf(stderr,
@@ -1267,7 +1345,22 @@ DataType parse_type(ParseCtx *ctx) {
       return type;
     }
     type.is_self = true;
-    type.name = ctx->curr;
+    
+    // Find the parent aggregate type to inherit its actual name
+    for (int i = ctx->node_count - 1; i >= 0; i--) {
+      AstNode *parent = ctx->node_stack[i];
+      if (parent->type == AST_STRUCT) {
+        type.name = parent->as.struct_def.structn;
+        break;
+      } else if (parent->type == AST_UNION) {
+        type.name = parent->as.union_def.unionn;
+        break;
+      } else if (parent->type == AST_ENUM) {
+        type.name = parent->as.enum_def.enumn;
+        break;
+      }
+    }
+    
     adv(ctx);
   } else if (ctx->curr.type == TOKEN_IDENTIF ||
              is_builtin_type_kw(ctx, ctx->curr)) {
@@ -1704,8 +1797,7 @@ void print_ast(AstNode *root) {
       printf("CAST TO (");
       print_type_info(node->as.cast.target);
       printf(")\n");
-      stack[top++] =
-          (AstPrintItem){node->as.cast.op, next_depth, "Operand"};
+      stack[top++] = (AstPrintItem){node->as.cast.op, next_depth, "Operand"};
       break;
 
     default:
@@ -2045,7 +2137,7 @@ bool parse_step(ParseCtx *ctx) {
       while (ctx->op_count > 0) {
         OpInfo *top = &ctx->op_stack[ctx->op_count - 1];
 
-				// If null its a cast not (
+        // If null its a cast not (
         if (top->op.start != NULL && *top->op.start == '(') {
           break;
         }
@@ -2075,16 +2167,16 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, STATE_IN_FUNC_ARGS);
         break;
       } else {
-				// This might be grouping or cast
+        // This might be grouping or cast
         LexCtx saved_lex = *ctx->lex;
         Token saved_curr = ctx->curr;
         Token saved_prev = ctx->prev;
 
         adv(ctx);
-        bool is_cast =
-            is_type(ctx); // Check if the next tokens form a valid type for (type)identifier syntax
+        bool is_cast = is_type(ctx); // Check if the next tokens form a valid
+                                     // type for (type)identifier syntax
 
-				// Go back to the ( that was skipped
+        // Go back to the ( that was skipped
         *ctx->lex = saved_lex;
         ctx->curr = saved_curr;
         ctx->prev = saved_prev;
@@ -2100,11 +2192,10 @@ bool parse_step(ParseCtx *ctx) {
             Token fake_op = {.start = NULL, .len = 0, .type = TOKEN_OP};
             push_op(ctx, fake_op, true, false);
 
-						// Add type info so apply_op can work with it
+            // Add type info so apply_op can work with it
             ctx->op_stack[ctx->op_count - 1].cast_type = cast_t;
 
-            ctx->expect_operand =
-                true; // Expect expression to be casted
+            ctx->expect_operand = true; // Expect expression to be casted
             push_state(ctx, STATE_IN_EXPR);
             break;
           } else {
@@ -2116,7 +2207,7 @@ bool parse_step(ParseCtx *ctx) {
           }
         }
 
-				// Grouping brackets
+        // Grouping brackets
         push_op(ctx, ctx->curr, false, false);
         ctx->expect_operand = true;
         adv(ctx);
@@ -3767,7 +3858,7 @@ typedef enum {
   SYM_VAR,
 } SymKind;
 
-typedef struct {
+typedef struct Sym {
   SymKind kind;
   Token name;
   AstNode *decl_node;
@@ -3820,9 +3911,11 @@ void resolve_imports(Arena *arena, SemCtx *sem) {
               if (map_get(&current_mod->imported_mods, import_key, key_len) !=
                   NULL) {
                 fprintf(stderr,
-                        "Error in %s: Duplicate mod import name '%.*s'. Use an "
+                        "Error in %s at %u:%u: Duplicate mod import name "
+                        "'%.*s'. Use an "
                         "'as' alias.\n",
-                        current_mod->abs_path, (int)key_len, import_key);
+                        current_mod->abs_path, stmt->as.use_stmt.path.line,
+                        stmt->as.use_stmt.path.col, (int)key_len, import_key);
                 exit(1);
               }
 
@@ -3874,8 +3967,9 @@ void collect_mod_symbols(Arena *arena, Module *mod) {
     if (is_valid) {
       // Check for local redeclarations
       if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
-        fprintf(stderr, "Error: Symbol '%.*s' already defined in mod %s\n",
-                name.len, name.start, mod->mod_name);
+        fprintf(stderr,
+                "Error in %u:%u: Symbol '%.*s' already defined in mod %s\n",
+                name.line, name.col, name.len, name.start, mod->mod_name);
         exit(1);
       }
 
@@ -4088,12 +4182,13 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
     }
 
     case AST_IDENTIF: {
-      // Usage of a variable so verify it exists in scope
       Token id = node->as.identif.val;
       Sym *found = scope_lookup(ss, id.start, id.len);
       if (!found) {
         fprintf(stderr, "Error: Undeclared identifier '%.*s'\n", id.len,
                 id.start);
+      } else {
+        node->as.identif.res_sm = found;
       }
       break;
     }
@@ -4254,6 +4349,13 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
       break;
     }
 
+    case AST_CAST: {
+      if (node->as.cast.op) {
+        PUSH_TRAV(node->as.cast.op, ACTION_VISIT_NODE);
+      }
+      break;
+    }
+
     default:
       // Other literal nodes do not need scope resolution
       break;
@@ -4265,6 +4367,501 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
 
   // Pop the global scope
   pop_scope(ss);
+  free(stack);
+}
+
+typedef enum { TC_VISIT_CHILDREN, TC_EVAL_NODE } TCState;
+
+typedef struct {
+  AstNode *node;
+  TCState state;
+  DataType *expected;
+  AstNode *curr_func;
+} TCItem;
+
+DataType create_basic_type(const char *name_str) {
+  DataType t = {0};
+  t.name.start = name_str;
+  t.name.len = strlen(name_str);
+  t.name.type = TOKEN_IDENTIF;
+  return t;
+}
+
+static DataType EXPECT_BOOL = {
+    .name = {.start = "bool", .len = 4, .type = TOKEN_IDENTIF}};
+
+void type_check_ast(Arena *arena, AstNode *root) {
+  if (!root)
+    return;
+
+  size_t cap = 1024;
+  TCItem *stack = malloc(sizeof(TCItem) * cap);
+  size_t top = 0;
+
+  stack[top++] = (TCItem){root, TC_VISIT_CHILDREN, NULL, NULL};
+
+  while (top > 0) {
+    TCItem item = stack[--top];
+    AstNode *node = item.node;
+    if (!node)
+      continue;
+    DataType *expected = item.expected;
+
+    if (item.state == TC_VISIT_CHILDREN) {
+      // Expand stack if getting full
+      if (top >= cap - 32) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(TCItem) * cap);
+      }
+
+      stack[top++] = (TCItem){node, TC_EVAL_NODE, expected, item.curr_func};
+
+      switch (node->type) {
+      case AST_PROGRAM:
+      case AST_BLOCK: {
+        // Push linked list of statements to process
+        AstNode *curr = node->as.block.first_stmt;
+        size_t count = 0;
+        while (curr) {
+          count++;
+          curr = curr->next;
+        }
+        if (count > 0) {
+          AstNode **arr = malloc(sizeof(AstNode *) * count);
+          curr = node->as.block.first_stmt;
+          for (size_t i = 0; i < count; i++) {
+            arr[i] = curr;
+            curr = curr->next;
+          }
+          for (int i = count - 1; i >= 0; i--) {
+            stack[top++] =
+                (TCItem){arr[i], TC_VISIT_CHILDREN, NULL, item.curr_func};
+          }
+          free(arr);
+        }
+        break;
+      }
+      case AST_FUNC:
+        if (node->as.func_def.block) {
+          stack[top++] =
+              (TCItem){node->as.func_def.block, TC_VISIT_CHILDREN, NULL, node};
+        }
+        break;
+      case AST_VAR_DECL:
+        stack[top++] = (TCItem){node->as.var_decl.init, TC_VISIT_CHILDREN,
+                                &node->as.var_decl.type, item.curr_func};
+        break;
+      case AST_BINOP: {
+        DataType *operand_expected = item.expected;
+
+        // Comparisons just have to be compatible
+        if (node->as.binop.op.type == TOKEN_COMPARE) {
+          operand_expected = NULL;
+        }
+
+        stack[top++] = (TCItem){node->as.binop.right, TC_VISIT_CHILDREN,
+                                operand_expected, item.curr_func};
+        stack[top++] = (TCItem){node->as.binop.left, TC_VISIT_CHILDREN,
+                                operand_expected, item.curr_func};
+        break;
+      }
+      case AST_UOP:
+      case AST_ADDR_OF:
+      case AST_DEREF: {
+        // If we expect T, then operand must be *T
+        DataType *inner = NULL;
+        if (item.expected) {
+          inner = arena_alloc(arena, sizeof(DataType));
+          *inner = *item.expected;
+          inner->ptr_depth++;
+        }
+        stack[top++] = (TCItem){node->as.unop.operand, TC_VISIT_CHILDREN, inner,
+                                item.curr_func};
+        break;
+      }
+      case AST_IF:
+        if (node->as.if_check.elseAct)
+          stack[top++] = (TCItem){node->as.if_check.elseAct, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        if (node->as.if_check.action)
+          stack[top++] = (TCItem){node->as.if_check.action, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        stack[top++] = (TCItem){node->as.if_check.check, TC_VISIT_CHILDREN,
+                                &EXPECT_BOOL, item.curr_func};
+        break;
+      case AST_WHILE:
+        if (node->as.while_loop.action)
+          stack[top++] = (TCItem){node->as.while_loop.action, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        stack[top++] = (TCItem){node->as.while_loop.check, TC_VISIT_CHILDREN,
+                                &EXPECT_BOOL, item.curr_func};
+        break;
+      case AST_FOR:
+        if (node->as.for_loop.action)
+          stack[top++] = (TCItem){node->as.for_loop.action, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        if (node->as.for_loop.inc)
+          stack[top++] = (TCItem){node->as.for_loop.inc, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        stack[top++] = (TCItem){node->as.for_loop.check, TC_VISIT_CHILDREN,
+                                &EXPECT_BOOL, item.curr_func};
+        if (node->as.for_loop.init)
+          stack[top++] = (TCItem){node->as.for_loop.init, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        break;
+      case AST_FUNC_CALL: {
+        // Resolve the function signature from the caller
+        AstNode *fn_decl = NULL;
+        if (node->as.func_call.caller->type == AST_IDENTIF &&
+            node->as.func_call.caller->as.identif.res_sm) {
+          fn_decl = node->as.func_call.caller->as.identif.res_sm->decl_node;
+        }
+
+        // We match args to params to set expected types
+        int arg_count = 0;
+        AstNode *temp = node->as.func_call.args;
+        while (temp) {
+          arg_count++;
+          temp = temp->next;
+        }
+
+        if (arg_count > 0) {
+          AstNode **args = malloc(sizeof(AstNode *) * arg_count);
+          AstNode **params = malloc(sizeof(AstNode *) * arg_count);
+
+          AstNode *curr_arg = node->as.func_call.args;
+          AstNode *curr_param = NULL;
+          if (fn_decl && node->as.func_call.caller->type == AST_IDENTIF &&
+              node->as.func_call.caller->as.identif.res_sm->kind == SYM_FUNC) {
+            curr_param = fn_decl->as.func_def.params;
+          }
+
+          for (int i = 0; i < arg_count; i++) {
+            args[i] = curr_arg;
+            params[i] = curr_param;
+            curr_arg = curr_arg->next;
+            if (curr_param)
+              curr_param = curr_param->next;
+          }
+
+          for (int i = arg_count - 1; i >= 0; i--) {
+            DataType *p_type = params[i] ? &params[i]->as.fn_param.type : NULL;
+            stack[top++] =
+                (TCItem){args[i], TC_VISIT_CHILDREN, p_type, item.curr_func};
+          }
+          free(args);
+          free(params);
+        }
+        stack[top++] = (TCItem){node->as.func_call.caller, TC_VISIT_CHILDREN,
+                                NULL, item.curr_func};
+        break;
+      }
+      case AST_CAST:
+        if (node->as.cast.op)
+          stack[top++] = (TCItem){node->as.cast.op, TC_VISIT_CHILDREN,
+                                  &node->as.cast.target, item.curr_func};
+        break;
+      case AST_RET:
+        if (item.curr_func && node->as.ret_stmt.expr) {
+          stack[top++] =
+              (TCItem){node->as.ret_stmt.expr, TC_VISIT_CHILDREN,
+                       &item.curr_func->as.func_def.ret_type, item.curr_func};
+        }
+        break;
+      case AST_INDEX:
+        if (node->as.index.index)
+          stack[top++] = (TCItem){node->as.index.index, TC_VISIT_CHILDREN, NULL,
+                                  item.curr_func};
+        if (node->as.index.base)
+          stack[top++] = (TCItem){node->as.index.base, TC_VISIT_CHILDREN, NULL,
+                                  item.curr_func};
+        break;
+
+      case AST_MEMBER:
+        if (node->as.member.base)
+          stack[top++] = (TCItem){node->as.member.base, TC_VISIT_CHILDREN, NULL,
+                                  item.curr_func};
+        break;
+
+      case AST_ARRAY_LIT: {
+        AstNode *curr = node->as.array_lit.elements;
+        while (curr) {
+          stack[top++] =
+              (TCItem){curr, TC_VISIT_CHILDREN, item.expected, item.curr_func};
+          curr = curr->next;
+        }
+        break;
+      }
+
+      case AST_SWITCH:
+        if (node->as.switch_stmt.default_case)
+          stack[top++] = (TCItem){node->as.switch_stmt.default_case,
+                                  TC_VISIT_CHILDREN, NULL, item.curr_func};
+        if (node->as.switch_stmt.cases) {
+          AstNode *c = node->as.switch_stmt.cases;
+          while (c) {
+            stack[top++] = (TCItem){c, TC_VISIT_CHILDREN, NULL, item.curr_func};
+            c = c->next;
+          }
+        }
+        if (node->as.switch_stmt.check)
+          stack[top++] = (TCItem){node->as.switch_stmt.check, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        break;
+
+      case AST_CASE:
+        if (node->as.case_stmt.action)
+          stack[top++] = (TCItem){node->as.case_stmt.action, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        if (node->as.case_stmt.val)
+          stack[top++] = (TCItem){node->as.case_stmt.val, TC_VISIT_CHILDREN,
+                                  NULL, item.curr_func};
+        break;
+
+      case AST_DEFER:
+        if (node->as.defer_stmt.contents)
+          stack[top++] = (TCItem){node->as.defer_stmt.contents,
+                                  TC_VISIT_CHILDREN, NULL, item.curr_func};
+        break;
+
+      case AST_EXTERN: {
+        AstNode *curr = node->as.extern_block.contents;
+        while (curr) {
+          stack[top++] =
+              (TCItem){curr, TC_VISIT_CHILDREN, NULL, item.curr_func};
+          curr = curr->next;
+        }
+        break;
+      }
+      case AST_STRUCT:
+      case AST_UNION:
+      case AST_ENUM: {
+        AstNode *curr =
+            (node->type == AST_STRUCT)  ? node->as.struct_def.contents
+            : (node->type == AST_UNION) ? node->as.union_def.contents
+                                        : node->as.enum_def.contents;
+        while (curr) {
+          stack[top++] =
+              (TCItem){curr, TC_VISIT_CHILDREN, NULL, item.curr_func};
+          curr = curr->next;
+        }
+        break;
+      }
+      default:
+        // Nodes without type checked children handled directly below
+        break;
+      }
+    } else {
+      // Children are done so push types up
+      switch (node->type) {
+      case AST_NUM_LIT: {
+        if (expected) {
+          node->eval_type = *expected;
+        } else {
+          // Smallest fitting signed type
+          const char *val_str = node->as.num_lit.val.start;
+          int len = node->as.num_lit.val.len;
+
+          // Check if its a float
+          bool is_float = false;
+          for (int i = 0; i < len; i++) {
+            if (val_str[i] == '.') {
+              is_float = true;
+              break;
+            }
+          }
+
+          if (is_float) {
+            node->eval_type = create_basic_type("f32");
+          } else {
+            // Smallest fitting integer calculation
+            long long val = atoll(val_str);
+            if (val >= -128 && val <= 127)
+              node->eval_type = create_basic_type("i8");
+            else if (val >= -32768 && val <= 32767)
+              node->eval_type = create_basic_type("i16");
+            else if (val >= -2147483648LL && val <= 2147483647LL)
+              node->eval_type = create_basic_type("i32");
+            else
+              node->eval_type = create_basic_type("i64");
+          }
+        }
+        break;
+      }
+      case AST_STR_LIT:
+        node->eval_type = create_basic_type("str");
+        break;
+      case AST_BOOL_LIT:
+        node->eval_type = create_basic_type("bool");
+        break;
+      case AST_CHAR_LIT:
+        node->eval_type = create_basic_type("char");
+        break;
+      case AST_NULL_LIT:
+        node->eval_type = create_basic_type("null");
+        break;
+      case AST_IDENTIF:
+        if (node->as.identif.res_sm) {
+          Sym *sym = node->as.identif.res_sm;
+          if (sym->kind == SYM_VAR && sym->decl_node) {
+            if (sym->decl_node->type == AST_PARAM) {
+              node->eval_type = sym->decl_node->as.fn_param.type;
+            } else {
+              node->eval_type = sym->decl_node->as.var_decl.type;
+            }
+          } else if (sym->kind == SYM_FUNC && sym->decl_node) {
+            node->eval_type = sym->decl_node->as.func_def.ret_type;
+          }
+        }
+        break;
+      case AST_VAR_DECL:
+        if (node->as.var_decl.init) {
+          if (!is_type_compatible(node->as.var_decl.type,
+                                  node->as.var_decl.init->eval_type, false)) {
+            fprintf(stderr,
+                    "Type Error at %u:%u: Incompatible assignment for variable "
+                    "'%.*s'.\n",
+                    node->as.var_decl.id.line, node->as.var_decl.id.col,
+                    node->as.var_decl.id.len, node->as.var_decl.id.start);
+          }
+        }
+        break;
+      case AST_BINOP: {
+        DataType left_t = node->as.binop.left->eval_type;
+        DataType right_t = node->as.binop.right->eval_type;
+
+        if (!is_type_compatible(left_t, right_t, false) &&
+            !is_type_compatible(right_t, left_t, false)) {
+          fprintf(stderr,
+                  "Type Error at %u:%u: Incompatible operands '%.*s' and "
+                  "'%.*s' for "
+                  "'%.*s'.\n",
+                  node->as.binop.op.line, node->as.binop.op.col,
+                  left_t.name.len, left_t.name.start, right_t.name.len,
+                  right_t.name.start, node->as.binop.op.len,
+                  node->as.binop.op.start);
+        }
+
+        // Resolve the result type
+        if (node->as.binop.op.type == TOKEN_COMPARE) {
+          // Comparisons always result in a bool
+          node->eval_type = EXPECT_BOOL;
+        } else if (item.expected) {
+          node->eval_type = *item.expected;
+        } else {
+          // Use wider type
+          int l_w = 0, r_w = 0;
+          bool l_s, r_s, l_f, r_f;
+          get_numeric_info(left_t, &l_w, &l_s, &l_f);
+          get_numeric_info(right_t, &r_w, &r_s, &r_f);
+
+          node->eval_type = (l_w >= r_w) ? left_t : right_t;
+        }
+        break;
+      }
+      case AST_CAST:
+        if (!is_type_compatible(node->as.cast.target,
+                                node->as.cast.op->eval_type, true)) {
+          fprintf(stderr, "Type Error at %u:%u: Invalid explicit cast.\n", node->as.cast.target.name.line, node->as.cast.target.name.col);
+        }
+        node->eval_type = node->as.cast.target;
+        break;
+      case AST_RET:
+        if (item.curr_func && node->as.ret_stmt.expr) {
+          if (!is_type_compatible(item.curr_func->as.func_def.ret_type,
+                                  node->as.ret_stmt.expr->eval_type, false)) {
+            fprintf(stderr, "Type Error at %u:%u: Function return type mismatch.\n", node->as.ret_stmt.ret_kw.line, node->as.ret_stmt.ret_kw.col);
+          }
+        }
+        break;
+      case AST_FUNC_CALL:
+        if (node->as.func_call.caller->type == AST_IDENTIF &&
+            node->as.func_call.caller->as.identif.res_sm &&
+            node->as.func_call.caller->as.identif.res_sm->decl_node) {
+
+          Sym *sym = node->as.func_call.caller->as.identif.res_sm;
+
+          if (sym->kind == SYM_FUNC) {
+            node->eval_type = sym->decl_node->as.func_def.ret_type;
+          } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION) {
+            // Assign the Struct/Union type for constructor calls
+            node->eval_type.name = sym->name;
+            node->eval_type.is_custom = true;
+          } else {
+            node->eval_type = create_basic_type("any");
+          }
+        } else if (node->as.func_call.caller->type == AST_MEMBER) {
+					// TODO: Run a lookup for the struct methods
+          node->eval_type = create_basic_type("any");
+        }
+        break;
+      case AST_ARRAY_LIT:
+        if (item.expected) {
+          node->eval_type = *item.expected;
+        } else if (node->as.array_lit.elements) {
+          // Get type from the first element and increment array dimensions
+          node->eval_type = node->as.array_lit.elements->eval_type;
+          node->eval_type.array_dimens++;
+        }
+        break;
+      case AST_BLOCK: {
+        // A blocks type evaluates to the type of its last statement
+        AstNode *last = node->as.block.first_stmt;
+        while (last && last->next) {
+          last = last->next;
+        }
+        if (last) {
+          node->eval_type = last->eval_type;
+        }
+        break;
+      }
+      case AST_IF:
+        // For if expressions inside blocks
+        if (node->as.if_check.action) {
+          node->eval_type = node->as.if_check.action->eval_type;
+        }
+        break;
+
+      case AST_INDEX:
+        if (node->as.index.base) {
+          node->eval_type = node->as.index.base->eval_type;
+          // Strip one array dimension off since we are indexing into it
+          if (node->eval_type.array_dimens > 0) {
+            node->eval_type.array_dimens--;
+          }
+        }
+        break;
+
+      case AST_ADDR_OF:
+        if (node->as.unop.operand) {
+          node->eval_type = node->as.unop.operand->eval_type;
+          node->eval_type.ptr_depth++;
+        }
+        break;
+
+      case AST_DEREF:
+        if (node->as.unop.operand) {
+          node->eval_type = node->as.unop.operand->eval_type;
+          node->eval_type.ptr_depth--;
+        }
+        break;
+
+      case AST_UOP:
+        // Prefix/Postfix operators keep the base type
+        if (node->as.unop.operand) {
+          node->eval_type = node->as.unop.operand->eval_type;
+        }
+        break;
+      case AST_MEMBER: {
+        // TODO: Look up the actual field type from the struct/union definition
+        node->eval_type = create_basic_type("any");
+        break;
+      }
+      default:
+        break;
+      }
+    }
+  }
   free(stack);
 }
 
@@ -4351,6 +4948,19 @@ void compile_project(const char *entry_file) {
   }
 
   printf("Scope resolution complete.\n");
+
+  for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+    HashEntry *entry = sem.mod_cache.buckets[i];
+    while (entry) {
+      Module *mod = (Module *)entry->value;
+
+      // Post-order type propagation
+      type_check_ast(&arena, mod->ast_root);
+
+      entry = entry->next;
+    }
+  }
+  printf("Type checking complete.\n");
 
   if (pending.paths)
     free((void *)pending.paths);
