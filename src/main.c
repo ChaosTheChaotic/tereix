@@ -188,7 +188,7 @@ typedef struct {
   const char *start;
   unsigned int len;
   TOKEN_TYPE type;
-	unsigned int line, col;
+  unsigned int line, col;
 } Token;
 
 typedef struct {
@@ -712,6 +712,7 @@ const char *load_file(const char *path) {
 
 static const char *kwlist[] = {
     SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT) "mut",
+    "size",
     "bool",
     "str", // Technically should be parsed as char[] but oh well
     "void",
@@ -922,10 +923,14 @@ Token next_token(LexCtx *ctx) {
   skip_irrelevant(ctx);
 
   ctx->start = ctx->curr;
-	unsigned int tk_line = ctx->line;
-	unsigned int tk_col = ctx->col;
+  unsigned int tk_line = ctx->line;
+  unsigned int tk_col = ctx->col;
   if (*ctx->curr == '\0') {
-    return (Token){.start = ctx->start, .len = 0, .type = TOKEN_EOF, .line = tk_line, .col = tk_col};
+    return (Token){.start = ctx->start,
+                   .len = 0,
+                   .type = TOKEN_EOF,
+                   .line = tk_line,
+                   .col = tk_col};
   }
 
   TOKEN_TYPE type;
@@ -1061,7 +1066,11 @@ Token next_token(LexCtx *ctx) {
     ctx->col += len;
   }
 
-  return (Token){.start = ctx->start, .len = len, .type = type, .line = tk_line, .col = tk_col};
+  return (Token){.start = ctx->start,
+                 .len = len,
+                 .type = type,
+                 .line = tk_line,
+                 .col = tk_col};
 }
 
 Token peek_token(LexCtx *ctx) {
@@ -1143,6 +1152,7 @@ void recover_state(ParseCtx *ctx, ParseState current_state) {
 
 static const char *typelist[] = {
     SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT) "mut",
+    "size",
     "bool",
     "str", // Technically should be parsed as char[] but oh well
     "void",
@@ -1332,7 +1342,7 @@ DataType parse_type(ParseCtx *ctx) {
     adv(ctx);
   }
 
-if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
+  if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
       strncmp(ctx->curr.start, "self", 4) == 0) {
     if (ctx->ag_depth == 0) {
       fprintf(stderr,
@@ -1345,7 +1355,7 @@ if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
       return type;
     }
     type.is_self = true;
-    
+
     // Find the parent aggregate type to inherit its actual name
     for (int i = ctx->node_count - 1; i >= 0; i--) {
       AstNode *parent = ctx->node_stack[i];
@@ -1360,7 +1370,7 @@ if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
         break;
       }
     }
-    
+
     adv(ctx);
   } else if (ctx->curr.type == TOKEN_IDENTIF ||
              is_builtin_type_kw(ctx, ctx->curr)) {
@@ -4730,6 +4740,17 @@ void type_check_ast(Arena *arena, AstNode *root) {
         DataType left_t = node->as.binop.left->eval_type;
         DataType right_t = node->as.binop.right->eval_type;
 
+        if (node->as.binop.op.start[0] == '/') {
+          AstNode *right = node->as.binop.right;
+
+          if (right->type == AST_NUM_LIT) {
+            if (atof(right->as.num_lit.val.start) == 0.0) {
+              fprintf(stderr, "Error at line %u, col %u: Division by zero.\n",
+                      node->as.binop.op.line, node->as.binop.op.col);
+            }
+          }
+        }
+
         if (!is_type_compatible(left_t, right_t, false) &&
             !is_type_compatible(right_t, left_t, false)) {
           fprintf(stderr,
@@ -4762,7 +4783,9 @@ void type_check_ast(Arena *arena, AstNode *root) {
       case AST_CAST:
         if (!is_type_compatible(node->as.cast.target,
                                 node->as.cast.op->eval_type, true)) {
-          fprintf(stderr, "Type Error at %u:%u: Invalid explicit cast.\n", node->as.cast.target.name.line, node->as.cast.target.name.col);
+          fprintf(stderr, "Type Error at %u:%u: Invalid explicit cast.\n",
+                  node->as.cast.target.name.line,
+                  node->as.cast.target.name.col);
         }
         node->eval_type = node->as.cast.target;
         break;
@@ -4770,7 +4793,9 @@ void type_check_ast(Arena *arena, AstNode *root) {
         if (item.curr_func && node->as.ret_stmt.expr) {
           if (!is_type_compatible(item.curr_func->as.func_def.ret_type,
                                   node->as.ret_stmt.expr->eval_type, false)) {
-            fprintf(stderr, "Type Error at %u:%u: Function return type mismatch.\n", node->as.ret_stmt.ret_kw.line, node->as.ret_stmt.ret_kw.col);
+            fprintf(
+                stderr, "Type Error at %u:%u: Function return type mismatch.\n",
+                node->as.ret_stmt.ret_kw.line, node->as.ret_stmt.ret_kw.col);
           }
         }
         break;
@@ -4791,7 +4816,7 @@ void type_check_ast(Arena *arena, AstNode *root) {
             node->eval_type = create_basic_type("any");
           }
         } else if (node->as.func_call.caller->type == AST_MEMBER) {
-					// TODO: Run a lookup for the struct methods
+          // TODO: Run a lookup for the struct methods
           node->eval_type = create_basic_type("any");
         }
         break;
