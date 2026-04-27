@@ -2108,7 +2108,7 @@ bool parse_step(ParseCtx *ctx) {
       push_state(ctx, current_state);
       break;
     }
-    report_error(ctx, "Unexpected token %.*s in global scope");
+    report_error(ctx, "Unexpected token in global scope");
     adv(ctx);
     sync(ctx);
     recover_state(ctx, current_state);
@@ -2373,7 +2373,7 @@ bool parse_step(ParseCtx *ctx) {
       }
     }
 
-    report_error(ctx, "Unexpected token %.*s in expression");
+    report_error(ctx, "Unexpected token in expression");
     adv(ctx);
     sync(ctx);
     recover_state(ctx, current_state);
@@ -2742,7 +2742,7 @@ bool parse_step(ParseCtx *ctx) {
       push_state(ctx, STATE_EXPR_STMT_DONE);
       push_state(ctx, STATE_IN_EXPR);
     } else {
-      report_error(ctx, "Unexpected token %.*s in block");
+      report_error(ctx, "Unexpected token in block");
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -3539,7 +3539,7 @@ bool parse_step(ParseCtx *ctx) {
       }
     }
 
-    report_error(ctx, "Unexpected token %.*s in switch body");
+    report_error(ctx, "Unexpected token in switch body");
     adv(ctx);
     sync(ctx);
     recover_state(ctx, current_state);
@@ -4890,6 +4890,615 @@ void type_check_ast(Arena *arena, AstNode *root) {
   free(stack);
 }
 
+typedef struct {
+  char *buf;
+  size_t len;
+  size_t cap;
+} StringBuilder;
+
+void sb_init(StringBuilder *sb) {
+  sb->cap = 2048;
+  sb->len = 0;
+  sb->buf = malloc(sb->cap);
+  sb->buf[0] = '\0';
+}
+
+void sb_append_len(StringBuilder *sb, const char *str, size_t slen) {
+  if (sb->len + slen + 1 > sb->cap) {
+    sb->cap = (sb->len + slen + 1) * 2;
+    sb->buf = realloc(sb->buf, sb->cap);
+  }
+  memcpy(sb->buf + sb->len, str, slen);
+  sb->len += slen;
+  sb->buf[sb->len] = '\0';
+}
+
+void sb_append(StringBuilder *sb, const char *str) {
+  sb_append_len(sb, str, strlen(str));
+}
+
+void sb_free(StringBuilder *sb) { free(sb->buf); }
+
+void gen_type(DataType type, StringBuilder *sb) {
+  if (type.is_static)
+    sb_append(sb, "static ");
+  if (type.is_extern)
+    sb_append(sb, "extern ");
+
+  if (!type.is_mut)
+    sb_append(sb, "const ");
+
+  const char *n = type.name.start;
+  int l = type.name.len;
+
+  if (l == 3 && strncmp(n, "i32", 3) == 0)
+    sb_append(sb, "int32_t");
+  else if (l == 3 && strncmp(n, "u32", 3) == 0)
+    sb_append(sb, "uint32_t");
+  else if (l == 2 && strncmp(n, "i8", 2) == 0)
+    sb_append(sb, "int8_t");
+  else if (l == 2 && strncmp(n, "u8", 2) == 0)
+    sb_append(sb, "uint8_t");
+  else if (l == 3 && strncmp(n, "i64", 3) == 0)
+    sb_append(sb, "int64_t");
+  else if (l == 3 && strncmp(n, "u64", 3) == 0)
+    sb_append(sb, "uint64_t");
+  else if (l == 3 && strncmp(n, "f32", 3) == 0)
+    sb_append(sb, "float");
+  else if (l == 3 && strncmp(n, "f64", 3) == 0)
+    sb_append(sb, "double");
+  else if (l == 4 && strncmp(n, "size", 4) == 0)
+    sb_append(sb, "size_t");
+  else if (l == 4 && strncmp(n, "bool", 4) == 0)
+    sb_append(sb, "bool");
+  else if (l == 4 && strncmp(n, "void", 4) == 0)
+    sb_append(sb, "void");
+  else if (l == 3 && strncmp(n, "str", 3) == 0)
+    sb_append(sb, "char*");
+  else if (l == 3 && strncmp(n, "any", 3) == 0)
+    sb_append(sb, "void*");
+  else
+    sb_append_len(sb, n, l);
+
+  sb_append(sb, " ");
+
+  // Treat depth and arrays as pointers for C output
+  long total_ptrs = type.ptr_depth + type.array_dimens;
+  for (long i = 0; i < total_ptrs; i++) {
+    sb_append(sb, "*");
+  }
+}
+
+typedef struct {
+  AstNode *node;
+  int step;
+  AstNode *aux;
+  int flags;
+} IterFrame;
+
+void generate_c_code(AstNode *root, StringBuilder *sb) {
+  size_t cap = 2048;
+  IterFrame *stack = malloc(sizeof(IterFrame) * cap);
+  size_t top = 0;
+
+  stack[top++] = (IterFrame){root, 0, NULL, 0};
+
+  while (top > 0) {
+    IterFrame *f = &stack[top - 1];
+    AstNode *n = f->node;
+
+    if (!n) {
+      top--;
+      continue;
+    }
+
+    if (n->type == AST_PROGRAM || n->type == AST_BLOCK ||
+        n->type == AST_EXTERN) {
+      if (f->step == 0) {
+        if (n->type == AST_BLOCK)
+          sb_append(sb, "{\n");
+        f->aux = (n->type == AST_EXTERN) ? n->as.extern_block.contents
+                                         : n->as.block.first_stmt;
+        f->step = 1;
+      } else if (f->step == 1) {
+        if (f->aux) {
+          AstNode *stmt = f->aux;
+          f->aux = f->aux->next;
+
+          // Expressions evaluated as statements require a trailing semicolon
+          bool needs_semi =
+              (stmt->type == AST_FUNC_CALL || stmt->type == AST_BINOP ||
+               stmt->type == AST_UOP || stmt->type == AST_IDENTIF ||
+               stmt->type == AST_NUM_LIT || stmt->type == AST_STR_LIT ||
+               stmt->type == AST_MEMBER);
+          f->flags = needs_semi ? 1 : 0;
+          f->step = 2;
+
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){stmt, 0, NULL, 0};
+        } else {
+          f->step = 3;
+        }
+      } else if (f->step == 2) {
+        if (f->flags)
+          sb_append(sb, ";\n");
+        f->step = 1; // Loop back for next statement
+      } else {
+        if (n->type == AST_BLOCK)
+          sb_append(sb, "}\n");
+        top--;
+      }
+    } else if (n->type == AST_FUNC) {
+      if (f->step == 0) {
+        if (n->as.func_def.is_extern)
+          sb_append(sb, "extern ");
+        if (n->as.func_def.is_inline)
+          sb_append(sb, "inline ");
+
+        gen_type(n->as.func_def.ret_type, sb);
+        sb_append_len(sb, n->as.func_def.fn_name.start,
+                      n->as.func_def.fn_name.len);
+        sb_append(sb, "(");
+
+        f->aux = n->as.func_def.params;
+        f->step = 1;
+      } else if (f->step == 1) {
+        if (f->aux) {
+          AstNode *p = f->aux;
+          gen_type(p->as.fn_param.type, sb);
+          sb_append_len(sb, p->as.fn_param.id.start, p->as.fn_param.id.len);
+          f->aux = f->aux->next;
+          if (f->aux)
+            sb_append(sb, ", ");
+        } else {
+          sb_append(sb, ") ");
+          if (n->as.func_def.block) {
+            f->step = 2;
+            if (top >= cap) {
+              cap *= 2;
+              stack = realloc(stack, sizeof(IterFrame) * cap);
+              f = &stack[top - 1];
+            }
+            stack[top++] = (IterFrame){n->as.func_def.block, 0, NULL, 0};
+          } else {
+            sb_append(sb, ";\n");
+            top--;
+          }
+        }
+      } else {
+        sb_append(sb, "\n");
+        top--;
+      }
+    } else if (n->type == AST_VAR_DECL) {
+      if (f->step == 0) {
+        gen_type(n->as.var_decl.type, sb);
+        sb_append_len(sb, n->as.var_decl.id.start, n->as.var_decl.id.len);
+        if (n->as.var_decl.init) {
+          sb_append(sb, " = ");
+          f->step = 1;
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){n->as.var_decl.init, 0, NULL, 0};
+        } else {
+          sb_append(sb, ";\n");
+          top--;
+        }
+      } else {
+        sb_append(sb, ";\n");
+        top--;
+      }
+    } else if (n->type == AST_BINOP) {
+      if (f->step == 0) {
+        sb_append(sb, "(");
+        f->step = 1;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.binop.left, 0, NULL, 0};
+      } else if (f->step == 1) {
+        sb_append(sb, " ");
+        sb_append_len(sb, n->as.binop.op.start, n->as.binop.op.len);
+        sb_append(sb, " ");
+        f->step = 2;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.binop.right, 0, NULL, 0};
+      } else {
+        sb_append(sb, ")");
+        top--;
+      }
+    } else if (n->type == AST_UOP || n->type == AST_ADDR_OF ||
+               n->type == AST_DEREF) {
+      if (f->step == 0) {
+        if (n->type == AST_ADDR_OF)
+          sb_append(sb, "&(");
+        else if (n->type == AST_DEREF)
+          sb_append(sb, "*(");
+        else {
+          if (!n->as.unop.is_postfix)
+            sb_append_len(sb, n->as.unop.op.start, n->as.unop.op.len);
+          sb_append(sb, "(");
+        }
+        f->step = 1;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.unop.operand, 0, NULL, 0};
+      } else {
+        sb_append(sb, ")");
+        if (n->type == AST_UOP && n->as.unop.is_postfix) {
+          sb_append_len(sb, n->as.unop.op.start, n->as.unop.op.len);
+        }
+        top--;
+      }
+    } else if (n->type == AST_IF) {
+      if (f->step == 0) {
+        sb_append(sb, "if (");
+        f->step = 1;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.if_check.check, 0, NULL, 0};
+      } else if (f->step == 1) {
+        sb_append(sb, ") ");
+        f->step = 2;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.if_check.action, 0, NULL, 0};
+      } else if (f->step == 2) {
+        if (n->as.if_check.elseAct) {
+          sb_append(sb, " else ");
+          f->step = 3;
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){n->as.if_check.elseAct, 0, NULL, 0};
+        } else {
+          top--;
+        }
+      } else {
+        top--;
+      }
+    } else if (n->type == AST_WHILE) {
+      if (f->step == 0) {
+        sb_append(sb, "while (");
+        f->step = 1;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.while_loop.check, 0, NULL, 0};
+      } else if (f->step == 1) {
+        sb_append(sb, ") ");
+        f->step = 2;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.while_loop.action, 0, NULL, 0};
+      } else {
+        top--;
+      }
+    } else if (n->type == AST_FOR) {
+      if (f->step == 0) {
+        sb_append(sb, "for (");
+        f->step = 1;
+        if (n->as.for_loop.init) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){n->as.for_loop.init, 0, NULL, 0};
+        }
+      } else if (f->step == 1) {
+        // If init missing, print standalone semi-colon (otherwise init var decl
+        // usually covers it)
+        if (!n->as.for_loop.init || n->as.for_loop.init->type != AST_VAR_DECL)
+          sb_append(sb, "; ");
+        f->step = 2;
+        if (n->as.for_loop.check) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){n->as.for_loop.check, 0, NULL, 0};
+        }
+      } else if (f->step == 2) {
+        sb_append(sb, "; ");
+        f->step = 3;
+        if (n->as.for_loop.inc) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){n->as.for_loop.inc, 0, NULL, 0};
+        }
+      } else if (f->step == 3) {
+        sb_append(sb, ") ");
+        f->step = 4;
+        if (n->as.for_loop.action) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){n->as.for_loop.action, 0, NULL, 0};
+        }
+      } else {
+        top--;
+      }
+    } else if (n->type == AST_FUNC_CALL) {
+      if (f->step == 0) {
+        f->step = 1;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.func_call.caller, 0, NULL, 0};
+      } else if (f->step == 1) {
+        sb_append(sb, "(");
+        f->aux = n->as.func_call.args;
+        f->step = 2;
+      } else if (f->step == 2) {
+        if (f->aux) {
+          AstNode *arg = f->aux;
+          f->aux = f->aux->next;
+          f->step = (f->aux != NULL) ? 3 : 4;
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){arg, 0, NULL, 0};
+        } else {
+          sb_append(sb, ")");
+          top--;
+        }
+      } else if (f->step == 3) {
+        sb_append(sb, ", ");
+        f->step = 2;
+      } else if (f->step == 4) {
+        sb_append(sb, ")");
+        top--;
+      }
+    } else if (n->type == AST_ARRAY_LIT) {
+      if (f->step == 0) {
+        sb_append(sb, "{");
+        f->aux = n->as.array_lit.elements;
+        f->step = 1;
+      } else if (f->step == 1) {
+        if (f->aux) {
+          AstNode *elem = f->aux;
+          f->aux = f->aux->next;
+          f->step = f->aux ? 2 : 3;
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){elem, 0, NULL, 0};
+        } else {
+          sb_append(sb, "}");
+          top--;
+        }
+      } else if (f->step == 2) {
+        sb_append(sb, ", ");
+        f->step = 1;
+      } else {
+        sb_append(sb, "}");
+        top--;
+      }
+    } else if (n->type == AST_RET) {
+      if (f->step == 0) {
+        sb_append(sb, "return ");
+        if (n->as.ret_stmt.expr) {
+          f->step = 1;
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){n->as.ret_stmt.expr, 0, NULL, 0};
+        } else {
+          sb_append(sb, ";\n");
+          top--;
+        }
+      } else {
+        sb_append(sb, ";\n");
+        top--;
+      }
+    } else if (n->type == AST_CAST) {
+      if (f->step == 0) {
+        sb_append(sb, "(");
+        gen_type(n->as.cast.target, sb);
+        sb_append(sb, ")(");
+        f->step = 1;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.cast.op, 0, NULL, 0};
+      } else {
+        sb_append(sb, ")");
+        top--;
+      }
+    } else if (n->type == AST_MEMBER) {
+      if (f->step == 0) {
+        f->step = 1;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.member.base, 0, NULL, 0};
+      } else {
+        sb_append(sb, ".");
+        sb_append_len(sb, n->as.member.name.start, n->as.member.name.len);
+        top--;
+      }
+    } else if (n->type == AST_INDEX) {
+      if (f->step == 0) {
+        f->step = 1;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.index.base, 0, NULL, 0};
+      } else if (f->step == 1) {
+        sb_append(sb, "[");
+        f->step = 2;
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(IterFrame) * cap);
+          f = &stack[top - 1];
+        }
+        stack[top++] = (IterFrame){n->as.index.index, 0, NULL, 0};
+      } else {
+        sb_append(sb, "]");
+        top--;
+      }
+    } else if (n->type == AST_STRUCT || n->type == AST_UNION) {
+      if (f->step == 0) {
+        if (n->type == AST_STRUCT)
+          sb_append(sb, "typedef struct {\n");
+        else
+          sb_append(sb, "typedef union {\n");
+
+        f->aux = (n->type == AST_STRUCT) ? n->as.struct_def.contents
+                                         : n->as.union_def.contents;
+        f->step = 1;
+      } else if (f->step == 1) {
+        if (f->aux) {
+          AstNode *member = f->aux;
+          f->aux = f->aux->next;
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){member, 0, NULL, 0};
+        } else {
+          sb_append(sb, "} ");
+          Token name = (n->type == AST_STRUCT) ? n->as.struct_def.structn
+                                               : n->as.union_def.unionn;
+          sb_append_len(sb, name.start, name.len);
+          sb_append(sb, ";\n");
+          top--;
+        }
+      }
+    } else if (n->type == AST_NUM_LIT) {
+      sb_append_len(sb, n->as.num_lit.val.start, n->as.num_lit.val.len);
+      top--;
+    } else if (n->type == AST_IDENTIF) {
+      sb_append_len(sb, n->as.identif.val.start, n->as.identif.val.len);
+      top--;
+    } else if (n->type == AST_STR_LIT) {
+      sb_append_len(sb, n->as.str_lit.val.start, n->as.str_lit.val.len);
+      top--;
+    } else if (n->type == AST_BOOL_LIT) {
+      sb_append_len(sb, n->as.bool_lit.val.start, n->as.bool_lit.val.len);
+      top--;
+    } else if (n->type == AST_CHAR_LIT) {
+      sb_append_len(sb, n->as.char_lit.val.start, n->as.char_lit.val.len);
+      top--;
+    } else if (n->type == AST_NULL_LIT) {
+      sb_append(sb, "NULL");
+      top--;
+    } else if (n->type == AST_BREAK) {
+      sb_append(sb, "break;\n");
+      top--;
+    } else if (n->type == AST_CONTINUE) {
+      sb_append(sb, "continue;\n");
+      top--;
+    } else {
+      // Drop unhandled specific sub types
+      top--;
+    }
+  }
+
+  free(stack);
+}
+
+bool output_to_c_and_compile(AstNode *root, const char *out_binary_name,
+                             const char **flags, int flag_count) {
+  if (!root)
+    return false;
+
+  StringBuilder code;
+  sb_init(&code);
+
+  // Standard libs
+  sb_append(&code, "/* Auto-generated by Tereix Transpiler */\n");
+  sb_append(&code, "#include <stdio.h>\n");
+  sb_append(&code, "#include <stdlib.h>\n");
+  sb_append(&code, "#include <stdint.h>\n");
+  sb_append(&code, "#include <stdbool.h>\n");
+  sb_append(&code, "#include <string.h>\n\n");
+
+  generate_c_code(root, &code);
+
+  const char *tmp_c_file = "output_gen.c";
+  FILE *f = fopen(tmp_c_file, "w");
+  if (!f) {
+    fprintf(stderr, "Failed to create C output file.\n");
+    sb_free(&code);
+    return false;
+  }
+  fwrite(code.buf, 1, code.len, f);
+  fclose(f);
+  sb_free(&code);
+
+  StringBuilder cmd;
+  sb_init(&cmd);
+
+  sb_append(&cmd, "gcc -o ");
+  sb_append(&cmd, out_binary_name);
+  sb_append(&cmd, " ");
+  sb_append(&cmd, tmp_c_file);
+
+  for (int i = 0; i < flag_count; i++) {
+    sb_append(&cmd, " ");
+    sb_append(&cmd, flags[i]);
+  }
+
+  printf("Executing: %s\n", cmd.buf);
+
+  // TODO: Change to fork and exec later?
+  int res = system(cmd.buf);
+  sb_free(&cmd);
+
+  return res == 0;
+}
+
 void compile_project(const char *entry_file) {
   Arena arena = {0};
   SemCtx sem = {0};
@@ -4986,6 +5595,45 @@ void compile_project(const char *entry_file) {
     }
   }
   printf("Type checking complete.\n");
+
+  const char *abs_path = resolve_alloc(&arena, entry_file);
+
+  for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+    HashEntry *entry = sem.mod_cache.buckets[i];
+    while (entry) {
+      Module *mod = entry->value;
+
+      if (strncmp(mod->abs_path, abs_path, strlen(abs_path)) == 0) {
+        printf("Transpiling main module: %s\n", entry_file);
+
+        const char *flags[] = {"-O3", "-flto", "-Wno-strict-prototypes",
+                               "-Wextra", "-Wpedantic"};
+
+        const char *base = strrchr(entry_file, '/');
+        if (base) {
+          base++;
+        } else {
+          base = entry_file;
+        }
+
+        char *bin_name = arena_alloc(&arena, strlen(base) + 1);
+        strcpy(bin_name, base);
+        char *dot = strrchr(bin_name, '.');
+        if (dot && strcmp(dot, ".tx") == 0)
+          *dot = '\0';
+
+        bool suc = output_to_c_and_compile(mod->ast_root, bin_name, flags, 5);
+        if (suc)
+          printf("Compiled successfully");
+        else
+          fprintf(stderr, "Failed to compile %s", entry_file);
+      }
+      break;
+    }
+    entry = entry->next;
+  }
+
+  printf("Compiled %s\n", entry_file);
 
   if (pending.paths)
     free((void *)pending.paths);
