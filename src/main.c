@@ -600,24 +600,21 @@ void apply_op(ParseCtx *ctx) {
 
     if (info.op.len == 1 && *info.op.start == '.') {
       if (right->type != AST_IDENTIF && right->type != AST_FUNC_CALL) {
-        fprintf(stderr,
-                "Error: Expected identifier after '.' at line %u, col %u\n",
-                ctx->lex->line, ctx->lex->col);
-        exit(1);
+        report_error(ctx, "Expected identifier after '.'");
+        return;
       }
 
       Token member_name;
       if (right->type == AST_IDENTIF) {
         member_name = right->as.identif.val;
       } else {
-        if (right->as.func_call.caller->type != AST_IDENTIF) {
-          fprintf(
-              stderr,
-              "Error: Member call must be an identifier at line %u, col %u\n",
-              ctx->lex->line, ctx->lex->col);
-          exit(1);
+        if (right->as.func_call.caller &&
+            right->as.func_call.caller->type == AST_IDENTIF) {
+          member_name = right->as.func_call.caller->as.identif.val;
+        } else {
+          report_error(ctx, "Member call must be an identifier");
+          return;
         }
-        member_name = right->as.func_call.caller->as.identif.val;
       }
 
       AstNode *m_node = new_node(ctx->arena, AST_MEMBER);
@@ -1970,7 +1967,8 @@ bool parse_step(ParseCtx *ctx) {
     if (is_type(ctx) || is_decl(ctx)) {
       DataType type = parse_type(ctx);
 
-      if (ctx->curr.type != TOKEN_IDENTIF) {
+      if (ctx->curr.type != TOKEN_IDENTIF &&
+          !is_builtin_type_kw(ctx, ctx->curr)) {
         report_error(ctx, "Expected identifier after type");
         adv(ctx);
         sync(ctx);
@@ -2019,7 +2017,8 @@ bool parse_step(ParseCtx *ctx) {
                     ctx->lex->line, ctx->lex->col);
             return false;
           } else {
-            if (ctx->curr.type != TOKEN_IDENTIF) {
+            if (ctx->curr.type != TOKEN_IDENTIF &&
+                !is_builtin_type_kw(ctx, ctx->curr)) {
               fprintf(stderr,
                       "Expected identifier after type in params at line %u, "
                       "col %u\n",
@@ -2256,7 +2255,8 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_IDENTIF || is_lit_type(ctx->curr.type) ||
         (ctx->curr.type == TOKEN_KW &&
-         strncmp(ctx->curr.start, "null", 4) == 0)) {
+         strncmp(ctx->curr.start, "null", 4) == 0) ||
+        is_builtin_type_kw(ctx, ctx->curr)) {
       ctx->expect_operand = false;
 
       ASTN_TYPE node_type;
@@ -2278,7 +2278,10 @@ bool parse_step(ParseCtx *ctx) {
         node_type = AST_BOOL_LIT;
         break;
       case TOKEN_KW:
-        node_type = AST_NULL_LIT;
+        if (strncmp(ctx->curr.start, "null", 4) == 0)
+          node_type = AST_NULL_LIT;
+        else
+          node_type = AST_IDENTIF;
         break;
       default:
         return false;
@@ -3132,7 +3135,8 @@ bool parse_step(ParseCtx *ctx) {
       return false;
     }
 
-    if (ctx->curr.type != TOKEN_IDENTIF) {
+    if (ctx->curr.type != TOKEN_IDENTIF &&
+        !is_builtin_type_kw(ctx, ctx->curr)) {
       report_error(ctx, "Expected field/method identifier");
       adv(ctx);
       sync(ctx);
@@ -3183,7 +3187,8 @@ bool parse_step(ParseCtx *ctx) {
             p_name.type = TOKEN_IDENTIF;
           }
         } else {
-          if (ctx->curr.type != TOKEN_IDENTIF) {
+          if (ctx->curr.type != TOKEN_IDENTIF &&
+              !is_builtin_type_kw(ctx, ctx->curr)) {
             fprintf(
                 stderr,
                 "Expected identifier after type in params at line %u, col %u\n",
@@ -3325,9 +3330,6 @@ bool parse_step(ParseCtx *ctx) {
       }
     }
 
-    // Otherwise handle as enum member (or method, if we allow functions inside
-    // enums) For simplicity, we treat functions as enum members with a body?
-    // Not typical. Here we only handle standard enum members.
     if (ctx->curr.type != TOKEN_IDENTIF) {
       report_error(ctx, "Expected identifier in enum");
       adv(ctx);
@@ -5632,8 +5634,6 @@ void compile_project(const char *entry_file) {
     }
     entry = entry->next;
   }
-
-  printf("Compiled %s\n", entry_file);
 
   if (pending.paths)
     free((void *)pending.paths);
