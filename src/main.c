@@ -5257,6 +5257,19 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
       }
     } else if (n->type == AST_FUNC_CALL) {
       if (f->step == 0) {
+        bool is_ctor = false;
+        if (n->as.func_call.caller &&
+            n->as.func_call.caller->type == AST_IDENTIF) {
+          Sym *sym = n->as.func_call.caller->as.identif.res_sm;
+          if (sym && (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
+                      sym->kind == SYM_ENUM)) {
+            is_ctor = true;
+          }
+        }
+        f->flags = is_ctor ? 1 : 0;
+
+        if (f->flags)
+          sb_append(sb, "(");
         f->step = 1;
         if (top >= cap) {
           cap *= 2;
@@ -5265,7 +5278,11 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
         }
         stack[top++] = (IterFrame){n->as.func_call.caller, 0, NULL, 0};
       } else if (f->step == 1) {
-        sb_append(sb, "(");
+        if (f->flags)
+          sb_append(sb, "){");
+        else
+          sb_append(sb, "(");
+
         f->aux = n->as.func_call.args;
         f->step = 2;
       } else if (f->step == 2) {
@@ -5280,14 +5297,14 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
           }
           stack[top++] = (IterFrame){arg, 0, NULL, 0};
         } else {
-          sb_append(sb, ")");
+          sb_append(sb, f->flags ? "}" : ")");
           top--;
         }
       } else if (f->step == 3) {
         sb_append(sb, ", ");
         f->step = 2;
       } else if (f->step == 4) {
-        sb_append(sb, ")");
+        sb_append(sb, f->flags ? "}" : ")");
         top--;
       }
     } else if (n->type == AST_ARRAY_LIT) {
@@ -5450,10 +5467,372 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
   free(stack);
 }
 
+typedef struct {
+  AstNode *node;
+  Token agg;
+} FlattenFrame;
+
+void flatten_sues(AstNode *root) {
+  if (!root || root->type != AST_PROGRAM)
+    return;
+
+  AstNode *hoisted_funcs_head = NULL, *hoisted_funcs_tail = NULL;
+  AstNode *hoisted_types_head = NULL, *hoisted_types_tail = NULL;
+
+  size_t cap = 1024;
+  FlattenFrame *stack = malloc(sizeof(FlattenFrame) * cap);
+  size_t top = 0;
+
+  stack[top++] = (FlattenFrame){root, (Token){0}};
+
+  while (top > 0) {
+    FlattenFrame frame = stack[--top];
+    AstNode *n = frame.node;
+    Token agg = frame.agg;
+
+    if (!n)
+      continue;
+
+    if (n->type == AST_STRUCT || n->type == AST_UNION || n->type == AST_ENUM) {
+      agg = (n->type == AST_STRUCT)  ? n->as.struct_def.structn
+            : (n->type == AST_UNION) ? n->as.union_def.unionn
+                                     : n->as.enum_def.enumn;
+
+      AstNode **curr_ptr = (n->type == AST_STRUCT)  ? &n->as.struct_def.contents
+                           : (n->type == AST_UNION) ? &n->as.union_def.contents
+                                                    : &n->as.enum_def.contents;
+
+      while (*curr_ptr) {
+        AstNode *child = *curr_ptr;
+        if (child->type == AST_FUNC || child->type == AST_STRUCT ||
+            child->type == AST_UNION || child->type == AST_ENUM) {
+
+          *curr_ptr = child->next;
+          child->next = NULL;
+
+          if (child->type == AST_FUNC) {
+            if (!hoisted_funcs_head)
+              hoisted_funcs_head = hoisted_funcs_tail = child;
+            else {
+              hoisted_funcs_tail->next = child;
+              hoisted_funcs_tail = child;
+            }
+          } else {
+            if (!hoisted_types_head)
+              hoisted_types_head = hoisted_types_tail = child;
+            else {
+              hoisted_types_tail->next = child;
+              hoisted_types_tail = child;
+            }
+          }
+
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){child, agg};
+        } else {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){child, agg};
+          curr_ptr = &child->next;
+        }
+      }
+    } else if (n->type == AST_IDENTIF) {
+      // Replace occurrences of self identifier with sue name
+      if (n->as.identif.val.len == 4 &&
+          strncmp(n->as.identif.val.start, "self", 4) == 0 && agg.len > 0) {
+        n->as.identif.val = agg;
+      }
+    } else {
+      // Push children safely without recursion
+      switch (n->type) {
+      case AST_PROGRAM:
+      case AST_BLOCK: {
+        AstNode *stmt = n->as.block.first_stmt;
+        while (stmt) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){stmt, agg};
+          stmt = stmt->next;
+        }
+        break;
+      }
+      case AST_FUNC:
+        if (n->as.func_def.params) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.func_def.params, agg};
+        }
+        if (n->as.func_def.block) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.func_def.block, agg};
+        }
+        break;
+      case AST_PARAM:
+        if (n->as.fn_param.id.len == 4 &&
+            strncmp(n->as.fn_param.id.start, "self", 4) == 0 && agg.len > 0) {
+          n->as.fn_param.id = agg;
+        }
+        break;
+      case AST_VAR_DECL:
+        if (n->as.var_decl.id.len == 4 &&
+            strncmp(n->as.var_decl.id.start, "self", 4) == 0 && agg.len > 0) {
+          n->as.var_decl.id = agg;
+        }
+        if (n->as.var_decl.init) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.var_decl.init, agg};
+        }
+        break;
+      case AST_BINOP:
+        if (top + 2 >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.binop.right, agg};
+        stack[top++] = (FlattenFrame){n->as.binop.left, agg};
+        break;
+      case AST_UOP:
+      case AST_ADDR_OF:
+      case AST_DEREF:
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.unop.operand, agg};
+        break;
+      case AST_IF:
+        if (n->as.if_check.elseAct) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.if_check.elseAct, agg};
+        }
+        if (n->as.if_check.action) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.if_check.action, agg};
+        }
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.if_check.check, agg};
+        break;
+      case AST_WHILE:
+        if (n->as.while_loop.action) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.while_loop.action, agg};
+        }
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.while_loop.check, agg};
+        break;
+      case AST_FOR:
+        if (n->as.for_loop.action) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.for_loop.action, agg};
+        }
+        if (n->as.for_loop.inc) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.for_loop.inc, agg};
+        }
+        if (n->as.for_loop.check) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.for_loop.check, agg};
+        }
+        if (n->as.for_loop.init) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.for_loop.init, agg};
+        }
+        break;
+      case AST_FUNC_CALL: {
+        AstNode *arg = n->as.func_call.args;
+        while (arg) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){arg, agg};
+          arg = arg->next;
+        }
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.func_call.caller, agg};
+        break;
+      }
+      case AST_ARRAY_LIT: {
+        AstNode *elem = n->as.array_lit.elements;
+        while (elem) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){elem, agg};
+          elem = elem->next;
+        }
+        break;
+      }
+      case AST_INDEX:
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.index.index, agg};
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.index.base, agg};
+        break;
+      case AST_MEMBER:
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.member.base, agg};
+        break;
+      case AST_RET:
+        if (n->as.ret_stmt.expr) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.ret_stmt.expr, agg};
+        }
+        break;
+      case AST_DEFER:
+        if (n->as.defer_stmt.contents) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.defer_stmt.contents, agg};
+        }
+        break;
+      case AST_SWITCH:
+        if (n->as.switch_stmt.default_case) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.switch_stmt.default_case, agg};
+        }
+        {
+          AstNode *c = n->as.switch_stmt.cases;
+          while (c) {
+            if (top >= cap) {
+              cap *= 2;
+              stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            }
+            stack[top++] = (FlattenFrame){c, agg};
+            c = c->next;
+          }
+        }
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.switch_stmt.check, agg};
+        break;
+      case AST_CASE:
+        if (n->as.case_stmt.action) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){n->as.case_stmt.action, agg};
+        }
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.case_stmt.val, agg};
+        break;
+      case AST_EXTERN: {
+        AstNode *stmt = n->as.extern_block.contents;
+        while (stmt) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          }
+          stack[top++] = (FlattenFrame){stmt, agg};
+          stmt = stmt->next;
+        }
+        break;
+      }
+      case AST_CAST:
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+        }
+        stack[top++] = (FlattenFrame){n->as.cast.op, agg};
+        break;
+      default:
+        break;
+      }
+    }
+  }
+
+  free(stack);
+
+  if (hoisted_funcs_head) {
+    AstNode *curr = root->as.block.first_stmt;
+    if (!curr)
+      root->as.block.first_stmt = hoisted_funcs_head;
+    else {
+      while (curr->next)
+        curr = curr->next;
+      curr->next = hoisted_funcs_head;
+    }
+  }
+  if (hoisted_types_head) {
+    hoisted_types_tail->next = root->as.block.first_stmt;
+    root->as.block.first_stmt = hoisted_types_head;
+  }
+}
+
 bool output_to_c_and_compile(AstNode *root, const char *out_binary_name,
                              const char **flags, int flag_count) {
   if (!root)
     return false;
+
+	flatten_sues(root);
 
   StringBuilder code;
   sb_init(&code);
