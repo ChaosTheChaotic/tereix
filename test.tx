@@ -26,7 +26,7 @@ enum Bee {
 }
 
 struct Xexor {
-	bool no;
+	mut bool no;
 	str yes;
 	self next;
 	union onion {
@@ -81,7 +81,7 @@ async inline i32 get_a(bool x) {
 }
 
 u8 main(u32 argc, str[] argv) {
-	i32 va = get_a(false);
+	mut i32 va = get_a(false);
 	i32 b = get_a(true) + 1;
 	i32 faah = Xexor.size();
 	Xexor ber;

@@ -5429,10 +5429,17 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
       }
     } else if (n->type == AST_STRUCT || n->type == AST_UNION) {
       if (f->step == 0) {
-        if (n->type == AST_STRUCT)
-          sb_append(sb, "typedef struct {\n");
-        else
-          sb_append(sb, "typedef union {\n");
+        if (n->type == AST_STRUCT) {
+          sb_append(sb, "typedef struct ");
+          sb_append_len(sb, n->as.struct_def.structn.start,
+                        n->as.struct_def.structn.len);
+					sb_append(sb, " {\n");
+        } else {
+          sb_append(sb, "typedef union ");
+          sb_append_len(sb, n->as.union_def.unionn.start,
+                        n->as.union_def.unionn.len);
+					sb_append(sb, " {\n");
+        }
 
         f->aux = (n->type == AST_STRUCT) ? n->as.struct_def.contents
                                          : n->as.union_def.contents;
