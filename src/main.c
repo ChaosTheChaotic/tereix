@@ -1300,24 +1300,41 @@ bool parse_step(ParseCtx *ctx);
 DataType parse_type(ParseCtx *ctx) {
   DataType type = {0};
 
-  while (ctx->curr.type == TOKEN_KW) {
-    if (strncmp(ctx->curr.start, "static", ctx->curr.len) == 0) {
-      type.is_static = true;
-      adv(ctx);
-    } else if (strncmp(ctx->curr.start, "mut", ctx->curr.len) == 0) {
-      type.is_mut = true;
-      adv(ctx);
-    } else if (strncmp(ctx->curr.start, "async", ctx->curr.len) == 0) {
-      type.is_async = true;
-      adv(ctx);
-    } else if (strncmp(ctx->curr.start, "inline", ctx->curr.len) == 0) {
-      type.is_inline = true;
-      adv(ctx);
-    } else if (strncmp(ctx->curr.start, "threadlocal", ctx->curr.len) == 0) {
-      type.is_threadlocal = true;
-      adv(ctx);
-    } else if (strncmp(ctx->curr.start, "extern", ctx->curr.len) == 0) {
-      type.is_extern = true;
+  while (true) {
+    if (ctx->curr.type == TOKEN_KW) {
+      if (strncmp(ctx->curr.start, "static", ctx->curr.len) == 0) {
+        type.is_static = true;
+        adv(ctx);
+      } else if (strncmp(ctx->curr.start, "mut", ctx->curr.len) == 0) {
+        type.is_mut = true;
+        adv(ctx);
+      } else if (strncmp(ctx->curr.start, "async", ctx->curr.len) == 0) {
+        type.is_async = true;
+        adv(ctx);
+      } else if (strncmp(ctx->curr.start, "inline", ctx->curr.len) == 0) {
+        type.is_inline = true;
+        adv(ctx);
+      } else if (strncmp(ctx->curr.start, "threadlocal", ctx->curr.len) == 0) {
+        type.is_threadlocal = true;
+        adv(ctx);
+      } else if (strncmp(ctx->curr.start, "extern", ctx->curr.len) == 0) {
+        type.is_extern = true;
+        adv(ctx);
+      } else {
+        break;
+      }
+    } else if (ctx->curr.len == 1 &&
+               (*ctx->curr.start == '*' || *ctx->curr.start == '&')) {
+      switch (*ctx->curr.start) {
+      case '*': {
+        type.ptr_depth++;
+        break;
+      }
+      case '&': {
+        type.ptr_depth--;
+        break;
+      }
+      }
       adv(ctx);
     } else {
       break;
@@ -4927,8 +4944,13 @@ void gen_type(DataType type, StringBuilder *sb) {
   if (type.is_extern)
     sb_append(sb, "extern ");
 
-  if (!type.is_mut)
-    sb_append(sb, "const ");
+  if (!type.is_mut) {
+    bool is_void =
+        (type.name.len == 4 && strncmp(type.name.start, "void", 4) == 0);
+    if (!(is_void && type.ptr_depth == 0 && type.array_dimens == 0)) {
+      sb_append(sb, "const ");
+    }
+  }
 
   const char *n = type.name.start;
   int l = type.name.len;
