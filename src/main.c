@@ -5433,12 +5433,28 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
           sb_append(sb, "typedef struct ");
           sb_append_len(sb, n->as.struct_def.structn.start,
                         n->as.struct_def.structn.len);
-					sb_append(sb, " {\n");
+          sb_append(sb, " ");
+          sb_append_len(sb, n->as.struct_def.structn.start,
+                        n->as.struct_def.structn.len);
+          sb_append(sb, ";");
+          sb_append(sb, "\n");
+          sb_append(sb, "struct ");
+          sb_append_len(sb, n->as.struct_def.structn.start,
+                        n->as.struct_def.structn.len);
+          sb_append(sb, " {\n");
         } else {
           sb_append(sb, "typedef union ");
           sb_append_len(sb, n->as.union_def.unionn.start,
                         n->as.union_def.unionn.len);
-					sb_append(sb, " {\n");
+          sb_append(sb, " ");
+          sb_append_len(sb, n->as.union_def.unionn.start,
+                        n->as.union_def.unionn.len);
+          sb_append(sb, ";");
+          sb_append(sb, "\n");
+          sb_append(sb, "union ");
+          sb_append_len(sb, n->as.union_def.unionn.start,
+                        n->as.union_def.unionn.len);
+          sb_append(sb, " {\n");
         }
 
         f->aux = (n->type == AST_STRUCT) ? n->as.struct_def.contents
@@ -5453,12 +5469,19 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
+          Token sue_name = (n->type == AST_STRUCT) ? n->as.struct_def.structn
+                                                   : n->as.union_def.unionn;
+          if (member->type == AST_VAR_DECL) {
+            DataType *ft = &member->as.var_decl.type;
+            if (ft->name.len == sue_name.len &&
+                strncmp(ft->name.start, sue_name.start, sue_name.len) == 0 &&
+                ft->ptr_depth == 0 && ft->array_dimens == 0) {
+              ft->ptr_depth = 1; // make it a pointer
+            }
+          }
           stack[top++] = (IterFrame){member, 0, NULL, 0};
         } else {
-          sb_append(sb, "} ");
-          Token name = (n->type == AST_STRUCT) ? n->as.struct_def.structn
-                                               : n->as.union_def.unionn;
-          sb_append_len(sb, name.start, name.len);
+          sb_append(sb, "}");
           sb_append(sb, ";\n");
           top--;
         }
@@ -5861,7 +5884,7 @@ bool output_to_c_and_compile(AstNode *root, const char *out_binary_name,
   if (!root)
     return false;
 
-	flatten_sues(root);
+  flatten_sues(root);
 
   StringBuilder code;
   sb_init(&code);
