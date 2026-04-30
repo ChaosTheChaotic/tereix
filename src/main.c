@@ -264,6 +264,7 @@ typedef struct AstNode {
   ASTN_TYPE type;
   struct AstNode *next;
   DataType eval_type;
+  bool is_nested_sue;
   union {
     struct {
       Token val;
@@ -1370,7 +1371,7 @@ DataType parse_type(ParseCtx *ctx) {
     }
     type.is_self = true;
 
-    // Find the parent aggregate type to inherit its actual name
+    // Find the parent sue type to inherit its actual name
     for (int i = ctx->node_count - 1; i >= 0; i--) {
       AstNode *parent = ctx->node_stack[i];
       if (parent->type == AST_STRUCT) {
@@ -5427,64 +5428,95 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
         sb_append(sb, "]");
         top--;
       }
-    } else if (n->type == AST_STRUCT || n->type == AST_UNION) {
+    } else if (n->type == AST_STRUCT || n->type == AST_UNION ||
+               n->type == AST_ENUM) {
+      bool is_enum = (n->type == AST_ENUM);
+      bool is_nested = n->is_nested_sue;
+
       if (f->step == 0) {
-        if (n->type == AST_STRUCT) {
-          sb_append(sb, "typedef struct ");
-          sb_append_len(sb, n->as.struct_def.structn.start,
-                        n->as.struct_def.structn.len);
-          sb_append(sb, " ");
-          sb_append_len(sb, n->as.struct_def.structn.start,
-                        n->as.struct_def.structn.len);
-          sb_append(sb, ";");
-          sb_append(sb, "\n");
-          sb_append(sb, "struct ");
-          sb_append_len(sb, n->as.struct_def.structn.start,
-                        n->as.struct_def.structn.len);
-          sb_append(sb, " {\n");
+        if (is_nested) {
+          // Inline anonymous definition
+          sb_append(sb, is_enum                   ? "enum {\n"
+                        : (n->type == AST_STRUCT) ? "struct {\n"
+                                                  : "union {\n");
         } else {
-          sb_append(sb, "typedef union ");
-          sb_append_len(sb, n->as.union_def.unionn.start,
-                        n->as.union_def.unionn.len);
+          // Top-level definition with typedef
+          Token tag = is_enum                   ? n->as.enum_def.enumn
+                      : (n->type == AST_STRUCT) ? n->as.struct_def.structn
+                                                : n->as.union_def.unionn;
+          sb_append(sb, "typedef ");
+          sb_append(sb, is_enum                   ? "enum "
+                        : (n->type == AST_STRUCT) ? "struct "
+                                                  : "union ");
+          sb_append_len(sb, tag.start, tag.len);
           sb_append(sb, " ");
-          sb_append_len(sb, n->as.union_def.unionn.start,
-                        n->as.union_def.unionn.len);
-          sb_append(sb, ";");
-          sb_append(sb, "\n");
-          sb_append(sb, "union ");
-          sb_append_len(sb, n->as.union_def.unionn.start,
-                        n->as.union_def.unionn.len);
+          sb_append_len(sb, tag.start, tag.len);
+          sb_append(sb, ";\n");
+          sb_append(sb, is_enum                   ? "enum "
+                        : (n->type == AST_STRUCT) ? "struct "
+                                                  : "union ");
+          sb_append_len(sb, tag.start, tag.len);
           sb_append(sb, " {\n");
         }
-
-        f->aux = (n->type == AST_STRUCT) ? n->as.struct_def.contents
-                                         : n->as.union_def.contents;
+        f->flags = is_nested ? 1 : 0; // remember whether nested
+        f->aux = is_enum                   ? n->as.enum_def.contents
+                 : (n->type == AST_STRUCT) ? n->as.struct_def.contents
+                                           : n->as.union_def.contents;
         f->step = 1;
       } else if (f->step == 1) {
         if (f->aux) {
           AstNode *member = f->aux;
           f->aux = f->aux->next;
+          // Push member for processing
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          Token sue_name = (n->type == AST_STRUCT) ? n->as.struct_def.structn
-                                                   : n->as.union_def.unionn;
-          if (member->type == AST_VAR_DECL) {
-            DataType *ft = &member->as.var_decl.type;
-            if (ft->name.len == sue_name.len &&
-                strncmp(ft->name.start, sue_name.start, sue_name.len) == 0 &&
-                ft->ptr_depth == 0 && ft->array_dimens == 0) {
-              ft->ptr_depth = 1; // make it a pointer
-            }
-          }
           stack[top++] = (IterFrame){member, 0, NULL, 0};
+          f->step = 2;
         } else {
-          sb_append(sb, "}");
+          // All members processed, close brace
+          f->step = 3;
+        }
+      } else if (f->step == 2) {
+        // After a member, loop back for next
+        f->step = 1;
+      } else {
+        // f->step == 3 : close
+        if (f->flags) {
+          // Nested → add field name
+          Token tag = is_enum                   ? n->as.enum_def.enumn
+                      : (n->type == AST_STRUCT) ? n->as.struct_def.structn
+                                                : n->as.union_def.unionn;
+          sb_append(sb, "} ");
+          sb_append_len(sb, tag.start, tag.len);
           sb_append(sb, ";\n");
+        } else {
+          sb_append(sb, "};\n");
+        }
+        top--;
+      }
+    } else if (n->type == AST_ENUM_MEMBER) {
+      if (f->step == 0) {
+        sb_append_len(sb, n->as.enum_member.name.start,
+                      n->as.enum_member.name.len);
+        if (n->as.enum_member.val) {
+          sb_append(sb, " = ");
+          f->step = 1;
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (IterFrame){n->as.enum_member.val, 0, NULL, 0};
+        } else {
+          sb_append(sb, ",\n");
           top--;
         }
+      } else {
+        sb_append(sb, ",\n");
+        top--;
       }
     } else if (n->type == AST_NUM_LIT) {
       sb_append_len(sb, n->as.num_lit.val.start, n->as.num_lit.val.len);
@@ -5529,7 +5561,6 @@ void flatten_sues(AstNode *root) {
     return;
 
   AstNode *hoisted_funcs_head = NULL, *hoisted_funcs_tail = NULL;
-  AstNode *hoisted_types_head = NULL, *hoisted_types_tail = NULL;
 
   size_t cap = 1024;
   FlattenFrame *stack = malloc(sizeof(FlattenFrame) * cap);
@@ -5546,44 +5577,42 @@ void flatten_sues(AstNode *root) {
       continue;
 
     if (n->type == AST_STRUCT || n->type == AST_UNION || n->type == AST_ENUM) {
+      // Set the current sue token for self replacement
       agg = (n->type == AST_STRUCT)  ? n->as.struct_def.structn
             : (n->type == AST_UNION) ? n->as.union_def.unionn
                                      : n->as.enum_def.enumn;
 
+      // If we are inside another sue, mark this node as nested
+      if (frame.agg.len > 0)
+        n->is_nested_sue = true;
+
+      // Process the contents list, only hoisting functions
       AstNode **curr_ptr = (n->type == AST_STRUCT)  ? &n->as.struct_def.contents
                            : (n->type == AST_UNION) ? &n->as.union_def.contents
                                                     : &n->as.enum_def.contents;
 
       while (*curr_ptr) {
         AstNode *child = *curr_ptr;
-        if (child->type == AST_FUNC || child->type == AST_STRUCT ||
-            child->type == AST_UNION || child->type == AST_ENUM) {
-
+        if (child->type == AST_FUNC) {
+          // Hoist functions to top level
           *curr_ptr = child->next;
           child->next = NULL;
-
-          if (child->type == AST_FUNC) {
-            if (!hoisted_funcs_head)
-              hoisted_funcs_head = hoisted_funcs_tail = child;
-            else {
-              hoisted_funcs_tail->next = child;
-              hoisted_funcs_tail = child;
-            }
-          } else {
-            if (!hoisted_types_head)
-              hoisted_types_head = hoisted_types_tail = child;
-            else {
-              hoisted_types_tail->next = child;
-              hoisted_types_tail = child;
-            }
+          if (!hoisted_funcs_head)
+            hoisted_funcs_head = hoisted_funcs_tail = child;
+          else {
+            hoisted_funcs_tail->next = child;
+            hoisted_funcs_tail = child;
           }
-
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
           stack[top++] = (FlattenFrame){child, agg};
         } else {
+          // Keep nested sues and other members in place
+          if (child->type == AST_STRUCT || child->type == AST_UNION ||
+              child->type == AST_ENUM)
+            child->is_nested_sue = true; // deeply nested
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
@@ -5593,13 +5622,13 @@ void flatten_sues(AstNode *root) {
         }
       }
     } else if (n->type == AST_IDENTIF) {
-      // Replace occurrences of self identifier with sue name
+      // Replace self with the enclosing sue name
       if (n->as.identif.val.len == 4 &&
           strncmp(n->as.identif.val.start, "self", 4) == 0 && agg.len > 0) {
         n->as.identif.val = agg;
       }
     } else {
-      // Push children safely without recursion
+      // Push children of other node types
       switch (n->type) {
       case AST_PROGRAM:
       case AST_BLOCK: {
@@ -5637,9 +5666,19 @@ void flatten_sues(AstNode *root) {
         }
         break;
       case AST_VAR_DECL:
+        // Replace 'self' in field names
         if (n->as.var_decl.id.len == 4 &&
             strncmp(n->as.var_decl.id.start, "self", 4) == 0 && agg.len > 0) {
           n->as.var_decl.id = agg;
+        }
+        // Automatically make self-referential struct/union fields pointers
+        if (agg.len > 0) {
+          DataType *ft = &n->as.var_decl.type;
+          if (ft->name.len == agg.len &&
+              strncmp(ft->name.start, agg.start, agg.len) == 0 &&
+              ft->ptr_depth == 0 && ft->array_dimens == 0) {
+            ft->ptr_depth = 1; // make it a pointer to avoid infinite size
+          }
         }
         if (n->as.var_decl.init) {
           if (top >= cap) {
@@ -5863,6 +5902,7 @@ void flatten_sues(AstNode *root) {
 
   free(stack);
 
+  // Append hoisted functions at the end of the program
   if (hoisted_funcs_head) {
     AstNode *curr = root->as.block.first_stmt;
     if (!curr)
@@ -5872,10 +5912,6 @@ void flatten_sues(AstNode *root) {
         curr = curr->next;
       curr->next = hoisted_funcs_head;
     }
-  }
-  if (hoisted_types_head) {
-    hoisted_types_tail->next = root->as.block.first_stmt;
-    root->as.block.first_stmt = hoisted_types_head;
   }
 }
 

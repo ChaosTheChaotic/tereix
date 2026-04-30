@@ -27,10 +27,10 @@ enum Bee {
 
 struct Xexor {
 	mut bool no;
-	str yes;
+	mut str yes;
 	self next;
 	union onion {
-		i32 idkman;
+		mut i32 idkman;
 	}
 	i32 size() {
 		ret 3;
@@ -57,7 +57,7 @@ struct Xexor {
 }
 
 union Testor {
-	i32 faah;
+	mut i32 faah;
 	u8 grug;
 	void setFaah(mut self, i32 val) {
 		self.faah = val;
@@ -82,9 +82,9 @@ async inline i32 get_a(bool x) {
 
 u8 main(u32 argc, str[] argv) {
 	mut i32 va = get_a(false);
-	i32 b = get_a(true) + 1;
+	mut i32 b = get_a(true) + 1;
 	i32 faah = Xexor.size();
-	Xexor ber;
+	mut Xexor ber;
 	ber.onion.idkman = 32;
 	ber.no = true;
 
@@ -94,7 +94,7 @@ u8 main(u32 argc, str[] argv) {
 		testai.add(1, 1);
 	}
 
-	u8[3] rarray =  [ 3, 5, { 5 } ];
+	mut u8[3] rarray =  [ 3, 5, { 5 } ];
 	i8[2][1] stupid = [ [2], [2] ];
 
 	while (b < 100) {
@@ -119,7 +119,7 @@ u8 main(u32 argc, str[] argv) {
 
 	b = { 0 };
 
-	i64 beebee = (i64)b;
+	mut i64 beebee = (i64)b;
 
 	beebee = (i64){ b + 2 };
 
