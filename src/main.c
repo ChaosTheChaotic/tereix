@@ -5083,9 +5083,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
           bool is_signed, is_float;
           if (!get_numeric_info(t1, &width, &is_signed, &is_float) ||
               width < 32) {
-            fprintf(stderr,
-                    "Error: first parameter of main must be a integer "
-                    "with at least 32 bits (e.g. i32, i64).\n");
+            fprintf(stderr, "Error: first parameter of main must be a integer "
+                            "with at least 32 bits (e.g. i32, i64).\n");
             exit(1);
           }
 
@@ -5137,6 +5136,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
           clean_ret.is_extern = false;
           clean_ret.is_static = false;
           clean_ret.is_threadlocal = false;
+          clean_ret.is_mut = true;
 
           gen_type(clean_ret, sb);
           sb_append_len(sb, n->as.func_def.fn_name.start,
