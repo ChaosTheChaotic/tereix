@@ -5064,7 +5064,12 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
         if (n->as.func_def.is_inline)
           sb_append(sb, "inline ");
 
-        gen_type(n->as.func_def.ret_type, sb);
+        DataType clean_ret = n->as.func_def.ret_type;
+        clean_ret.is_extern = false;
+        clean_ret.is_static = false;
+        clean_ret.is_threadlocal = false;
+
+        gen_type(clean_ret, sb);
         sb_append_len(sb, n->as.func_def.fn_name.start,
                       n->as.func_def.fn_name.len);
         sb_append(sb, "(");
