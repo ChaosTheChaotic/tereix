@@ -5477,7 +5477,12 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
         }
         stack[top++] = (IterFrame){n->as.member.base, 0, NULL, 0};
       } else {
-        sb_append(sb, ".");
+        AstNode *base = n->as.member.base;
+        if (base->eval_type.ptr_depth > 0) {
+          sb_append(sb, "->");
+        } else {
+          sb_append(sb, ".");
+        }
         sb_append_len(sb, n->as.member.name.start, n->as.member.name.len);
         top--;
       }
