@@ -5059,23 +5059,93 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
       }
     } else if (n->type == AST_FUNC) {
       if (f->step == 0) {
-        if (n->as.func_def.is_extern)
-          sb_append(sb, "extern ");
-        if (n->as.func_def.is_inline)
-          sb_append(sb, "inline ");
+        if (n->as.func_def.fn_name.len == 4 &&
+            strncmp(n->as.func_def.fn_name.start, "main", 4) == 0) {
+          AstNode *params = n->as.func_def.params;
+          int param_count = 0;
+          AstNode *p = params;
+          while (p) {
+            param_count++;
+            p = p->next;
+          }
 
-        DataType clean_ret = n->as.func_def.ret_type;
-        clean_ret.is_extern = false;
-        clean_ret.is_static = false;
-        clean_ret.is_threadlocal = false;
+          if (param_count != 2) {
+            fprintf(stderr,
+                    "Error: main function must have exactly 2 parameters "
+                    "(an integer and a string array). Found %d.\n",
+                    param_count);
+            exit(1);
+          }
 
-        gen_type(clean_ret, sb);
-        sb_append_len(sb, n->as.func_def.fn_name.start,
-                      n->as.func_def.fn_name.len);
-        sb_append(sb, "(");
+          AstNode *param1 = params;
+          DataType t1 = param1->as.fn_param.type;
+          int width;
+          bool is_signed, is_float;
+          if (!get_numeric_info(t1, &width, &is_signed, &is_float) ||
+              width < 32) {
+            fprintf(stderr,
+                    "Error: first parameter of main must be a integer "
+                    "with at least 32 bits (e.g. i32, i64).\n");
+            exit(1);
+          }
 
-        f->aux = n->as.func_def.params;
-        f->step = 1;
+          AstNode *param2 = param1->next;
+          DataType t2 = param2->as.fn_param.type;
+          if (!(t2.name.len == 3 && strncmp(t2.name.start, "str", 3) == 0 &&
+                (t2.ptr_depth + t2.array_dimens >= 1))) {
+            fprintf(
+                stderr,
+                "Error: second parameter of main must be str[] or **str.\n");
+            exit(1);
+          }
+
+          if (n->as.func_def.is_extern)
+            sb_append(sb, "extern ");
+          if (n->as.func_def.is_inline)
+            sb_append(sb, "inline ");
+
+          sb_append(sb, "int main(");
+          sb_append(sb, "int ");
+          sb_append_len(sb, param1->as.fn_param.id.start,
+                        param1->as.fn_param.id.len);
+          sb_append(sb, ", char **");
+          sb_append_len(sb, param2->as.fn_param.id.start,
+                        param2->as.fn_param.id.len);
+          sb_append(sb, ") ");
+
+          f->aux = NULL;
+          f->step = 2;
+
+          if (n->as.func_def.block) {
+            if (top >= cap) {
+              cap *= 2;
+              stack = realloc(stack, sizeof(IterFrame) * cap);
+              f = &stack[top - 1];
+            }
+            stack[top++] = (IterFrame){n->as.func_def.block, 0, NULL, 0};
+          } else {
+            sb_append(sb, ";\n");
+            top--;
+          }
+        } else {
+          if (n->as.func_def.is_extern)
+            sb_append(sb, "extern ");
+          if (n->as.func_def.is_inline)
+            sb_append(sb, "inline ");
+
+          DataType clean_ret = n->as.func_def.ret_type;
+          clean_ret.is_extern = false;
+          clean_ret.is_static = false;
+          clean_ret.is_threadlocal = false;
+
+          gen_type(clean_ret, sb);
+          sb_append_len(sb, n->as.func_def.fn_name.start,
+                        n->as.func_def.fn_name.len);
+          sb_append(sb, "(");
+
+          f->aux = n->as.func_def.params;
+          f->step = 1;
+        }
       } else if (f->step == 1) {
         if (f->aux) {
           AstNode *p = f->aux;
