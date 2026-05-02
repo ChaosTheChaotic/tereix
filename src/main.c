@@ -3758,6 +3758,7 @@ typedef struct Sym {
   SymKind kind;
   Token name;
   AstNode *decl_node;
+	bool is_imported_mod;
 } Sym;
 
 Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl) {
@@ -3765,6 +3766,7 @@ Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl) {
   s->kind = kind;
   s->name = name;
   s->decl_node = decl;
+	s->is_imported_mod = false;
   return s;
 }
 
@@ -3971,6 +3973,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
           .start = entry->key, .len = entry->key_len, .type = TOKEN_IDENTIF};
       // SYM_VAR acts as a placeholder so the identifier resolves cleanly
       Sym *import_sym = new_sym(arena, SYM_VAR, import_tok, NULL);
+			import_sym->is_imported_mod = true;
       scope_declare(ss, import_tok, import_sym);
       entry = entry->next;
     }
@@ -5250,57 +5253,68 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         if (f->step == 0) {
           AstNode *member_node = n->as.func_call.caller;
           AstNode *base = member_node->as.member.base;
-          Token method = member_node->as.member.name;
 
-          DataType base_eval = base->eval_type;
-          Token base_type = base_eval.name;
-          if (base_type.len == 0) {
-            base_type = member_node->as.member.type;
-          }
+          if (base->type == AST_IDENTIF && base->as.identif.res_sm &&
+              base->as.identif.res_sm->is_imported_mod) {
+            sb_append_len(sb, member_node->as.member.name.start,
+                          member_node->as.member.name.len);
+            sb_append(sb, "(");
+            f->aux = n->as.func_call.args;
+            f->aux2 = NULL;
+            f->flags = 2;
+            f->step = 2;
+          } else {
+            Token method = member_node->as.member.name;
+            DataType base_eval = base->eval_type;
+            Token base_type = base_eval.name;
+            if (base_type.len == 0) {
+              base_type = member_node->as.member.type;
+            }
 
-          // Build mangled name
-          size_t mangled_len = base_type.len + 1 + method.len;
-          char *mangled = arena_alloc(arena, mangled_len + 1);
-          memcpy(mangled, base_type.start, base_type.len);
-          mangled[base_type.len] = '_';
-          memcpy(mangled + base_type.len + 1, method.start, method.len);
-          mangled[mangled_len] = '\0';
+            // Build mangled name
+            size_t mangled_len = base_type.len + 1 + method.len;
+            char *mangled = arena_alloc(arena, mangled_len + 1);
+            memcpy(mangled, base_type.start, base_type.len);
+            mangled[base_type.len] = '_';
+            memcpy(mangled + base_type.len + 1, method.start, method.len);
+            mangled[mangled_len] = '\0';
 
-          // Lookup function to check for self parameter
-          AstNode *func_def = map_get(func_map, mangled, mangled_len);
-          bool has_self = false;
-          if (func_def && func_def->type == AST_FUNC) {
-            AstNode *first_param = func_def->as.func_def.params;
-            if (first_param) {
-              DataType pt = first_param->as.fn_param.type;
-              if (pt.name.len == base_type.len &&
-                  strncmp(pt.name.start, base_type.start, pt.name.len) == 0 &&
-                  pt.ptr_depth == 0 && pt.array_dimens == 0) {
-                has_self = true;
+            // Lookup function to check for self parameter
+            AstNode *func_def = map_get(func_map, mangled, mangled_len);
+            bool has_self = false;
+            if (func_def && func_def->type == AST_FUNC) {
+              AstNode *first_param = func_def->as.func_def.params;
+              if (first_param) {
+                DataType pt = first_param->as.fn_param.type;
+                if (pt.name.len == base_type.len &&
+                    strncmp(pt.name.start, base_type.start, pt.name.len) == 0 &&
+                    pt.ptr_depth == 0 && pt.array_dimens == 0) {
+                  has_self = true;
+                }
               }
             }
-          }
 
-          sb_append_len(sb, mangled, mangled_len);
-          sb_append(sb, "(");
+            sb_append_len(sb, mangled, mangled_len);
+            sb_append(sb, "(");
 
-          f->aux = (AstNode *)has_self;
-          f->aux2 = n->as.func_call.args;
-          f->flags = 2;
+            f->aux = (AstNode *)has_self;
+            f->aux2 = n->as.func_call.args;
+            f->flags = 2;
 
-          if (has_self) {
-            f->step = 1;
-            if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(IterFrame) * cap);
-              f = &stack[top - 1];
+            if (has_self) {
+              f->step = 1;
+              if (top >= cap) {
+                cap *= 2;
+                stack = realloc(stack, sizeof(IterFrame) * cap);
+                f = &stack[top - 1];
+              }
+              stack[top++] =
+                  (IterFrame){member_node->as.member.base, 0, NULL, NULL, 0};
+            } else {
+              f->step = 2;
+              f->aux = f->aux2;
+              f->aux2 = NULL;
             }
-            stack[top++] =
-                (IterFrame){member_node->as.member.base, 0, NULL, NULL, 0};
-          } else {
-            f->step = 2;
-            f->aux = f->aux2;
-            f->aux2 = NULL;
           }
         } else if (f->step == 1) {
           if (f->aux2) {
@@ -5313,7 +5327,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           if (f->aux) {
             AstNode *arg = f->aux;
             f->aux = f->aux->next;
-            f->step = 3;
+            f->step = (f->aux != NULL) ? 3 : 4;
             if (top >= cap) {
               cap *= 2;
               stack = realloc(stack, sizeof(IterFrame) * cap);
@@ -5329,6 +5343,9 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             sb_append(sb, ", ");
           }
           f->step = 2;
+        } else if (f->step == 4) {
+          sb_append(sb, ")");
+          top--;
         }
       } else {
         if (f->step == 0) {
