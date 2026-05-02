@@ -370,6 +370,7 @@ typedef struct AstNode {
     struct {
       struct AstNode *base;
       Token name;
+      Token type;
     } member;
     struct {
       struct AstNode *check;
@@ -4898,6 +4899,12 @@ void type_check_ast(Arena *arena, AstNode *root) {
         }
         break;
       case AST_MEMBER: {
+        if (node->as.member.base) {
+          DataType base_t = node->as.member.base->eval_type;
+          if (base_t.name.len > 0) {
+            node->as.member.type = base_t.name;
+          }
+        }
         // TODO: Look up the actual field type from the struct/union definition
         node->eval_type = create_basic_type("any");
         break;
@@ -5633,14 +5640,12 @@ void generate_c_code(AstNode *root, StringBuilder *sb) {
 
 typedef struct {
   AstNode *node;
-  Token agg;
+  Token sue;
 } FlattenFrame;
 
-void flatten_sues(AstNode *root) {
+void flatten_sues(AstNode *root, Arena *arena) {
   if (!root || root->type != AST_PROGRAM)
     return;
-
-  AstNode *hoisted_funcs_head = NULL, *hoisted_funcs_tail = NULL;
 
   size_t cap = 1024;
   FlattenFrame *stack = malloc(sizeof(FlattenFrame) * cap);
@@ -5651,64 +5656,75 @@ void flatten_sues(AstNode *root) {
   while (top > 0) {
     FlattenFrame frame = stack[--top];
     AstNode *n = frame.node;
-    Token agg = frame.agg;
+    Token sue = frame.sue;
 
     if (!n)
       continue;
 
     if (n->type == AST_STRUCT || n->type == AST_UNION || n->type == AST_ENUM) {
-      // Set the current sue token for self replacement
-      agg = (n->type == AST_STRUCT)  ? n->as.struct_def.structn
+      // Current SUE token for mangling and self replacement
+      sue = (n->type == AST_STRUCT)  ? n->as.struct_def.structn
             : (n->type == AST_UNION) ? n->as.union_def.unionn
                                      : n->as.enum_def.enumn;
 
-      // If we are inside another sue, mark this node as nested
-      if (frame.agg.len > 0)
+      // If inside another SUE, mark as nested
+      if (frame.sue.len > 0)
         n->is_nested_sue = true;
 
-      // Process the contents list, only hoisting functions
-      AstNode **curr_ptr = (n->type == AST_STRUCT)  ? &n->as.struct_def.contents
+      // Walk contents, hoisting functions right after this node
+      AstNode **prev_ptr = (n->type == AST_STRUCT)  ? &n->as.struct_def.contents
                            : (n->type == AST_UNION) ? &n->as.union_def.contents
                                                     : &n->as.enum_def.contents;
 
-      while (*curr_ptr) {
-        AstNode *child = *curr_ptr;
+      while (*prev_ptr) {
+        AstNode *child = *prev_ptr;
         if (child->type == AST_FUNC) {
-          // Hoist functions to top level
-          *curr_ptr = child->next;
-          child->next = NULL;
-          if (!hoisted_funcs_head)
-            hoisted_funcs_head = hoisted_funcs_tail = child;
-          else {
-            hoisted_funcs_tail->next = child;
-            hoisted_funcs_tail = child;
+          // Mangle the method name
+          Token old_name = child->as.func_def.fn_name;
+          if (sue.len > 0 && old_name.len > 0) {
+            size_t new_len = sue.len + 1 + old_name.len;
+            char *new_name = arena_alloc(arena, new_len + 1);
+            memcpy(new_name, sue.start, sue.len);
+            new_name[sue.len] = '_';
+            memcpy(new_name + sue.len + 1, old_name.start, old_name.len);
+            new_name[new_len] = '\0';
+            child->as.func_def.fn_name.start = new_name;
+            child->as.func_def.fn_name.len = new_len;
           }
+
+          // Remove from the SUEs contents list
+          *prev_ptr = child->next;
+          child->next = NULL;
+
+          // Insert the function right after the SUE node in the top level list
+          AstNode *after_sue = n->next;
+          n->next = child;
+          child->next = after_sue;
+
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){child, agg};
+          stack[top++] = (FlattenFrame){child, sue};
         } else {
-          // Keep nested sues and other members in place
           if (child->type == AST_STRUCT || child->type == AST_UNION ||
               child->type == AST_ENUM)
-            child->is_nested_sue = true; // deeply nested
+            child->is_nested_sue = true;
+
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){child, agg};
-          curr_ptr = &child->next;
+          stack[top++] = (FlattenFrame){child, sue};
+          prev_ptr = &child->next;
         }
       }
     } else if (n->type == AST_IDENTIF) {
-      // Replace self with the enclosing sue name
       if (n->as.identif.val.len == 4 &&
-          strncmp(n->as.identif.val.start, "self", 4) == 0 && agg.len > 0) {
-        n->as.identif.val = agg;
+          strncmp(n->as.identif.val.start, "self", 4) == 0 && sue.len > 0) {
+        n->as.identif.val = sue;
       }
     } else {
-      // Push children of other node types
       switch (n->type) {
       case AST_PROGRAM:
       case AST_BLOCK: {
@@ -5718,7 +5734,7 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){stmt, agg};
+          stack[top++] = (FlattenFrame){stmt, sue};
           stmt = stmt->next;
         }
         break;
@@ -5729,43 +5745,39 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.func_def.params, agg};
+          stack[top++] = (FlattenFrame){n->as.func_def.params, sue};
         }
         if (n->as.func_def.block) {
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.func_def.block, agg};
+          stack[top++] = (FlattenFrame){n->as.func_def.block, sue};
         }
         break;
       case AST_PARAM:
         if (n->as.fn_param.id.len == 4 &&
-            strncmp(n->as.fn_param.id.start, "self", 4) == 0 && agg.len > 0) {
-          n->as.fn_param.id = agg;
-        }
+            strncmp(n->as.fn_param.id.start, "self", 4) == 0 && sue.len > 0)
+          n->as.fn_param.id = sue;
         break;
       case AST_VAR_DECL:
-        // Replace 'self' in field names
         if (n->as.var_decl.id.len == 4 &&
-            strncmp(n->as.var_decl.id.start, "self", 4) == 0 && agg.len > 0) {
-          n->as.var_decl.id = agg;
-        }
-        // Automatically make self-referential struct/union fields pointers
-        if (agg.len > 0) {
+            strncmp(n->as.var_decl.id.start, "self", 4) == 0 && sue.len > 0)
+          n->as.var_decl.id = sue;
+        // Auto‑pointer for self‑referential fields
+        if (sue.len > 0) {
           DataType *ft = &n->as.var_decl.type;
-          if (ft->name.len == agg.len &&
-              strncmp(ft->name.start, agg.start, agg.len) == 0 &&
-              ft->ptr_depth == 0 && ft->array_dimens == 0) {
-            ft->ptr_depth = 1; // make it a pointer to avoid infinite size
-          }
+          if (ft->name.len == sue.len &&
+              strncmp(ft->name.start, sue.start, sue.len) == 0 &&
+              ft->ptr_depth == 0 && ft->array_dimens == 0)
+            ft->ptr_depth = 1;
         }
         if (n->as.var_decl.init) {
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.var_decl.init, agg};
+          stack[top++] = (FlattenFrame){n->as.var_decl.init, sue};
         }
         break;
       case AST_BINOP:
@@ -5773,8 +5785,8 @@ void flatten_sues(AstNode *root) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.binop.right, agg};
-        stack[top++] = (FlattenFrame){n->as.binop.left, agg};
+        stack[top++] = (FlattenFrame){n->as.binop.right, sue};
+        stack[top++] = (FlattenFrame){n->as.binop.left, sue};
         break;
       case AST_UOP:
       case AST_ADDR_OF:
@@ -5783,7 +5795,7 @@ void flatten_sues(AstNode *root) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.unop.operand, agg};
+        stack[top++] = (FlattenFrame){n->as.unop.operand, sue};
         break;
       case AST_IF:
         if (n->as.if_check.elseAct) {
@@ -5791,20 +5803,20 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.if_check.elseAct, agg};
+          stack[top++] = (FlattenFrame){n->as.if_check.elseAct, sue};
         }
         if (n->as.if_check.action) {
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.if_check.action, agg};
+          stack[top++] = (FlattenFrame){n->as.if_check.action, sue};
         }
         if (top >= cap) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.if_check.check, agg};
+        stack[top++] = (FlattenFrame){n->as.if_check.check, sue};
         break;
       case AST_WHILE:
         if (n->as.while_loop.action) {
@@ -5812,13 +5824,13 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.while_loop.action, agg};
+          stack[top++] = (FlattenFrame){n->as.while_loop.action, sue};
         }
         if (top >= cap) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.while_loop.check, agg};
+        stack[top++] = (FlattenFrame){n->as.while_loop.check, sue};
         break;
       case AST_FOR:
         if (n->as.for_loop.action) {
@@ -5826,28 +5838,28 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.for_loop.action, agg};
+          stack[top++] = (FlattenFrame){n->as.for_loop.action, sue};
         }
         if (n->as.for_loop.inc) {
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.for_loop.inc, agg};
+          stack[top++] = (FlattenFrame){n->as.for_loop.inc, sue};
         }
         if (n->as.for_loop.check) {
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.for_loop.check, agg};
+          stack[top++] = (FlattenFrame){n->as.for_loop.check, sue};
         }
         if (n->as.for_loop.init) {
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.for_loop.init, agg};
+          stack[top++] = (FlattenFrame){n->as.for_loop.init, sue};
         }
         break;
       case AST_FUNC_CALL: {
@@ -5857,14 +5869,14 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){arg, agg};
+          stack[top++] = (FlattenFrame){arg, sue};
           arg = arg->next;
         }
         if (top >= cap) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.func_call.caller, agg};
+        stack[top++] = (FlattenFrame){n->as.func_call.caller, sue};
         break;
       }
       case AST_ARRAY_LIT: {
@@ -5874,7 +5886,7 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){elem, agg};
+          stack[top++] = (FlattenFrame){elem, sue};
           elem = elem->next;
         }
         break;
@@ -5884,19 +5896,19 @@ void flatten_sues(AstNode *root) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.index.index, agg};
+        stack[top++] = (FlattenFrame){n->as.index.index, sue};
         if (top >= cap) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.index.base, agg};
+        stack[top++] = (FlattenFrame){n->as.index.base, sue};
         break;
       case AST_MEMBER:
         if (top >= cap) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.member.base, agg};
+        stack[top++] = (FlattenFrame){n->as.member.base, sue};
         break;
       case AST_RET:
         if (n->as.ret_stmt.expr) {
@@ -5904,7 +5916,7 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.ret_stmt.expr, agg};
+          stack[top++] = (FlattenFrame){n->as.ret_stmt.expr, sue};
         }
         break;
       case AST_DEFER:
@@ -5913,7 +5925,7 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.defer_stmt.contents, agg};
+          stack[top++] = (FlattenFrame){n->as.defer_stmt.contents, sue};
         }
         break;
       case AST_SWITCH:
@@ -5922,7 +5934,7 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.switch_stmt.default_case, agg};
+          stack[top++] = (FlattenFrame){n->as.switch_stmt.default_case, sue};
         }
         {
           AstNode *c = n->as.switch_stmt.cases;
@@ -5931,7 +5943,7 @@ void flatten_sues(AstNode *root) {
               cap *= 2;
               stack = realloc(stack, sizeof(FlattenFrame) * cap);
             }
-            stack[top++] = (FlattenFrame){c, agg};
+            stack[top++] = (FlattenFrame){c, sue};
             c = c->next;
           }
         }
@@ -5939,7 +5951,7 @@ void flatten_sues(AstNode *root) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.switch_stmt.check, agg};
+        stack[top++] = (FlattenFrame){n->as.switch_stmt.check, sue};
         break;
       case AST_CASE:
         if (n->as.case_stmt.action) {
@@ -5947,13 +5959,13 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){n->as.case_stmt.action, agg};
+          stack[top++] = (FlattenFrame){n->as.case_stmt.action, sue};
         }
         if (top >= cap) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.case_stmt.val, agg};
+        stack[top++] = (FlattenFrame){n->as.case_stmt.val, sue};
         break;
       case AST_EXTERN: {
         AstNode *stmt = n->as.extern_block.contents;
@@ -5962,7 +5974,7 @@ void flatten_sues(AstNode *root) {
             cap *= 2;
             stack = realloc(stack, sizeof(FlattenFrame) * cap);
           }
-          stack[top++] = (FlattenFrame){stmt, agg};
+          stack[top++] = (FlattenFrame){stmt, sue};
           stmt = stmt->next;
         }
         break;
@@ -5972,7 +5984,7 @@ void flatten_sues(AstNode *root) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
-        stack[top++] = (FlattenFrame){n->as.cast.op, agg};
+        stack[top++] = (FlattenFrame){n->as.cast.op, sue};
         break;
       default:
         break;
@@ -5981,26 +5993,14 @@ void flatten_sues(AstNode *root) {
   }
 
   free(stack);
-
-  // Append hoisted functions at the end of the program
-  if (hoisted_funcs_head) {
-    AstNode *curr = root->as.block.first_stmt;
-    if (!curr)
-      root->as.block.first_stmt = hoisted_funcs_head;
-    else {
-      while (curr->next)
-        curr = curr->next;
-      curr->next = hoisted_funcs_head;
-    }
-  }
 }
 
 bool output_to_c_and_compile(AstNode *root, const char *out_binary_name,
-                             const char **flags, int flag_count) {
+                             const char **flags, int flag_count, Arena *arena) {
   if (!root)
     return false;
 
-  flatten_sues(root);
+  flatten_sues(root, arena);
 
   StringBuilder code;
   sb_init(&code);
@@ -6171,7 +6171,8 @@ void compile_project(const char *entry_file) {
         if (dot && strcmp(dot, ".tx") == 0)
           *dot = '\0';
 
-        bool suc = output_to_c_and_compile(mod->ast_root, bin_name, flags, 5);
+        bool suc =
+            output_to_c_and_compile(mod->ast_root, bin_name, flags, 5, &arena);
         if (suc)
           printf("Compiled successfully");
         else

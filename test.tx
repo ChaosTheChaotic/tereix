@@ -38,7 +38,7 @@ struct Xexor {
 	void setThing(*mut self) {
 		self.no = true;
 	}
-	void setNo(self this, bool val) {
+	void setNo(mut self this, bool val) {
 		this.no = val;
 	}
 	bool getNo(&self) {
@@ -51,7 +51,7 @@ struct Xexor {
 		self.no = false;
 		self.yes = "";
 	}
-	self clone() {
+	self clone(*self) {
 		ret self(self.no, self.yes);
 	}
 }
