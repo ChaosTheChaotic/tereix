@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include "string_builder.h"
-#include "types.h"
+#include "sem_types.h"
+#include "parse_types.h"
+#include "c_gen_types.h"
 
 AstNode *new_node(Arena *arena, ASTN_TYPE type) {
   AstNode *node = arena_alloc(arena, sizeof(AstNode));

@@ -1,65 +1,7 @@
-#ifndef TYPES_H
-#define TYPES_H
+#ifndef AST_TYPES_H
+#define AST_TYPES_H
 
-#include "hashmap.h"
-#include <stdbool.h>
-
-#define SIZES(X) X(8) X(16) X(32) X(64) X(128) X(size)
-
-#define AS_UNSIGNED(n) "u" #n,
-#define AS_SIGNED(n) "i" #n,
-#define AS_FLOAT(n) "f" #n,
-
-typedef enum {
-  TOKEN_ASSIGN,
-  TOKEN_OP,
-  TOKEN_IDENTIF,
-  TOKEN_NUM_LIT,
-  TOKEN_STR_LIT,
-  TOKEN_CHAR_LIT,
-  TOKEN_BOOL_LIT,
-  TOKEN_KW,
-  TOKEN_PUNC,
-  TOKEN_COMPARE,
-  TOKEN_EOF,
-  TOKEN_UNKNOWN,
-} TOKEN_TYPE;
-
-typedef struct {
-  const char *start;
-  unsigned int len;
-  TOKEN_TYPE type;
-  unsigned int line, col;
-} Token;
-
-typedef struct {
-  char *start;
-  char *curr;
-  unsigned int line;
-  unsigned int col;
-
-  HashMap kw_map;
-  HashMap op_map;
-  HashMap comp_map;
-  HashMap type_kw_map;
-} LexCtx;
-
-struct AstNode;
-
-typedef struct {
-  bool is_static;
-  bool is_mut;
-  bool is_custom;
-  bool is_async;
-  bool is_threadlocal;
-  bool is_inline;
-  bool is_extern;
-  bool is_self;
-  long int ptr_depth; // 2 for **type etc
-  Token name;
-  unsigned int array_dimens;  // 0 for not an array 1 for [] etc.
-  struct AstNode **dim_sizes; // Per dimensions [][][] etc.
-} DataType;
+#include <types_core.h>
 
 typedef enum {
   AST_BINOP,
@@ -98,8 +40,6 @@ typedef enum {
   AST_CAST,
   AST_PROGRAM, // The root node
 } ASTN_TYPE;
-
-struct Sym;
 
 typedef struct AstNode {
   ASTN_TYPE type;
@@ -245,48 +185,6 @@ typedef struct AstNode {
   } as;
 } AstNode;
 
-typedef enum {
-  STATE_GLOBAL, // Looking for funcs, structs, global vars
-  STATE_IN_FUNC,
-  STATE_FUNC_BODY_DONE,
-  STATE_IN_EXPR,
-  STATE_INDEX_DONE,
-  STATE_IN_ARRAY_LIT,
-  STATE_ARRAY_ELEMENT_DONE,
-  STATE_EXPR_STMT_DONE,
-  STATE_IN_STRUCT_DEF,
-  STATE_IN_UNION_DEF,
-  STATE_IN_ENUM_DEF,
-  STATE_ENUM_MEMBER_DONE,
-  STATE_IN_IF_EXPECT_COND,
-  STATE_IF_COND_DONE,
-  STATE_IF_BODY_DONE,
-  STATE_ELSE_BODY_DONE,
-  STATE_PARSE_BLOCK, // Reusable state to parse { ... }
-  STATE_BLOCK_DONE,
-  STATE_BLOCK_EXPR_DONE,
-  STATE_WHILE_COND_DONE,
-  STATE_WHILE_BODY_DONE,
-  STATE_FOR_INC_DONE,
-  STATE_FOR_INIT_DONE,
-  STATE_FOR_COND_DONE,
-  STATE_FOR_BODY_DONE,
-  STATE_FOR_INIT_START,
-  STATE_FOR_INIT_DECL_DONE,
-  STATE_IN_FUNC_ARGS,
-  STATE_ARG_DONE,
-  STATE_DEFER_DONE,
-  STATE_RET_DONE,
-  STATE_VAR_INIT_DONE,
-  STATE_IN_EXTERN_BLOCK,
-  STATE_SWITCH_COND_DONE,
-  STATE_PARSE_SWITCH_BODY,
-  STATE_CASE_EXPR_DONE,
-  STATE_CASE_BODY_DONE,
-  STATE_SWITCH_DONE,
-  STATE_IF_ELSE_DONE,
-} ParseState;
-
 typedef struct {
   Token op;
   bool is_unary;
@@ -294,30 +192,13 @@ typedef struct {
   DataType cast_type;
 } OpInfo;
 
-typedef struct {
-  LexCtx *lex;
-  Token curr;
-  Token prev;
-  Arena *arena;
+#define SIZES(X) X(8) X(16) X(32) X(64) X(128) X(size)
 
-  ParseState *state_stack;
-  size_t state_count;
-  size_t state_cap;
+#define AS_UNSIGNED(n) "u" #n,
+#define AS_SIGNED(n) "i" #n,
+#define AS_FLOAT(n) "f" #n,
 
-  AstNode **node_stack;
-  size_t node_count;
-  size_t node_cap;
-
-  OpInfo *op_stack;
-  size_t op_count;
-  size_t op_cap;
-
-  bool expect_operand;
-  unsigned long int ag_depth;
-
-  unsigned int err_count;
-  bool panic_mode;
-} ParseCtx;
+struct AstNode;
 
 static const char *kwlist[] = {
     SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT) "mut",
@@ -374,88 +255,9 @@ static const char *typelist[] = {
 static const size_t typelistlen = sizeof(typelist) / sizeof(typelist[0]);
 
 typedef struct {
-  const char **paths;
-  size_t count;
-  size_t capacity;
-} Worklist;
-
-typedef struct {
-  Arena *arena;
-  HashMap mod_cache;
-
-  const char
-      *std_lib_env_path; // In case the user specifies a dir to go through for
-                         // libraries in addition to the default one
-} SemCtx;
-
-typedef struct Module {
-  const char *abs_path;
-  const char *mod_name;
-  AstNode *ast_root;
-
-  HashMap local_symbols;
-  HashMap imported_mods;
-} Module;
-
-typedef enum {
-  SYM_FUNC,
-  SYM_ENUM,
-  SYM_STRUCT,
-  SYM_UNION,
-  SYM_VAR,
-} SymKind;
-
-typedef struct Sym {
-  SymKind kind;
-  Token name;
-  AstNode *decl_node;
-  bool is_imported_mod;
-} Sym;
-
-typedef struct {
-  HashMap symbols; // Maps id strings to Sym*
-} Scope;
-
-typedef struct {
-  Scope *scopes;
-  size_t count;
-  size_t capacity;
-  Arena *arena;
-} ScopeStack;
-
-typedef enum { ACTION_VISIT_NODE, ACTION_POP_SCOPE } TravAction;
-
-typedef struct {
-  AstNode *node;
-  TravAction action;
-} TravItem;
-
-typedef struct {
-  AstNode *node;
-  Token sue;
-} FlattenFrame;
-
-typedef struct {
   AstNode *node;
   int depth;
   const char *label;
 } AstPrintItem;
 
-typedef enum { TC_VISIT_CHILDREN, TC_EVAL_NODE } TCState;
-
-typedef struct {
-  AstNode *node;
-  TCState state;
-  DataType *expected;
-  AstNode *curr_func;
-} TCItem;
-
-typedef struct {
-  AstNode *node;
-  int step;
-  AstNode *aux;
-  AstNode *aux2;
-  int flags;
-} IterFrame;
-
-#endif // !TYPES_H
+#endif // !AST_TYPES_H

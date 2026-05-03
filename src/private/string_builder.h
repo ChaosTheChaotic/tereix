@@ -16,6 +16,6 @@ void sb_append_len(StringBuilder *sb, const char *str, size_t slen);
 
 void sb_append(StringBuilder *sb, const char *str);
 
-void sb_free();
+void sb_free(StringBuilder *sb);
 
 #endif // !STRING_BUILDER_H
