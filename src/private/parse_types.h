@@ -3,6 +3,7 @@
 
 #include "lex_types.h"
 #include "ast_types.h"
+#include "types_core.h"
 
 typedef enum {
   STATE_GLOBAL, // Looking for funcs, structs, global vars
@@ -71,5 +72,16 @@ typedef struct {
   bool panic_mode;
 } ParseCtx;
 
+void push_node(ParseCtx *ctx, AstNode *node);
+bool parse(ParseCtx *ctx);
+bool is_kw(LexCtx *ctx, const char *start, unsigned int len);
 
+bool is_op(LexCtx *ctx, const char *start, unsigned int len);
+
+bool is_compare(LexCtx *ctx, const char *start,
+                              unsigned int len);
+
+bool is_punc(char c);
+Token next_token(LexCtx *ctx);
+DataType parse_type(ParseCtx *ctx);
 #endif // !PARSE_TYPES_H
