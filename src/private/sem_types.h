@@ -1,5 +1,5 @@
-#ifndef SEM_TYPES_h
-#define SEM_TYPES_h
+#ifndef SEM_TYPES_H
+#define SEM_TYPES_H
 
 #include "ast_types.h"
 #include "arena.h"
@@ -65,4 +65,18 @@ typedef struct {
   TravAction action;
 } TravItem;
 
-#endif // !SEM_TYPES_h
+void sem_init(SemCtx *ctx, Arena *arena);
+void sem_deinit(SemCtx *ctx);
+
+Module *new_mod(Arena *arena, const char *abs_path, const char *mod_name,
+                AstNode *ast);
+
+bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float);
+
+void resolve_imports(Arena *arena, SemCtx *sem);
+void collect_mod_symbols(Arena *arena, Module *mod);
+void scope_stack_init(ScopeStack *ss, Arena *arena);
+void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss);
+void type_check_ast(Arena *arena, AstNode *root);
+
+#endif // !SEM_TYPES_U
