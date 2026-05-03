@@ -451,12 +451,6 @@ typedef struct {
 } TCItem;
 
 typedef struct {
-  char *buf;
-  size_t len;
-  size_t cap;
-} StringBuilder;
-
-typedef struct {
   AstNode *node;
   int step;
   AstNode *aux;
