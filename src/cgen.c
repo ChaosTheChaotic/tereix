@@ -1265,12 +1265,6 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
   while (stmt) {
     if (stmt->type == AST_FUNC && !stmt->as.func_def.is_extern) {
       Token old_name = stmt->as.func_def.fn_name;
-      // Skip main function so C still recognizes the entry point
-      if (old_name.len == 4 && strncmp(old_name.start, "main", 4) == 0) {
-        stmt = stmt->next;
-        continue;
-      }
-
       // Build: modname_funcname
       size_t new_len = strlen(mod->mod_name) + 1 + old_name.len;
       char *new_name = arena_alloc(arena, new_len + 1);
