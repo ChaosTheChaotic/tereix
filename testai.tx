@@ -1,122 +1,22 @@
 use "test.tx" as t;
 
-// ==========================================
-// 1. Extern Blocks & Global Declarations
-// ==========================================
+struct Hello {
+	str world;
+	str getWorld(self) {
+		ret self.world;
+	}
+}
+
 extern {
-    void printf(str fmt);
-    *void malloc(u64 size);
+	extern *void malloc(size size);
 }
 
-// ==========================================
-// 2. Custom Types (Enums, Structs, Unions)
-// ==========================================
-enum ErrorCode {
-    OK = 0,
-    NOT_FOUND,
-    DENIED = -1
+inline i32 add(i32 x, i32 y) {
+	ret x + y;
 }
 
-struct Node {
-    i32 id;
-    *void next;
-}
-
-union Payload {
-    f64 float_data;
-    i64 int_data;
-}
-
-// ==========================================
-// 3. Modifiers & Global Variables
-// ==========================================
-static mut u32 global_counter = 0;
-threadlocal f32 thread_variance = 1.5;
-
-// ==========================================
-// 4. Function Definitions (Modifiers & Params)
-// ==========================================
-inline i32 add(i32 a, i32 b) {
-    ret a + b;
-}
-
-async bool fetch_data(str url) {
-    // defer statement
-    defer {
-        printf("Cleanup done\n");
-    }
-    ret true;
-}
-
-// ==========================================
-// 5. Main Execution Block
-// ==========================================
-i32 main(i32 argc, str[] argv) {
-    
-    // Primitive Variable Declarations & Pointers
-    auto inferred_var = 42;
-    mut **i8 double_ptr;
-    bool is_valid = false;
-    char letter = 'A';
-    
-    // Array literals
-    i32[] numbers = [1, 2, 3, 4, 5];
-    
-    // Unary and Prefix/Postfix Operations
-    mut i32 index = 0;
-    index++;
-    --index;
-    
-    // Address of and Dereferencing
-    mut i32 value = 100;
-    mut *i32 val_ptr = &value;
-    *val_ptr = 200;
-
-    // Control Flow: If / Else If / Else
-    if (value == 200) {
-        printf("Value updated!");
-    } else if (value >= 100) {
-        printf("Close enough.");
-    } else {
-        printf("Failed.");
-    }
-
-    // Control Flow: While Loop & Indexing
-    while (index < 5) {
-        numbers[index] = numbers[index] * 2;
-        index += 1;
-				continue;
-    }
-
-    // Control Flow: For Loop
-    for (mut i32 i = 0; i < 10; i++) {
-        // Binary Operations & Assignments
-        value ^= i;
-        value <<= 1;
-				if (value > 3) {
-					break;
-				}
-    }
-
-    // Switch / Case / Default
-    switch (value) {
-        case (0) {
-            printf("Zero");
-        }
-        case (1) {
-            printf("One");
-        }
-        default {
-            printf("Other");
-        }
-    }
-
-    // Member Access (assuming 'node' exists)
-    mut Node my_node;
-    my_node.id = 1234;
-
-    // Function calls
-    mut i32 result = add(10, 20);
-
-    ret 0;
+u8 main(u32 argc, str *argv) {
+	i32 x = add(3, 2);
+	// wow we did something
+	ret x
 }
