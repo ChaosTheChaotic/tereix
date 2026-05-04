@@ -648,7 +648,7 @@ void compile_project(const char *entry_file) {
           *dot = '\0';
 
         bool suc =
-            output_to_c_and_compile(mod->ast_root, bin_name, flags, 5, &arena);
+            output_to_c_and_compile(&sem, bin_name, flags, 5, &arena);
         if (suc)
           printf("Compiled successfully");
         else

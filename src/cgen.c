@@ -1,6 +1,8 @@
+#include "arena.h"
 #include "c_gen_types.h"
-#include "string_builder.h"
+#include "hashmap.h"
 #include "sem_types.h"
+#include "string_builder.h"
 
 void gen_type(DataType type, StringBuilder *sb) {
   if (type.is_static)
@@ -1051,13 +1053,35 @@ void flatten_sues(AstNode *root, Arena *arena) {
         }
         stack[top++] = (FlattenFrame){n->as.index.base, sue};
         break;
-      case AST_MEMBER:
+      case AST_MEMBER: {
+        AstNode *base = n->as.member.base;
+
+        if (base && base->type == AST_IDENTIF && base->as.identif.res_sm &&
+            base->as.identif.res_sm->is_imported_mod) {
+
+          Token mod_name = base->as.identif.val;
+          Token mem_name = n->as.member.name;
+
+          size_t new_len = mod_name.len + 1 + mem_name.len;
+          char *new_name = arena_alloc(arena, new_len + 1);
+          sprintf(new_name, "%.*s_%.*s", mod_name.len, mod_name.start,
+                  mem_name.len, mem_name.start);
+
+          n->type = AST_IDENTIF;
+          n->as.identif.val.start = new_name;
+          n->as.identif.val.len = new_len;
+          n->as.identif.res_sm = NULL;
+
+          break;
+        }
+
         if (top >= cap) {
           cap *= 2;
           stack = realloc(stack, sizeof(FlattenFrame) * cap);
         }
         stack[top++] = (FlattenFrame){n->as.member.base, sue};
         break;
+      }
       case AST_RET:
         if (n->as.ret_stmt.expr) {
           if (top >= cap) {
@@ -1143,14 +1167,10 @@ void flatten_sues(AstNode *root, Arena *arena) {
   free(stack);
 }
 
-bool output_to_c_and_compile(AstNode *root, const char *out_binary_name,
+bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
                              const char **flags, int flag_count, Arena *arena) {
-  if (!root)
+  if (!sem)
     return false;
-
-  flatten_sues(root, arena);
-
-  HashMap *func_map = build_func_map(arena, root);
 
   StringBuilder code;
   sb_init(&code);
@@ -1163,7 +1183,45 @@ bool output_to_c_and_compile(AstNode *root, const char *out_binary_name,
   sb_append(&code, "#include <stdbool.h>\n");
   sb_append(&code, "#include <string.h>\n\n");
 
-  generate_c_code(root, &code, func_map, arena);
+  HashMap *global_func_map = arena_alloc(arena, sizeof(HashMap));
+  map_init(global_func_map, arena, 256);
+
+  for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
+    HashEntry *entry = sem->mod_cache.buckets[i];
+    while (entry) {
+      Module *mod = (Module *)entry->value;
+
+      mangle_mod_symbols(arena, mod);
+      flatten_sues(mod->ast_root, arena);
+
+      HashMap *local_funcs = build_func_map(arena, mod->ast_root);
+
+      for (size_t j = 0; j < local_funcs->capacity; j++) {
+        HashEntry *local_entry = local_funcs->buckets[j];
+        while (local_entry) {
+          map_set(global_func_map, local_entry->key, local_entry->key_len,
+                  local_entry->value);
+          local_entry = local_entry->next;
+        }
+      }
+      entry = entry->next;
+    }
+  }
+
+  for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
+    HashEntry *entry = sem->mod_cache.buckets[i];
+    while (entry) {
+      Module *mod = (Module *)entry->value;
+
+      sb_append(&code, "/* Module: ");
+      sb_append(&code, mod->mod_name);
+      sb_append(&code, " */\n");
+
+      generate_c_code(mod->ast_root, &code, global_func_map, arena);
+
+      entry = entry->next; // Move to the next entry in the chain
+    }
+  }
 
   const char *tmp_c_file = "output_gen.c";
   FILE *f = fopen(tmp_c_file, "w");
@@ -1198,3 +1256,33 @@ bool output_to_c_and_compile(AstNode *root, const char *out_binary_name,
   return res == 0;
 }
 
+void mangle_mod_symbols(Arena *arena, Module *mod) {
+  AstNode *stmt = mod->ast_root->as.block.first_stmt;
+  while (stmt) {
+    if (stmt->type == AST_FUNC && !stmt->as.func_def.is_extern) {
+      Token old_name = stmt->as.func_def.fn_name;
+      // Skip main function so C still recognizes the entry point
+      if (old_name.len == 4 && strncmp(old_name.start, "main", 4) == 0) {
+        stmt = stmt->next;
+        continue;
+      }
+
+      // Build: modname_funcname
+      size_t new_len = strlen(mod->mod_name) + 1 + old_name.len;
+      char *new_name = arena_alloc(arena, new_len + 1);
+      sprintf(new_name, "%s_%.*s", mod->mod_name, old_name.len, old_name.start);
+
+      stmt->as.func_def.fn_name.start = new_name;
+      stmt->as.func_def.fn_name.len = new_len;
+    } else if (stmt->type == AST_VAR_DECL) {
+      Token oldn = stmt->as.var_decl.id;
+
+      size_t nlen = strlen(mod->mod_name) + 1 + oldn.len;
+      char *new_name = arena_alloc(arena, nlen + 1);
+      sprintf(new_name, "%s_%.*s", mod->mod_name, oldn.len, oldn.start);
+      stmt->as.var_decl.id.start = new_name;
+      stmt->as.var_decl.id.len = nlen;
+    }
+    stmt = stmt->next;
+  }
+}
