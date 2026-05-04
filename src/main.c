@@ -622,6 +622,7 @@ void compile_project(const char *entry_file) {
   printf("Type checking complete.\n");
 
   const char *abs_path = resolve_alloc(&arena, entry_file);
+	Module *main_mod = map_get(&sem.mod_cache, abs_path, strlen(abs_path));
 
   for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
     HashEntry *entry = sem.mod_cache.buckets[i];
@@ -648,7 +649,7 @@ void compile_project(const char *entry_file) {
           *dot = '\0';
 
         bool suc =
-            output_to_c_and_compile(&sem, bin_name, flags, 5, &arena);
+            output_to_c_and_compile(&sem, bin_name, flags, 5, &arena, main_mod);
         if (suc)
           printf("Compiled successfully");
         else
