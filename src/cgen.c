@@ -1193,7 +1193,8 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
     while (entry) {
       Module *mod = (Module *)entry->value;
 
-      mangle_mod_symbols(arena, mod, (main_mod == mod));
+      if (mod != main_mod)
+        mangle_mod_symbols(arena, mod);
       flatten_sues(mod->ast_root, arena);
 
       HashMap *local_funcs = build_func_map(arena, mod->ast_root);
@@ -1259,14 +1260,13 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
   return res == 0;
 }
 
-void mangle_mod_symbols(Arena *arena, Module *mod, bool is_main_mod) {
+void mangle_mod_symbols(Arena *arena, Module *mod) {
   AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
     if (stmt->type == AST_FUNC && !stmt->as.func_def.is_extern) {
       Token old_name = stmt->as.func_def.fn_name;
       // Skip main function so C still recognizes the entry point
-      if (old_name.len == 4 && strncmp(old_name.start, "main", 4) == 0 &&
-          is_main_mod) {
+      if (old_name.len == 4 && strncmp(old_name.start, "main", 4) == 0) {
         stmt = stmt->next;
         continue;
       }
