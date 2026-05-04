@@ -908,8 +908,10 @@ void flatten_sues(AstNode *root, Arena *arena) {
         break;
       case AST_PARAM:
         if (n->as.fn_param.id.len == 4 &&
-            strncmp(n->as.fn_param.id.start, "self", 4) == 0 && sue.len > 0)
+            strncmp(n->as.fn_param.id.start, "self", 4) == 0 && sue.len > 0) {
           n->as.fn_param.id = sue;
+          n->as.fn_param.type.name = sue;
+        }
         break;
       case AST_VAR_DECL:
         if (n->as.var_decl.id.len == 4 &&
@@ -1272,9 +1274,21 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
 
       stmt->as.func_def.fn_name.start = new_name;
       stmt->as.func_def.fn_name.len = new_len;
+    }
+    else if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
+             stmt->type == AST_ENUM) {
+      Token *tag = (stmt->type == AST_STRUCT)  ? &stmt->as.struct_def.structn
+                   : (stmt->type == AST_UNION) ? &stmt->as.union_def.unionn
+                                               : &stmt->as.enum_def.enumn;
+
+      size_t nlen = strlen(mod->mod_name) + 1 + tag->len;
+      char *new_name = arena_alloc(arena, nlen + 1);
+      sprintf(new_name, "%s_%.*s", mod->mod_name, tag->len, tag->start);
+
+      tag->start = new_name;
+      tag->len = nlen;
     } else if (stmt->type == AST_VAR_DECL) {
       Token oldn = stmt->as.var_decl.id;
-
       size_t nlen = strlen(mod->mod_name) + 1 + oldn.len;
       char *new_name = arena_alloc(arena, nlen + 1);
       sprintf(new_name, "%s_%.*s", mod->mod_name, oldn.len, oldn.start);

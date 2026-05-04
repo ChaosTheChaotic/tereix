@@ -8,15 +8,15 @@ struct Hello {
 }
 
 extern {
-	extern *void malloc(size size);
+	extern mut *void malloc(size size);
 }
 
 inline i32 add(i32 x, i32 y) {
 	ret x + y;
 }
 
-u8 main(u32 argc, str *argv) {
+u8 main(u32 argc, str[] argv) {
 	i32 x = add(3, 2);
 	// wow we did something
-	ret x
+	ret x;
 }
