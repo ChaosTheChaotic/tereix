@@ -74,6 +74,18 @@ HashMap *build_func_map(Arena *arena, AstNode *root) {
   return map;
 }
 
+bool is_c_expr(AstNode *n) {
+  if (!n)
+    return false;
+  return n->type == AST_BINOP || n->type == AST_UOP || n->type == AST_NUM_LIT ||
+         n->type == AST_STR_LIT || n->type == AST_IDENTIF ||
+         n->type == AST_FUNC_CALL || n->type == AST_MEMBER ||
+         n->type == AST_INDEX || n->type == AST_CAST ||
+         n->type == AST_BOOL_LIT || n->type == AST_CHAR_LIT ||
+         n->type == AST_NULL_LIT || n->type == AST_ARRAY_LIT ||
+         n->type == AST_ADDR_OF || n->type == AST_DEREF;
+}
+
 void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                      Arena *arena, bool is_main_mod) {
   size_t cap = 2048;
@@ -91,11 +103,28 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       continue;
     }
 
+    if (f->step == 0 && (f->flags & 2)) {
+      while (n && n->type == AST_BLOCK && n->as.block.first_stmt &&
+             !n->as.block.first_stmt->next) {
+        AstNode *stmt = n->as.block.first_stmt;
+        if (is_c_expr(stmt)) {
+          n = stmt;
+          f->node = n;
+        } else {
+          break;
+        }
+      }
+    }
+
     if (n->type == AST_PROGRAM || n->type == AST_BLOCK ||
         n->type == AST_EXTERN) {
       if (f->step == 0) {
-        if (n->type == AST_BLOCK)
-          sb_append(sb, "{\n");
+        if (n->type == AST_BLOCK) {
+          if (f->flags & 2)
+            sb_append(sb, "({");
+          else
+            sb_append(sb, "{\n");
+        }
         f->aux = (n->type == AST_EXTERN) ? n->as.extern_block.contents
                                          : n->as.block.first_stmt;
         f->step = 1;
@@ -109,7 +138,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                stmt->type == AST_UOP || stmt->type == AST_IDENTIF ||
                stmt->type == AST_NUM_LIT || stmt->type == AST_STR_LIT ||
                stmt->type == AST_MEMBER);
-          f->flags = needs_semi ? 1 : 0;
+
+          f->flags = (f->flags & 2) | (needs_semi ? 1 : 0);
           f->step = 2;
 
           if (top >= cap) {
@@ -122,12 +152,16 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           f->step = 3;
         }
       } else if (f->step == 2) {
-        if (f->flags)
+        if (f->flags & 1)
           sb_append(sb, ";\n");
         f->step = 1;
       } else {
-        if (n->type == AST_BLOCK)
-          sb_append(sb, "}\n");
+        if (n->type == AST_BLOCK) {
+          if (f->flags & 2)
+            sb_append(sb, "})");
+          else
+            sb_append(sb, "}\n");
+        }
         top--;
       }
     } else if (n->type == AST_FUNC) {
@@ -259,7 +293,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] = (IterFrame){n->as.var_decl.init, 0, NULL, NULL, 0};
+          stack[top++] =
+              (IterFrame){n->as.var_decl.init, 0, NULL, NULL, 2};
         } else {
           sb_append(sb, ";\n");
           top--;
@@ -277,7 +312,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.binop.left, 0, NULL, NULL, 0};
+        stack[top++] = (IterFrame){n->as.binop.left, 0, NULL, NULL, 2};
       } else if (f->step == 1) {
         sb_append(sb, " ");
         sb_append_len(sb, n->as.binop.op.start, n->as.binop.op.len);
@@ -288,7 +323,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.binop.right, 0, NULL, NULL, 0};
+        stack[top++] = (IterFrame){n->as.binop.right, 0, NULL, NULL, 2};
       } else {
         sb_append(sb, ")");
         top--;
@@ -311,7 +346,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.unop.operand, 0, NULL, NULL, 0};
+        stack[top++] =
+            (IterFrame){n->as.unop.operand, 0, NULL, NULL, 2};
       } else {
         sb_append(sb, ")");
         if (n->type == AST_UOP && n->as.unop.is_postfix) {
@@ -328,7 +364,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.if_check.check, 0, NULL, NULL, 0};
+        stack[top++] =
+            (IterFrame){n->as.if_check.check, 0, NULL, NULL, 2};
       } else if (f->step == 1) {
         sb_append(sb, ") ");
         f->step = 2;
@@ -363,7 +400,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.while_loop.check, 0, NULL, NULL, 0};
+        stack[top++] =
+            (IterFrame){n->as.while_loop.check, 0, NULL, NULL, 2};
       } else if (f->step == 1) {
         sb_append(sb, ") ");
         f->step = 2;
@@ -398,7 +436,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] = (IterFrame){n->as.for_loop.check, 0, NULL, NULL, 0};
+          stack[top++] =
+              (IterFrame){n->as.for_loop.check, 0, NULL, NULL, 2};
         }
       } else if (f->step == 2) {
         sb_append(sb, "; ");
@@ -409,7 +448,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] = (IterFrame){n->as.for_loop.inc, 0, NULL, NULL, 0};
+          stack[top++] =
+              (IterFrame){n->as.for_loop.inc, 0, NULL, NULL, 2};
         }
       } else if (f->step == 3) {
         sb_append(sb, ") ");
@@ -434,22 +474,23 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
           if (base->type == AST_IDENTIF && base->as.identif.res_sm &&
               base->as.identif.res_sm->is_imported_mod) {
+            // Apply Fix 1: Properly mangle the imported mod call
+            sb_append_len(sb, base->as.identif.val.start,
+                          base->as.identif.val.len);
+            sb_append(sb, "_");
             sb_append_len(sb, member_node->as.member.name.start,
                           member_node->as.member.name.len);
             sb_append(sb, "(");
             f->aux = n->as.func_call.args;
             f->aux2 = NULL;
-            f->flags = 2;
             f->step = 2;
           } else {
             Token method = member_node->as.member.name;
             DataType base_eval = base->eval_type;
             Token base_type = base_eval.name;
-            if (base_type.len == 0) {
+            if (base_type.len == 0)
               base_type = member_node->as.member.type;
-            }
 
-            // Build mangled name
             size_t mangled_len = base_type.len + 1 + method.len;
             char *mangled = arena_alloc(arena, mangled_len + 1);
             memcpy(mangled, base_type.start, base_type.len);
@@ -457,7 +498,6 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             memcpy(mangled + base_type.len + 1, method.start, method.len);
             mangled[mangled_len] = '\0';
 
-            // Lookup function to check for self parameter
             AstNode *func_def = map_get(func_map, mangled, mangled_len);
             bool has_self = false;
             if (func_def && func_def->type == AST_FUNC) {
@@ -477,7 +517,6 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
             f->aux = (AstNode *)has_self;
             f->aux2 = n->as.func_call.args;
-            f->flags = 2;
 
             if (has_self) {
               f->step = 1;
@@ -486,8 +525,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                 stack = realloc(stack, sizeof(IterFrame) * cap);
                 f = &stack[top - 1];
               }
-              stack[top++] =
-                  (IterFrame){member_node->as.member.base, 0, NULL, NULL, 0};
+              stack[top++] = (IterFrame){member_node->as.member.base, 0, NULL,
+                                         NULL, 2};
             } else {
               f->step = 2;
               f->aux = f->aux2;
@@ -495,9 +534,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             }
           }
         } else if (f->step == 1) {
-          if (f->aux2) {
+          if (f->aux2)
             sb_append(sb, ", ");
-          }
           f->aux = f->aux2;
           f->aux2 = NULL;
           f->step = 2;
@@ -511,15 +549,14 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
               stack = realloc(stack, sizeof(IterFrame) * cap);
               f = &stack[top - 1];
             }
-            stack[top++] = (IterFrame){arg, 0, NULL, NULL, 0};
+            stack[top++] = (IterFrame){arg, 0, NULL, NULL, 2};
           } else {
             sb_append(sb, ")");
             top--;
           }
         } else if (f->step == 3) {
-          if (f->aux) {
+          if (f->aux)
             sb_append(sb, ", ");
-          }
           f->step = 2;
         } else if (f->step == 4) {
           sb_append(sb, ")");
@@ -528,29 +565,48 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       } else {
         if (f->step == 0) {
           bool is_ctor = false;
+					Sym *sym = NULL;
           if (n->as.func_call.caller &&
               n->as.func_call.caller->type == AST_IDENTIF) {
-            Sym *sym = n->as.func_call.caller->as.identif.res_sm;
+            sym = n->as.func_call.caller->as.identif.res_sm;
             if (sym && (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
                         sym->kind == SYM_ENUM)) {
               is_ctor = true;
             }
           }
-          f->flags = is_ctor ? 1 : 0;
-          if (f->flags)
-            sb_append(sb, "(");
+          f->aux2 = (AstNode *)(uintptr_t)(is_ctor ? 1 : 0);
+          if (is_ctor) {
+            switch (sym->kind) {
+            case SYM_STRUCT:
+              sb_append(sb, "(struct ");
+              break;
+            case SYM_UNION:
+              sb_append(sb, "(union ");
+              break;
+            case SYM_ENUM:
+              sb_append(sb, "(enum ");
+              break;
+            default:
+              sb_append(sb, "(");
+              break;
+            }
+          }
+
           f->step = 1;
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] = (IterFrame){n->as.func_call.caller, 0, NULL, NULL, 0};
+          stack[top++] =
+              (IterFrame){n->as.func_call.caller, 0, NULL, NULL, 2};
         } else if (f->step == 1) {
-          if (f->flags)
+          bool is_ctor = (uintptr_t)f->aux2;
+          if (is_ctor)
             sb_append(sb, "){");
           else
             sb_append(sb, "(");
+
           f->aux = n->as.func_call.args;
           f->step = 2;
         } else if (f->step == 2) {
@@ -563,21 +619,32 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
               stack = realloc(stack, sizeof(IterFrame) * cap);
               f = &stack[top - 1];
             }
-            stack[top++] = (IterFrame){arg, 0, NULL, NULL, 0};
+            stack[top++] = (IterFrame){arg, 0, NULL, NULL, 2};
           } else {
-            sb_append(sb, f->flags ? "}" : ")");
+            bool is_ctor = (uintptr_t)f->aux2;
+            sb_append(sb, is_ctor ? "}" : ")");
             top--;
           }
         } else if (f->step == 3) {
           sb_append(sb, ", ");
           f->step = 2;
         } else if (f->step == 4) {
-          sb_append(sb, f->flags ? "}" : ")");
+          bool is_ctor = (uintptr_t)f->aux2;
+          sb_append(sb, is_ctor ? "}" : ")");
           top--;
         }
       }
     } else if (n->type == AST_ARRAY_LIT) {
       if (f->step == 0) {
+        DataType t = n->eval_type;
+        if (t.name.len > 0) {
+          sb_append(sb, "(");
+          int total = t.ptr_depth + t.array_dimens;
+          t.ptr_depth = total > 0 ? total - 1 : 0;
+          t.array_dimens = 0;
+          gen_type(t, sb);
+          sb_append(sb, "[])");
+        }
         sb_append(sb, "{");
         f->aux = n->as.array_lit.elements;
         f->step = 1;
@@ -591,7 +658,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] = (IterFrame){elem, 0, NULL, NULL, 0};
+          stack[top++] = (IterFrame){elem, 0, NULL, NULL, 2};
         } else {
           sb_append(sb, "}");
           top--;
@@ -613,7 +680,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] = (IterFrame){n->as.ret_stmt.expr, 0, NULL, NULL, 0};
+          stack[top++] =
+              (IterFrame){n->as.ret_stmt.expr, 0, NULL, NULL, 2};
         } else {
           sb_append(sb, ";\n");
           top--;
@@ -633,7 +701,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.cast.op, 0, NULL, NULL, 0};
+        stack[top++] = (IterFrame){n->as.cast.op, 0, NULL, NULL, 2};
       } else {
         sb_append(sb, ")");
         top--;
@@ -646,7 +714,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.member.base, 0, NULL, NULL, 0};
+        stack[top++] = (IterFrame){n->as.member.base, 0, NULL, NULL, 2};
       } else {
         AstNode *base = n->as.member.base;
         if (base->eval_type.ptr_depth > 0) {
@@ -665,7 +733,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.index.base, 0, NULL, NULL, 0};
+        stack[top++] = (IterFrame){n->as.index.base, 0, NULL, NULL, 2};
       } else if (f->step == 1) {
         sb_append(sb, "[");
         f->step = 2;
@@ -674,7 +742,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] = (IterFrame){n->as.index.index, 0, NULL, NULL, 0};
+        stack[top++] = (IterFrame){n->as.index.index, 0, NULL, NULL, 2};
       } else {
         sb_append(sb, "]");
         top--;
@@ -693,19 +761,22 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           Token tag = is_enum                   ? n->as.enum_def.enumn
                       : (n->type == AST_STRUCT) ? n->as.struct_def.structn
                                                 : n->as.union_def.unionn;
-          sb_append(sb, "typedef ");
-          sb_append(sb, is_enum                   ? "enum "
-                        : (n->type == AST_STRUCT) ? "struct "
-                                                  : "union ");
-          sb_append_len(sb, tag.start, tag.len);
-          sb_append(sb, " ");
-          sb_append_len(sb, tag.start, tag.len);
-          sb_append(sb, ";\n");
-          sb_append(sb, is_enum                   ? "enum "
-                        : (n->type == AST_STRUCT) ? "struct "
-                                                  : "union ");
-          sb_append_len(sb, tag.start, tag.len);
-          sb_append(sb, " {\n");
+
+          if (is_enum) {
+            sb_append(sb, "typedef enum ");
+            sb_append_len(sb, tag.start, tag.len);
+            sb_append(sb, " {\n");
+          } else {
+            sb_append(sb, "typedef ");
+            sb_append(sb, (n->type == AST_STRUCT) ? "struct " : "union ");
+            sb_append_len(sb, tag.start, tag.len);
+            sb_append(sb, " ");
+            sb_append_len(sb, tag.start, tag.len);
+            sb_append(sb, ";\n");
+            sb_append(sb, (n->type == AST_STRUCT) ? "struct " : "union ");
+            sb_append_len(sb, tag.start, tag.len);
+            sb_append(sb, " {\n");
+          }
         }
         f->flags = is_nested ? 1 : 0;
         f->aux = is_enum                   ? n->as.enum_def.contents
@@ -737,7 +808,14 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           sb_append_len(sb, tag.start, tag.len);
           sb_append(sb, ";\n");
         } else {
-          sb_append(sb, "};\n");
+          if (is_enum) {
+            sb_append(sb, "} ");
+            Token tag = n->as.enum_def.enumn;
+            sb_append_len(sb, tag.start, tag.len);
+            sb_append(sb, ";\n");
+          } else {
+            sb_append(sb, "};\n");
+          }
         }
         top--;
       }
@@ -753,7 +831,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] = (IterFrame){n->as.enum_member.val, 0, NULL, NULL, 0};
+          stack[top++] =
+              (IterFrame){n->as.enum_member.val, 0, NULL, NULL, 2};
         } else {
           sb_append(sb, ",\n");
           top--;
@@ -813,16 +892,13 @@ void flatten_sues(AstNode *root, Arena *arena) {
       continue;
 
     if (n->type == AST_STRUCT || n->type == AST_UNION || n->type == AST_ENUM) {
-      // Current SUE token for mangling and self replacement
       sue = (n->type == AST_STRUCT)  ? n->as.struct_def.structn
             : (n->type == AST_UNION) ? n->as.union_def.unionn
                                      : n->as.enum_def.enumn;
 
-      // If inside another SUE, mark as nested
       if (frame.sue.len > 0)
         n->is_nested_sue = true;
 
-      // Walk contents, hoisting functions right after this node
       AstNode **prev_ptr = (n->type == AST_STRUCT)  ? &n->as.struct_def.contents
                            : (n->type == AST_UNION) ? &n->as.union_def.contents
                                                     : &n->as.enum_def.contents;
@@ -830,7 +906,6 @@ void flatten_sues(AstNode *root, Arena *arena) {
       while (*prev_ptr) {
         AstNode *child = *prev_ptr;
         if (child->type == AST_FUNC) {
-          // Mangle the method name
           Token old_name = child->as.func_def.fn_name;
           if (sue.len > 0 && old_name.len > 0) {
             size_t new_len = sue.len + 1 + old_name.len;
@@ -843,11 +918,9 @@ void flatten_sues(AstNode *root, Arena *arena) {
             child->as.func_def.fn_name.len = new_len;
           }
 
-          // Remove from the SUEs contents list
           *prev_ptr = child->next;
           child->next = NULL;
 
-          // Insert the function right after the SUE node in the top level list
           AstNode *after_sue = n->next;
           n->next = child;
           child->next = after_sue;
@@ -874,6 +947,10 @@ void flatten_sues(AstNode *root, Arena *arena) {
       if (n->as.identif.val.len == 4 &&
           strncmp(n->as.identif.val.start, "self", 4) == 0 && sue.len > 0) {
         n->as.identif.val = sue;
+        if (!n->as.identif.res_sm) {
+          n->as.identif.res_sm = arena_alloc(arena, sizeof(Sym));
+        }
+        n->as.identif.res_sm->kind = SYM_STRUCT;
       }
     } else {
       switch (n->type) {
@@ -917,7 +994,6 @@ void flatten_sues(AstNode *root, Arena *arena) {
         if (n->as.var_decl.id.len == 4 &&
             strncmp(n->as.var_decl.id.start, "self", 4) == 0 && sue.len > 0)
           n->as.var_decl.id = sue;
-        // Auto‑pointer for self‑referential fields
         if (sue.len > 0) {
           DataType *ft = &n->as.var_decl.type;
           if (ft->name.len == sue.len &&
@@ -1263,38 +1339,348 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
 }
 
 void mangle_mod_symbols(Arena *arena, Module *mod) {
+  HashMap *rename_map = arena_alloc(arena, sizeof(HashMap));
+  map_init(rename_map, arena, 128);
+
   AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
+    Token *old_tok = NULL;
+
     if (stmt->type == AST_FUNC && !stmt->as.func_def.is_extern) {
-      Token old_name = stmt->as.func_def.fn_name;
-      // Build: modname_funcname
-      size_t new_len = strlen(mod->mod_name) + 1 + old_name.len;
-      char *new_name = arena_alloc(arena, new_len + 1);
-      sprintf(new_name, "%s_%.*s", mod->mod_name, old_name.len, old_name.start);
-
-      stmt->as.func_def.fn_name.start = new_name;
-      stmt->as.func_def.fn_name.len = new_len;
-    }
-    else if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
-             stmt->type == AST_ENUM) {
-      Token *tag = (stmt->type == AST_STRUCT)  ? &stmt->as.struct_def.structn
-                   : (stmt->type == AST_UNION) ? &stmt->as.union_def.unionn
-                                               : &stmt->as.enum_def.enumn;
-
-      size_t nlen = strlen(mod->mod_name) + 1 + tag->len;
-      char *new_name = arena_alloc(arena, nlen + 1);
-      sprintf(new_name, "%s_%.*s", mod->mod_name, tag->len, tag->start);
-
-      tag->start = new_name;
-      tag->len = nlen;
+      old_tok = &stmt->as.func_def.fn_name;
+    } else if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
+               stmt->type == AST_ENUM) {
+      old_tok = (stmt->type == AST_STRUCT)  ? &stmt->as.struct_def.structn
+                : (stmt->type == AST_UNION) ? &stmt->as.union_def.unionn
+                                            : &stmt->as.enum_def.enumn;
     } else if (stmt->type == AST_VAR_DECL) {
-      Token oldn = stmt->as.var_decl.id;
-      size_t nlen = strlen(mod->mod_name) + 1 + oldn.len;
+      old_tok = &stmt->as.var_decl.id;
+    }
+
+    if (old_tok && old_tok->len > 0) {
+      size_t nlen = strlen(mod->mod_name) + 1 + old_tok->len;
       char *new_name = arena_alloc(arena, nlen + 1);
-      sprintf(new_name, "%s_%.*s", mod->mod_name, oldn.len, oldn.start);
-      stmt->as.var_decl.id.start = new_name;
-      stmt->as.var_decl.id.len = nlen;
+      sprintf(new_name, "%s_%.*s", mod->mod_name, (int)old_tok->len,
+              old_tok->start);
+
+      Token *mangled = arena_alloc(arena, sizeof(Token));
+      mangled->start = new_name;
+      mangled->len = nlen;
+
+      map_set(rename_map, old_tok->start, old_tok->len, mangled);
     }
     stmt = stmt->next;
   }
+
+  size_t cap = 1024;
+  AstNode **stack = malloc(sizeof(AstNode *) * cap);
+  size_t top = 0;
+
+  stack[top++] = mod->ast_root;
+
+#define RENAME_TOK(tok)                                                        \
+  do {                                                                         \
+    if ((tok).len > 0) {                                                       \
+      Token *rep = map_get(rename_map, (tok).start, (tok).len);                \
+      if (rep) {                                                               \
+        (tok) = *rep;                                                          \
+      }                                                                        \
+    }                                                                          \
+  } while (0)
+
+  while (top > 0) {
+    AstNode *n = stack[--top];
+    if (!n)
+      continue;
+
+    RENAME_TOK(n->eval_type.name);
+
+    switch (n->type) {
+    case AST_PROGRAM:
+    case AST_BLOCK:
+    case AST_EXTERN: {
+      AstNode *curr = (n->type == AST_EXTERN) ? n->as.extern_block.contents
+                                              : n->as.block.first_stmt;
+      while (curr) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = curr;
+        curr = curr->next;
+      }
+      break;
+    }
+    case AST_FUNC:
+      RENAME_TOK(n->as.func_def.fn_name);
+      RENAME_TOK(n->as.func_def.ret_type.name);
+      if (n->as.func_def.params) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.func_def.params;
+      }
+      if (n->as.func_def.block) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.func_def.block;
+      }
+      break;
+    case AST_PARAM:
+      RENAME_TOK(n->as.fn_param.id);
+      RENAME_TOK(n->as.fn_param.type.name);
+      break;
+    case AST_VAR_DECL:
+      RENAME_TOK(n->as.var_decl.id);
+      RENAME_TOK(n->as.var_decl.type.name);
+      if (n->as.var_decl.init) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.var_decl.init;
+      }
+      break;
+    case AST_STRUCT:
+    case AST_UNION:
+    case AST_ENUM: {
+      Token *tag = (n->type == AST_STRUCT)  ? &n->as.struct_def.structn
+                   : (n->type == AST_UNION) ? &n->as.union_def.unionn
+                                            : &n->as.enum_def.enumn;
+      RENAME_TOK(*tag);
+      AstNode *child = (n->type == AST_STRUCT)  ? n->as.struct_def.contents
+                       : (n->type == AST_UNION) ? n->as.union_def.contents
+                                                : n->as.enum_def.contents;
+      while (child) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = child;
+        child = child->next;
+      }
+      break;
+    }
+    case AST_ENUM_MEMBER:
+      RENAME_TOK(n->as.enum_member.name);
+      if (n->as.enum_member.val) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.enum_member.val;
+      }
+      break;
+    case AST_IDENTIF:
+      RENAME_TOK(n->as.identif.val);
+      break;
+    case AST_CAST:
+      RENAME_TOK(n->as.cast.target.name);
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.cast.op;
+      break;
+    case AST_FUNC_CALL: {
+      AstNode *arg = n->as.func_call.args;
+      while (arg) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = arg;
+        arg = arg->next;
+      }
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.func_call.caller;
+      break;
+    }
+    case AST_BINOP:
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.binop.right;
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.binop.left;
+      break;
+    case AST_UOP:
+    case AST_ADDR_OF:
+    case AST_DEREF:
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.unop.operand;
+      break;
+    case AST_IF:
+      if (n->as.if_check.elseAct) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.if_check.elseAct;
+      }
+      if (n->as.if_check.action) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.if_check.action;
+      }
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.if_check.check;
+      break;
+    case AST_WHILE:
+      if (n->as.while_loop.action) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.while_loop.action;
+      }
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.while_loop.check;
+      break;
+    case AST_FOR:
+      if (n->as.for_loop.action) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.for_loop.action;
+      }
+      if (n->as.for_loop.inc) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.for_loop.inc;
+      }
+      if (n->as.for_loop.check) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.for_loop.check;
+      }
+      if (n->as.for_loop.init) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.for_loop.init;
+      }
+      break;
+    case AST_MEMBER:
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.member.base;
+      break;
+    case AST_INDEX:
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.index.index;
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.index.base;
+      break;
+    case AST_ARRAY_LIT: {
+      AstNode *elem = n->as.array_lit.elements;
+      while (elem) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = elem;
+        elem = elem->next;
+      }
+      break;
+    }
+    case AST_RET:
+      if (n->as.ret_stmt.expr) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.ret_stmt.expr;
+      }
+      break;
+    case AST_DEFER:
+      if (n->as.defer_stmt.contents) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.defer_stmt.contents;
+      }
+      break;
+    case AST_SWITCH:
+      if (n->as.switch_stmt.default_case) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.switch_stmt.default_case;
+      }
+      {
+        AstNode *c = n->as.switch_stmt.cases;
+        while (c) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(AstNode *) * cap);
+          }
+          stack[top++] = c;
+          c = c->next;
+        }
+      }
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.switch_stmt.check;
+      break;
+    case AST_CASE:
+      if (n->as.case_stmt.action) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode *) * cap);
+        }
+        stack[top++] = n->as.case_stmt.action;
+      }
+      if (top >= cap) {
+        cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * cap);
+      }
+      stack[top++] = n->as.case_stmt.val;
+      break;
+    default:
+      break;
+    }
+  }
+
+#undef RENAME_TOK
+  free(stack);
 }
