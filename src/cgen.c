@@ -52,7 +52,6 @@ void gen_type(DataType type, StringBuilder *sb) {
 
   sb_append(sb, " ");
 
-  // Treat depth and arrays as pointers for C output
   long total_ptrs = type.ptr_depth + type.array_dimens;
   for (long i = 0; i < total_ptrs; i++) {
     sb_append(sb, "*");
@@ -86,6 +85,106 @@ bool is_c_expr(AstNode *n) {
          n->type == AST_ADDR_OF || n->type == AST_DEREF;
 }
 
+void inject_yield_assignments(AstNode *node, const char *var_name,
+                              Arena *arena) {
+  if (!node)
+    return;
+
+  size_t cap = 128;
+  AstNode ***stack = malloc(sizeof(AstNode **) * cap);
+  size_t top = 0;
+
+  stack[top++] = &node;
+
+  while (top > 0) {
+    AstNode **p_n = stack[--top];
+    AstNode *n = *p_n;
+    if (!n)
+      continue;
+
+    if (n->type == AST_BLOCK) {
+      AstNode **last = &n->as.block.first_stmt;
+      while (*last && (*last)->next) {
+        last = &(*last)->next;
+      }
+      if (*last) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode **) * cap);
+        }
+        stack[top++] = last;
+      }
+    } else if (n->type == AST_IF) {
+      if (n->as.if_check.action) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode **) * cap);
+        }
+        stack[top++] = &n->as.if_check.action;
+      }
+      if (n->as.if_check.elseAct) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode **) * cap);
+        }
+        stack[top++] = &n->as.if_check.elseAct;
+      }
+    } else if (n->type == AST_SWITCH) {
+      AstNode *c = n->as.switch_stmt.cases;
+      while (c) {
+        if (c->type == AST_CASE && c->as.case_stmt.action) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(AstNode **) * cap);
+          }
+          stack[top++] = &c->as.case_stmt.action;
+        }
+        c = c->next;
+      }
+      if (n->as.switch_stmt.default_case) {
+        if (top >= cap) {
+          cap *= 2;
+          stack = realloc(stack, sizeof(AstNode **) * cap);
+        }
+        stack[top++] = &n->as.switch_stmt.default_case;
+      }
+    } else {
+      if (n->type == AST_BREAK || n->type == AST_CONTINUE ||
+          n->type == AST_RET || n->type == AST_DEFER ||
+          n->type == AST_VAR_DECL) {
+        continue;
+      }
+
+      AstNode *target = arena_alloc(arena, sizeof(AstNode));
+      memset(target, 0, sizeof(AstNode));
+      target->type = AST_IDENTIF;
+
+      size_t vlen = strlen(var_name);
+      char *vstr = arena_alloc(arena, vlen + 1);
+      strcpy(vstr, var_name);
+
+      target->as.identif.val.start = vstr;
+      target->as.identif.val.len = vlen;
+      target->eval_type = n->eval_type;
+
+      AstNode *assign = arena_alloc(arena, sizeof(AstNode));
+      memset(assign, 0, sizeof(AstNode));
+      assign->type = AST_BINOP;
+      assign->as.binop.op.start = "=";
+      assign->as.binop.op.len = 1;
+      assign->as.binop.left = target;
+      assign->as.binop.right = n;
+      assign->eval_type = n->eval_type;
+
+      assign->next = n->next;
+      n->next = NULL;
+
+      *p_n = assign;
+    }
+  }
+  free(stack);
+}
+
 void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                      Arena *arena, bool is_main_mod) {
   size_t cap = 2048;
@@ -103,6 +202,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       continue;
     }
 
+    // Auto-unwrap single expression blocks
     if (f->step == 0 && (f->flags & 2)) {
       while (n && n->type == AST_BLOCK && n->as.block.first_stmt &&
              !n->as.block.first_stmt->next) {
@@ -120,10 +220,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         n->type == AST_EXTERN) {
       if (f->step == 0) {
         if (n->type == AST_BLOCK) {
-          if (f->flags & 2)
-            sb_append(sb, "({");
-          else
-            sb_append(sb, "{\n");
+          // Standard C block emission (GNU code removed here)
+          sb_append(sb, "{\n");
         }
         f->aux = (n->type == AST_EXTERN) ? n->as.extern_block.contents
                                          : n->as.block.first_stmt;
@@ -157,10 +255,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         f->step = 1;
       } else {
         if (n->type == AST_BLOCK) {
-          if (f->flags & 2)
-            sb_append(sb, "})");
-          else
-            sb_append(sb, "}\n");
+          // Standard C block end (GNU code removed here)
+          sb_append(sb, "}\n");
         }
         top--;
       }
@@ -474,7 +570,6 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
           if (base->type == AST_IDENTIF && base->as.identif.res_sm &&
               base->as.identif.res_sm->is_imported_mod) {
-            // Apply Fix 1: Properly mangle the imported mod call
             sb_append_len(sb, base->as.identif.val.start,
                           base->as.identif.val.len);
             sb_append(sb, "_");
@@ -565,7 +660,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       } else {
         if (f->step == 0) {
           bool is_ctor = false;
-					Sym *sym = NULL;
+          Sym *sym = NULL;
           if (n->as.func_call.caller &&
               n->as.func_call.caller->type == AST_IDENTIF) {
             sym = n->as.func_call.caller->as.identif.res_sm;
@@ -639,7 +734,21 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         DataType t = n->eval_type;
         if (t.name.len > 0) {
           sb_append(sb, "(");
+
+          int array_lit_depth = 0;
+          for (long i = (long)top - 2; i >= 0; i--) {
+            if (stack[i].node && stack[i].node->type == AST_ARRAY_LIT) {
+              array_lit_depth++;
+            } else {
+              break;
+            }
+          }
+
           int total = t.ptr_depth + t.array_dimens;
+          total -= array_lit_depth;
+          if (total < 0)
+            total = 0;
+
           t.ptr_depth = total > 0 ? total - 1 : 0;
           t.array_dimens = 0;
           gen_type(t, sb);
@@ -672,23 +781,102 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       }
     } else if (n->type == AST_RET) {
       if (f->step == 0) {
-        sb_append(sb, "return ");
-        if (n->as.ret_stmt.expr) {
-          f->step = 1;
+        if (n->as.ret_stmt.expr && n->as.ret_stmt.expr->type == AST_BLOCK) {
+          AstNode *block = n->as.ret_stmt.expr;
+
+          AstNode *unwrapped = block;
+          while (unwrapped && unwrapped->type == AST_BLOCK && unwrapped->as.block.first_stmt && !unwrapped->as.block.first_stmt->next) {
+            AstNode *stmt = unwrapped->as.block.first_stmt;
+            if (is_c_expr(stmt)) unwrapped = stmt;
+            else break;
+          }
+
+          if (unwrapped->type != AST_BLOCK) {
+            sb_append(sb, "return ");
+            f->step = 1;
+            if (top >= cap) {
+              cap *= 2;
+              stack = realloc(stack, sizeof(IterFrame) * cap);
+              f = &stack[top - 1];
+            }
+            stack[top++] = (IterFrame){unwrapped, 0, NULL, NULL, 2};
+          } else {
+            bool is_void = (block->eval_type.name.len == 4 &&
+                            strncmp(block->eval_type.name.start, "void", 4) == 0 &&
+                            block->eval_type.ptr_depth == 0 &&
+                            block->eval_type.array_dimens == 0) ||
+                           (block->eval_type.name.len == 0);
+
+            char var_name[64];
+            sprintf(var_name, "_tx_blk_%zu", (size_t)(uintptr_t)block);
+
+            if (!is_void) {
+              DataType mut_type = block->eval_type;
+              mut_type.is_mut = true;
+              gen_type(mut_type, sb);
+              sb_append(sb, var_name);
+              sb_append(sb, ";\n");
+              inject_yield_assignments(block, var_name, arena);
+            }
+
+            f->step = 3;
+            f->aux = block->as.block.first_stmt;
+            f->aux2 = (AstNode*)(uintptr_t)is_void;
+          }
+        } else {
+          sb_append(sb, "return ");
+          if (n->as.ret_stmt.expr) {
+            f->step = 1;
+            if (top >= cap) {
+              cap *= 2;
+              stack = realloc(stack, sizeof(IterFrame) * cap);
+              f = &stack[top - 1];
+            }
+            stack[top++] = (IterFrame){n->as.ret_stmt.expr, 0, NULL, NULL, 2};
+          } else {
+            sb_append(sb, ";\n");
+            top--;
+          }
+        }
+      } else if (f->step == 1) {
+        sb_append(sb, ";\n");
+        top--;
+      } else if (f->step == 3) {
+        if (f->aux) {
+          AstNode *stmt = f->aux;
+          f->aux = f->aux->next;
+
+          bool needs_semi =
+              (stmt->type == AST_FUNC_CALL || stmt->type == AST_BINOP ||
+               stmt->type == AST_UOP || stmt->type == AST_IDENTIF ||
+               stmt->type == AST_NUM_LIT || stmt->type == AST_STR_LIT ||
+               stmt->type == AST_MEMBER);
+
+          f->flags = needs_semi ? 1 : 0;
+          f->step = 4;
+
           if (top >= cap) {
             cap *= 2;
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] =
-              (IterFrame){n->as.ret_stmt.expr, 0, NULL, NULL, 2};
+          stack[top++] = (IterFrame){stmt, 0, NULL, NULL, 0};
         } else {
-          sb_append(sb, ";\n");
+          bool is_void = (bool)(uintptr_t)f->aux2;
+          if (!is_void) {
+            char var_name[64];
+            sprintf(var_name, "_tx_blk_%zu", (size_t)(uintptr_t)n->as.ret_stmt.expr);
+            sb_append(sb, "return ");
+            sb_append(sb, var_name);
+            sb_append(sb, ";\n");
+          } else {
+            sb_append(sb, "return;\n");
+          }
           top--;
         }
-      } else {
-        sb_append(sb, ";\n");
-        top--;
+      } else if (f->step == 4) {
+        if (f->flags & 1) sb_append(sb, ";\n");
+        f->step = 3;
       }
     } else if (n->type == AST_CAST) {
       if (f->step == 0) {
