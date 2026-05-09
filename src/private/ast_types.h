@@ -248,7 +248,6 @@ static const char *typelist[] = {
     "bool",
     "str", // Technically should be parsed as char[] but oh well
     "void",
-    "null",
     "char",
     "auto",
     "any",
