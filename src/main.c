@@ -3,6 +3,7 @@
 #include "parse_types.h"
 #include "sem_types.h"
 #include "util.h"
+#include "lsp.h"
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -667,6 +668,11 @@ void compile_project(const char *entry_file) {
 }
 
 int main(int argc, char **argv) {
+  if (argc > 1 && strcmp(argv[1], "--lsp") == 0) {
+    start_lsp_server();
+    return 0;
+  }
+
   if (argc <= 1) {
     print_help();
     exit(1);
