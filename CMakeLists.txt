@@ -72,6 +72,7 @@ if(DO_INSTALL)
 endif()
 
 add_executable(tereix_bin ${SOURCES})
+set_target_properties(tereix_bin PROPERTIES OUTPUT_NAME "tereix")
 target_link_libraries(tereix_bin 
   PUBLIC deps_public 
   PRIVATE settings deps_private

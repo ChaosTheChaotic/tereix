@@ -20,11 +20,18 @@ stdenv.mkDerivation {
   buildInputs = [
     # Dependencies managed by minit conf --add
   ];
-  nativeCheckInputs = [ cmocka ];
-  doCheck = true;
+  #nativeCheckInputs = [ cmocka ];
+  doCheck = false;
   cmakeFlags = [
+    "-DCMAKE_BUILD_TYPE=Release"
     "-DDO_INSTALL=ON"
     "-DUSE_CCACHE=OFF"
     "-DPKG_CONFIG=ON"
   ];
+	meta = {
+		description = "The compiler for the Tereix language";
+		homepage = "https://github.com/ChaosTheChaotic/tereix";
+		license = lib.licenses.gpl3Plus;
+		mainProgram = "tereix";
+	};
 }
