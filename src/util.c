@@ -56,3 +56,33 @@ const char *load_file(const char *path) {
     return NULL;
   }
 }
+
+char *absolute_from_uri(const char *uri) {
+  const char *scheme = "file://";
+  if (strncmp(uri, scheme, 7) != 0)
+    return NULL;
+
+  const char *path_start = uri + 7;
+
+  if (strncmp(path_start, "localhost/", 10) == 0) {
+    path_start += 9; // Point to the '/'
+  }
+  else if (*path_start == '/') {
+  } else {
+    return NULL;
+  }
+
+  char *resolved = realpath(path_start, NULL);
+  return resolved;
+}
+
+char *uri_from_absolute(const char *absolute) {
+    if (!absolute || absolute[0] != '/') return NULL;
+
+    const char *prefix = "file://";
+    char *uri = malloc(strlen(prefix) + strlen(absolute) + 1);
+    if (uri) {
+        sprintf(uri, "%s%s", prefix, absolute);
+    }
+    return uri;
+}

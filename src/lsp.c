@@ -56,10 +56,9 @@ void handle_initialize(yyjson_val *params, yyjson_mut_val *id) {
   yyjson_mut_val *result = yyjson_mut_obj(doc);
   yyjson_mut_val *capabilities = yyjson_mut_obj(doc);
 
-  yyjson_mut_obj_add_int(doc, capabilities, "textDocumentSync", 1);
-
-  // TODO: Add more capabilities here later (hoverProvider, definitionProvider,
-  // etc.)
+  yyjson_mut_obj_add_int(doc, capabilities, "textDocumentSync", 1); // Maybe later allow support for incrememntal?
+  yyjson_mut_obj_add_bool(doc, capabilities, "hoverProvider", true);
+  yyjson_mut_obj_add_bool(doc, capabilities, "definitionProvider", true);
 
   yyjson_mut_obj_add_val(doc, result, "capabilities", capabilities);
   lsp_send_response(result, id);
@@ -216,7 +215,11 @@ void start_lsp_server() {
       continue;
 
     char *payload = malloc(content_length + 1);
-    fread(payload, 1, content_length, stdin);
+    size_t read_bytes = fread(payload, 1, content_length, stdin);
+    if (read_bytes != (size_t)content_length) {
+      free(payload);
+      continue;
+    }
     payload[content_length] = '\0';
 
     yyjson_doc *doc = yyjson_read(payload, strlen(payload), 0);
