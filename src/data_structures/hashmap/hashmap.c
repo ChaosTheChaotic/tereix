@@ -89,3 +89,28 @@ void *map_get(HashMap *map, const char *key, size_t key_len) {
   }
   return NULL; // Not found
 }
+
+void map_remove(HashMap *map, const char *key, size_t key_len) {
+  if (map->count == 0)
+    return;
+
+  uint32_t hash = hash_string(key, key_len);
+  size_t index = hash % map->capacity;
+
+  HashEntry *entry = map->buckets[index];
+  HashEntry *prev = NULL;
+
+  while (entry) {
+    if (entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
+      if (prev) {
+        prev->next = entry->next;
+      } else {
+        map->buckets[index] = entry->next;
+      }
+      map->count--;
+      return;
+    }
+    prev = entry;
+    entry = entry->next;
+  }
+}

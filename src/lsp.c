@@ -181,8 +181,7 @@ void handle_did_close(yyjson_val *params) {
   // Remove from map and free memory to prevent leaks
   Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
   if (doc) {
-    // You'll need a map_remove or map_delete implementation in your hashmap.h
-    // map_delete(&server_state.open_docs, uri, strlen(uri));
+    map_remove(&server_state.open_docs, uri, strlen(uri));
     free(doc->uri);
     free(doc->txt);
     free(doc);

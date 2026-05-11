@@ -28,4 +28,6 @@ void map_set(HashMap *map, const char *key, size_t key_len, void *value);
 
 void *map_get(HashMap *map, const char *key, size_t key_len);
 
+void map_remove(HashMap *map, const char *key, size_t key_len);
+
 #endif // !HASHMAP_H
