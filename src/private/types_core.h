@@ -1,8 +1,8 @@
 #ifndef TYPES_CORE_H
 #define TYPES_CORE_H
 
-#include <stdlib.h>
 #include <stdbool.h>
+#include <stdlib.h>
 
 typedef enum {
   TOKEN_ASSIGN,

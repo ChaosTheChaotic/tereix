@@ -1,5 +1,28 @@
 #include "ast_types.h"
+#include "lex_types.h"
+#include "parse_types.h"
+#include "util.h"
 #include <string.h>
+
+void init_lex_maps(LexCtx *ctx, Arena *arena) {
+  // Capacities padded to powers of 2 for minimal collisions
+  map_init(&ctx->kw_map, arena, 64);
+  map_init(&ctx->op_map, arena, 64);
+  map_init(&ctx->comp_map, arena, 16);
+  map_init(&ctx->type_kw_map, arena, 64);
+
+  for (size_t i = 0; i < kwlistlen; i++)
+    map_set(&ctx->kw_map, kwlist[i], strlen(kwlist[i]), (void *)1);
+
+  for (size_t i = 0; i < oplistlen; i++)
+    map_set(&ctx->op_map, oplist[i], strlen(oplist[i]), (void *)1);
+
+  for (size_t i = 0; i < complistlen; i++)
+    map_set(&ctx->comp_map, complist[i], strlen(complist[i]), (void *)1);
+
+  for (size_t i = 0; i < typelistlen; i++)
+    map_set(&ctx->type_kw_map, typelist[i], strlen(typelist[i]), (void *)1);
+}
 
 AstNode *new_node(Arena *arena, ASTN_TYPE type) {
   AstNode *node = arena_alloc(arena, sizeof(AstNode));
@@ -30,3 +53,36 @@ void append_stmt(AstNode **head, AstNode *new_stmt) {
   }
 }
 
+AstNode *str_to_ast(Arena *arena, const char *file) {
+  LexCtx lex = {0};
+  lex.start = (char *)file;
+  lex.curr = (char *)file;
+  lex.line = 1;
+  lex.col = 1;
+  init_lex_maps(&lex, arena);
+
+  ParseCtx pctx = {0};
+  pctx.lex = &lex;
+  pctx.arena = arena;
+  pctx.curr = next_token(&lex);
+  pctx.state_cap = 64;
+  pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
+
+  AstNode *root = new_node(arena, AST_PROGRAM);
+  push_node(&pctx, root);
+
+  bool success = parse(&pctx);
+  free(pctx.state_stack);
+
+  if (!success) {
+    return NULL;
+  }
+  return root;
+}
+
+AstNode *file_to_ast(Arena *arena, const char *path) {
+  const char *file = load_file(path);
+  if (!file)
+    return NULL;
+  return str_to_ast(arena, file);
+}

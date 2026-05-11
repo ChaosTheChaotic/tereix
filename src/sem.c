@@ -102,7 +102,6 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit) {
   return false;
 }
 
-
 void resolve_imports(Arena *arena, SemCtx *sem) {
   for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
     HashEntry *entry = sem->mod_cache.buckets[i];
@@ -594,7 +593,6 @@ DataType create_basic_type(const char *name_str) {
 
 static DataType EXPECT_BOOL = {
     .name = {.start = "bool", .len = 4, .type = TOKEN_IDENTIF}};
-
 
 void type_check_ast(Arena *arena, AstNode *root) {
   if (!root)

@@ -1,8 +1,8 @@
 #ifndef SEM_TYPES_H
 #define SEM_TYPES_H
 
-#include "ast_types.h"
 #include "arena.h"
+#include "ast_types.h"
 #include "hashmap.h"
 
 typedef struct {

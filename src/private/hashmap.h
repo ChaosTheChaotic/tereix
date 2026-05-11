@@ -18,7 +18,6 @@ typedef struct {
   Arena *arena;
 } HashMap;
 
-
 void map_init(HashMap *map, Arena *arena, size_t capacity);
 
 void map_resize(HashMap *map);

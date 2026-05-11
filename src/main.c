@@ -1,9 +1,8 @@
+#include "ast_types.h"
 #include "c_gen_types.h"
-#include "lex_types.h"
-#include "parse_types.h"
+#include "lsp.h"
 #include "sem_types.h"
 #include "util.h"
-#include "lsp.h"
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -22,70 +21,6 @@ bool check_exists(const char *path) {
 }
 inline void print_help() {
   printf("Literally just give it a valid file bro smh");
-}
-
-const char *load_file(const char *path) {
-  FILE *fp = NULL;
-  if ((fp = fopen(path, "rb")) != NULL) {
-    if (fseek(fp, 0, SEEK_END) != 0) {
-      perror("Error seeking to end of file");
-      fclose(fp);
-      return NULL;
-    }
-
-    long fsize;
-    if ((fsize = ftell(fp)) == -1) {
-      perror("Failed to get file size");
-      fclose(fp);
-      return NULL;
-    }
-    if (fseek(fp, 0, SEEK_SET) != 0) {
-      perror("Error seeking to start of file");
-      fclose(fp);
-      return NULL;
-    }
-
-    char *file = malloc(sizeof(char) * (fsize + 1));
-    if (!file) {
-      fprintf(stderr, "Failed to malloc the file");
-      fclose(fp);
-      return NULL;
-    }
-
-    unsigned long bin = fread(file, sizeof(char), fsize, fp);
-    if (bin != (unsigned long)fsize) {
-      fprintf(stderr, "Bytes read into buffer != the size of the file");
-      free(file);
-      fclose(fp);
-      return NULL;
-    }
-
-    file[fsize] = '\0';
-    fclose(fp);
-    return file;
-  } else {
-    return NULL;
-  }
-}
-
-void init_lex_maps(LexCtx *ctx, Arena *arena) {
-  // Capacities padded to powers of 2 for minimal collisions
-  map_init(&ctx->kw_map, arena, 64);
-  map_init(&ctx->op_map, arena, 64);
-  map_init(&ctx->comp_map, arena, 16);
-  map_init(&ctx->type_kw_map, arena, 64);
-
-  for (size_t i = 0; i < kwlistlen; i++)
-    map_set(&ctx->kw_map, kwlist[i], strlen(kwlist[i]), (void *)1);
-
-  for (size_t i = 0; i < oplistlen; i++)
-    map_set(&ctx->op_map, oplist[i], strlen(oplist[i]), (void *)1);
-
-  for (size_t i = 0; i < complistlen; i++)
-    map_set(&ctx->comp_map, complist[i], strlen(complist[i]), (void *)1);
-
-  for (size_t i = 0; i < typelistlen; i++)
-    map_set(&ctx->type_kw_map, typelist[i], strlen(typelist[i]), (void *)1);
 }
 
 void print_type_info(DataType type) {
@@ -494,37 +429,6 @@ const char *extract_mod_name(Arena *arena, const char *abs_path) {
   return mod_name;
 }
 
-AstNode *file_to_ast(Arena *arena, const char *path) {
-  const char *file = load_file(path);
-  if (!file)
-    return NULL;
-
-  LexCtx lex = {0};
-  lex.start = (char *)file;
-  lex.curr = (char *)file;
-  lex.line = 1;
-  lex.col = 1;
-  init_lex_maps(&lex, arena);
-
-  ParseCtx pctx = {0};
-  pctx.lex = &lex;
-  pctx.arena = arena;
-  pctx.curr = next_token(&lex);
-  pctx.state_cap = 64;
-  pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
-
-  AstNode *root = new_node(arena, AST_PROGRAM);
-  push_node(&pctx, root);
-
-  bool success = parse(&pctx);
-  free(pctx.state_stack);
-
-  if (!success) {
-    return NULL;
-  }
-  return root;
-}
-
 void compile_project(const char *entry_file) {
   Arena arena = {0};
   SemCtx sem = {0};
@@ -623,7 +527,7 @@ void compile_project(const char *entry_file) {
   printf("Type checking complete.\n");
 
   const char *abs_path = resolve_alloc(&arena, entry_file);
-	Module *main_mod = map_get(&sem.mod_cache, abs_path, strlen(abs_path));
+  Module *main_mod = map_get(&sem.mod_cache, abs_path, strlen(abs_path));
 
   for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
     HashEntry *entry = sem.mod_cache.buckets[i];

@@ -15,5 +15,4 @@ typedef struct {
   HashMap type_kw_map;
 } LexCtx;
 
-
 #endif // !LEX_TYPES_H

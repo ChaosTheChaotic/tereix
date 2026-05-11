@@ -389,8 +389,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] =
-              (IterFrame){n->as.var_decl.init, 0, NULL, NULL, 2};
+          stack[top++] = (IterFrame){n->as.var_decl.init, 0, NULL, NULL, 2};
         } else {
           sb_append(sb, ";\n");
           top--;
@@ -442,8 +441,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] =
-            (IterFrame){n->as.unop.operand, 0, NULL, NULL, 2};
+        stack[top++] = (IterFrame){n->as.unop.operand, 0, NULL, NULL, 2};
       } else {
         sb_append(sb, ")");
         if (n->type == AST_UOP && n->as.unop.is_postfix) {
@@ -460,8 +458,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] =
-            (IterFrame){n->as.if_check.check, 0, NULL, NULL, 2};
+        stack[top++] = (IterFrame){n->as.if_check.check, 0, NULL, NULL, 2};
       } else if (f->step == 1) {
         sb_append(sb, ") ");
         f->step = 2;
@@ -496,8 +493,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           stack = realloc(stack, sizeof(IterFrame) * cap);
           f = &stack[top - 1];
         }
-        stack[top++] =
-            (IterFrame){n->as.while_loop.check, 0, NULL, NULL, 2};
+        stack[top++] = (IterFrame){n->as.while_loop.check, 0, NULL, NULL, 2};
       } else if (f->step == 1) {
         sb_append(sb, ") ");
         f->step = 2;
@@ -532,8 +528,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] =
-              (IterFrame){n->as.for_loop.check, 0, NULL, NULL, 2};
+          stack[top++] = (IterFrame){n->as.for_loop.check, 0, NULL, NULL, 2};
         }
       } else if (f->step == 2) {
         sb_append(sb, "; ");
@@ -544,8 +539,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] =
-              (IterFrame){n->as.for_loop.inc, 0, NULL, NULL, 2};
+          stack[top++] = (IterFrame){n->as.for_loop.inc, 0, NULL, NULL, 2};
         }
       } else if (f->step == 3) {
         sb_append(sb, ") ");
@@ -620,8 +614,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                 stack = realloc(stack, sizeof(IterFrame) * cap);
                 f = &stack[top - 1];
               }
-              stack[top++] = (IterFrame){member_node->as.member.base, 0, NULL,
-                                         NULL, 2};
+              stack[top++] =
+                  (IterFrame){member_node->as.member.base, 0, NULL, NULL, 2};
             } else {
               f->step = 2;
               f->aux = f->aux2;
@@ -693,8 +687,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] =
-              (IterFrame){n->as.func_call.caller, 0, NULL, NULL, 2};
+          stack[top++] = (IterFrame){n->as.func_call.caller, 0, NULL, NULL, 2};
         } else if (f->step == 1) {
           bool is_ctor = (uintptr_t)f->aux2;
           if (is_ctor)
@@ -785,10 +778,14 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           AstNode *block = n->as.ret_stmt.expr;
 
           AstNode *unwrapped = block;
-          while (unwrapped && unwrapped->type == AST_BLOCK && unwrapped->as.block.first_stmt && !unwrapped->as.block.first_stmt->next) {
+          while (unwrapped && unwrapped->type == AST_BLOCK &&
+                 unwrapped->as.block.first_stmt &&
+                 !unwrapped->as.block.first_stmt->next) {
             AstNode *stmt = unwrapped->as.block.first_stmt;
-            if (is_c_expr(stmt)) unwrapped = stmt;
-            else break;
+            if (is_c_expr(stmt))
+              unwrapped = stmt;
+            else
+              break;
           }
 
           if (unwrapped->type != AST_BLOCK) {
@@ -801,11 +798,12 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             }
             stack[top++] = (IterFrame){unwrapped, 0, NULL, NULL, 2};
           } else {
-            bool is_void = (block->eval_type.name.len == 4 &&
-                            strncmp(block->eval_type.name.start, "void", 4) == 0 &&
-                            block->eval_type.ptr_depth == 0 &&
-                            block->eval_type.array_dimens == 0) ||
-                           (block->eval_type.name.len == 0);
+            bool is_void =
+                (block->eval_type.name.len == 4 &&
+                 strncmp(block->eval_type.name.start, "void", 4) == 0 &&
+                 block->eval_type.ptr_depth == 0 &&
+                 block->eval_type.array_dimens == 0) ||
+                (block->eval_type.name.len == 0);
 
             char var_name[64];
             sprintf(var_name, "_tx_blk_%zu", (size_t)(uintptr_t)block);
@@ -821,7 +819,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
             f->step = 3;
             f->aux = block->as.block.first_stmt;
-            f->aux2 = (AstNode*)(uintptr_t)is_void;
+            f->aux2 = (AstNode *)(uintptr_t)is_void;
           }
         } else {
           sb_append(sb, "return ");
@@ -865,7 +863,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           bool is_void = (bool)(uintptr_t)f->aux2;
           if (!is_void) {
             char var_name[64];
-            sprintf(var_name, "_tx_blk_%zu", (size_t)(uintptr_t)n->as.ret_stmt.expr);
+            sprintf(var_name, "_tx_blk_%zu",
+                    (size_t)(uintptr_t)n->as.ret_stmt.expr);
             sb_append(sb, "return ");
             sb_append(sb, var_name);
             sb_append(sb, ";\n");
@@ -875,7 +874,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           top--;
         }
       } else if (f->step == 4) {
-        if (f->flags & 1) sb_append(sb, ";\n");
+        if (f->flags & 1)
+          sb_append(sb, ";\n");
         f->step = 3;
       }
     } else if (n->type == AST_CAST) {
@@ -1019,8 +1019,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             stack = realloc(stack, sizeof(IterFrame) * cap);
             f = &stack[top - 1];
           }
-          stack[top++] =
-              (IterFrame){n->as.enum_member.val, 0, NULL, NULL, 2};
+          stack[top++] = (IterFrame){n->as.enum_member.val, 0, NULL, NULL, 2};
         } else {
           sb_append(sb, ",\n");
           top--;

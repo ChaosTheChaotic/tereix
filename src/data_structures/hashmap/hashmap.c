@@ -89,5 +89,3 @@ void *map_get(HashMap *map, const char *key, size_t key_len) {
   }
   return NULL; // Not found
 }
-
-

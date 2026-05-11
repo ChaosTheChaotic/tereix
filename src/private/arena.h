@@ -1,9 +1,9 @@
 #ifndef ARENA_H
 #define ARENA_H
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
 
 #define ARENA_CHUNK_SIZE (1024 * 1024)
 

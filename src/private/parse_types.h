@@ -1,8 +1,8 @@
 #ifndef PARSE_TYPES_H
 #define PARSE_TYPES_H
 
-#include "lex_types.h"
 #include "ast_types.h"
+#include "lex_types.h"
 #include "types_core.h"
 
 typedef enum {
@@ -78,8 +78,7 @@ bool is_kw(LexCtx *ctx, const char *start, unsigned int len);
 
 bool is_op(LexCtx *ctx, const char *start, unsigned int len);
 
-bool is_compare(LexCtx *ctx, const char *start,
-                              unsigned int len);
+bool is_compare(LexCtx *ctx, const char *start, unsigned int len);
 
 bool is_punc(char c);
 Token next_token(LexCtx *ctx);

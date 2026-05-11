@@ -1,8 +1,8 @@
 #ifndef AST_TYPES_H
 #define AST_TYPES_H
 
-#include "types_core.h"
 #include "arena.h"
+#include "types_core.h"
 
 typedef enum {
   AST_BINOP,
@@ -264,5 +264,8 @@ AstNode *new_node(Arena *arena, ASTN_TYPE type);
 void write_ast(const char *path);
 
 void append_stmt(AstNode **head, AstNode *new_stmt);
+
+AstNode *file_to_ast(Arena *arena, const char *path);
+AstNode *str_to_ast(Arena *arena, const char *file);
 
 #endif // !AST_TYPES_H
