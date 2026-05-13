@@ -2,13 +2,17 @@
 #define LSP_H
 
 #include "hashmap.h"
+#include "ast_types.h"
 #include "yyjson.h"
 #include <stdbool.h>
 
 typedef struct {
   char *uri;
   char *txt;
-  unsigned int version;
+  int version;
+
+  Arena *ast_arena;
+  AstNode *ast_root;
 } Doc;
 
 typedef struct {

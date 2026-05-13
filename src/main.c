@@ -485,7 +485,7 @@ void compile_project(const char *entry_file) {
     HashEntry *entry = sem.mod_cache.buckets[i];
     while (entry) {
       Module *mod = (Module *)entry->value;
-      collect_mod_symbols(&arena, mod);
+      collect_mod_symbols(&arena, mod, &sem);
       entry = entry->next;
     }
   }
@@ -505,7 +505,7 @@ void compile_project(const char *entry_file) {
       ss.count = 0;
 
       // Resolve scopes for this specific modules AST
-      resolve_scopes(&arena, mod, &ss);
+      resolve_scopes(&arena, mod, &ss, &sem);
 
       entry = entry->next;
     }
@@ -519,7 +519,7 @@ void compile_project(const char *entry_file) {
       Module *mod = (Module *)entry->value;
 
       // Post-order type propagation
-      type_check_ast(&arena, mod->ast_root);
+      type_check_ast(&arena, mod->ast_root, &sem);
 
       entry = entry->next;
     }

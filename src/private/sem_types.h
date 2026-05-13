@@ -3,11 +3,13 @@
 
 #include "arena.h"
 #include "ast_types.h"
+#include "diag.h"
 #include "hashmap.h"
 
 typedef struct {
   Arena *arena;
   HashMap mod_cache;
+	DiagList *diags;
 
   const char
       *std_lib_env_path; // In case the user specifies a dir to go through for
@@ -73,10 +75,10 @@ Module *new_mod(Arena *arena, const char *abs_path, const char *mod_name,
 
 bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float);
 
-void resolve_imports(Arena *arena, SemCtx *sem);
-void collect_mod_symbols(Arena *arena, Module *mod);
+bool resolve_imports(Arena *arena, SemCtx *sem);
+bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx);
 void scope_stack_init(ScopeStack *ss, Arena *arena);
-void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss);
-void type_check_ast(Arena *arena, AstNode *root);
+void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx);
+void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx);
 
 #endif // !SEM_TYPES_U

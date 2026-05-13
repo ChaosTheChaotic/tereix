@@ -6,6 +6,7 @@
 typedef struct {
   char *start;
   char *curr;
+	const char *file;
   unsigned int line;
   unsigned int col;
 

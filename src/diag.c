@@ -1,0 +1,36 @@
+#include "diag.h"
+#include <stdlib.h>
+#include <string.h>
+
+void diaglist_init(DiagList *list, size_t initial_cap) {
+    list->items = malloc(initial_cap * sizeof(Diag));
+    list->cap = initial_cap;
+    list->count = 0;
+}
+
+void diaglist_free(DiagList *list) {
+    free(list->items);
+    list->items = NULL;
+    list->cap = list->count = 0;
+}
+
+void diaglist_add(DiagList *list, DiagSeverity sev,
+                  const char *message, const char *file,
+                  unsigned int line, unsigned int col,
+                  unsigned int end_line, unsigned int end_col) {
+    if (list->count >= list->cap) {
+        list->cap = (list->cap == 0) ? 32 : list->cap * 2;
+        list->items = realloc(list->items, list->cap * sizeof(Diag));
+    }
+    // Convert 1 based lexer columns to 0 based LSP offsets
+    Diag d = {
+        .severity = sev,
+        .message = strdup(message),
+        .file = file,
+        .start_line = line - 1,
+        .start_char = col - 1,
+        .end_line = end_line - 1,
+        .end_char = end_col - 1
+    };
+    list->items[list->count++] = d;
+}

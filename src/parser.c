@@ -1,6 +1,34 @@
 #include "ast_types.h"
 #include "parse_types.h"
 #include <ctype.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+void report_error(ParseCtx *ctx, const char *fmt, ...) {
+  if (ctx->panic_mode)
+    return;
+
+	va_list args;
+	va_start(args, fmt);
+	char *message = NULL;
+	int len = vasprintf(&message, fmt, args);
+	va_end(args);
+
+  if (ctx->diags) {
+    // Lexer uses 1 based lines/cols so must convert to 0 based for LSP
+    unsigned int line = ctx->lex->line - 1;
+    unsigned int col = ctx->lex->col - 1;
+		// TODO: Fix range of errors being just +1
+    diaglist_add(ctx->diags, DIAG_ERROR, message,
+									ctx->lex->file,
+                 line, col, line, col + 1);
+  } else {
+    fprintf(stderr, "Error at line %u, col %u: %s\n", ctx->lex->line,
+            ctx->lex->col, message);
+  }
+  ctx->err_count++;
+  ctx->panic_mode = true;
+}
 
 int get_precedence(Token op, bool is_unary, bool is_postfix) {
   if (op.len == 0)
@@ -121,7 +149,8 @@ void skip_irrelevant(LexCtx *ctx) {
   }
 }
 
-Token next_token(LexCtx *ctx) {
+Token next_token(ParseCtx *pctx) {
+	LexCtx *ctx = pctx->lex;
   skip_irrelevant(ctx);
 
   ctx->start = ctx->curr;
@@ -194,7 +223,7 @@ Token next_token(LexCtx *ctx) {
           // break)
           break;
         default:
-          fprintf(stderr, "Error: Invalid escape sequence \\%c\n", escape);
+          report_error(pctx, "Error: Invalid escape sequence \\%c\n", escape);
           return (Token){.start = ctx->start,
                          .len = (ctx->curr - ctx->start),
                          .type = TOKEN_UNKNOWN};
@@ -216,7 +245,7 @@ Token next_token(LexCtx *ctx) {
     }
 
     if (*ctx->curr == '\0') {
-      printf("Error: Unterminated string at line %u, col %u col %u\n",
+      report_error(pctx, "Error: Unterminated string at line %u, col %u col %u\n",
              ctx->line, ctx->col, ctx->col);
       return (Token){.start = ctx->start,
                      .len = (ctx->curr - ctx->start),
@@ -225,7 +254,7 @@ Token next_token(LexCtx *ctx) {
       if (quote == '\'' &&
           ((ctx->curr - ctx->start) > 3 ||
            (*ctx->curr == '\\' && (ctx->curr - ctx->start > 4)))) {
-        fprintf(stderr, "Char literal must contain only 1 char");
+        report_error(pctx, "Char literal must contain only 1 char");
         return (Token){.start = ctx->start,
                        .len = (ctx->curr - ctx->start),
                        .type = TOKEN_UNKNOWN};
@@ -275,12 +304,13 @@ Token next_token(LexCtx *ctx) {
                  .col = tk_col};
 }
 
-Token peek_token(LexCtx *ctx) {
+Token peek_token(ParseCtx *pctx) {
+	LexCtx *ctx = pctx->lex;
   char *saved_curr = ctx->curr;
   unsigned int saved_line = ctx->line;
   unsigned int saved_col = ctx->col;
 
-  Token t = next_token(ctx);
+  Token t = next_token(pctx);
 
   ctx->curr = saved_curr;
   ctx->line = saved_line;
@@ -291,17 +321,7 @@ Token peek_token(LexCtx *ctx) {
 
 void adv(ParseCtx *ctx) {
   ctx->prev = ctx->curr;
-  ctx->curr = next_token(ctx->lex);
-}
-
-void report_error(ParseCtx *ctx, const char *message) {
-  if (ctx->panic_mode)
-    return; // Suppress cascaded errors
-
-  fprintf(stderr, "Error at line %u, col %u: %s\n", ctx->lex->line,
-          ctx->lex->col, message);
-  ctx->err_count++;
-  ctx->panic_mode = true;
+  ctx->curr = next_token(ctx);
 }
 
 void sync(ParseCtx *ctx) {
@@ -480,13 +500,15 @@ void apply_op(ParseCtx *ctx) {
 }
 
 bool is_type(ParseCtx *ctx) {
+  ParseCtx tmp_parse = *ctx;
   LexCtx tmp_lex = *ctx->lex;
+  tmp_parse.lex = &tmp_lex;
   Token t = ctx->curr;
 
   // Skip over any pointers or references
   while (t.type == TOKEN_OP && t.len == 1 &&
          (*t.start == '*' || *t.start == '&')) {
-    t = next_token(&tmp_lex);
+    t = next_token(&tmp_parse);
   }
 
   if (t.type == TOKEN_KW) {
@@ -507,7 +529,7 @@ bool is_type(ParseCtx *ctx) {
   }
 
   // Might be a custom type
-  if (t.type == TOKEN_IDENTIF && next_token(&tmp_lex).type == TOKEN_IDENTIF &&
+  if (t.type == TOKEN_IDENTIF && next_token(&tmp_parse).type == TOKEN_IDENTIF &&
       !is_kw(ctx->lex, t.start, t.len))
     return true;
 
@@ -549,7 +571,7 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_KW &&
         strncmp(ctx->curr.start, "extern", 6) == 0) {
-      Token next = peek_token(ctx->lex);
+      Token next = peek_token(ctx);
       if (next.type == TOKEN_PUNC && *next.start == '{') {
         adv(ctx);
         adv(ctx);
@@ -692,7 +714,7 @@ bool parse_step(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
         if (type.is_threadlocal) {
-          fprintf(stderr,
+          report_error(ctx,
                   "Error: 'threadlocal' cannot be applied to function '%.*s' "
                   "at line %u, col %u\n",
                   name.len, name.start, ctx->lex->line, ctx->lex->col);
@@ -723,7 +745,7 @@ bool parse_step(ParseCtx *ctx) {
           Token p_name;
 
           if (p_type.is_self) {
-            fprintf(stderr,
+            report_error(ctx,
                     "Using self is not allowed when not within a struct union "
                     "or enum on line %u, col %u",
                     ctx->lex->line, ctx->lex->col);
@@ -731,7 +753,7 @@ bool parse_step(ParseCtx *ctx) {
           } else {
             if (ctx->curr.type != TOKEN_IDENTIF &&
                 !is_builtin_type_kw(ctx, ctx->curr)) {
-              fprintf(stderr,
+              report_error(ctx,
                       "Expected identifier after type in params at line %u, "
                       "col %u\n",
                       ctx->lex->line, ctx->lex->col);
@@ -768,7 +790,7 @@ bool parse_step(ParseCtx *ctx) {
 
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
           if (!fnode->as.func_def.is_extern) {
-            fprintf(stderr,
+            report_error(ctx,
                     "Error: Function prototype '%.*s' must be marked 'extern' "
                     "at line %u, col %u\n",
                     name.len, name.start, ctx->lex->line, ctx->lex->col);
@@ -834,7 +856,7 @@ bool parse_step(ParseCtx *ctx) {
     } else if (parent->type == AST_BLOCK || parent->type == AST_PROGRAM) {
       append_stmt(&parent->as.block.first_stmt, expr_node);
     } else {
-      fprintf(stderr,
+      report_error(ctx,
               "Parser Error: Unexpected context for expression at line %u, col "
               "%u\n",
               ctx->lex->line, ctx->lex->col);
@@ -940,7 +962,7 @@ bool parse_step(ParseCtx *ctx) {
     bool is_async_block = false;
     if (ctx->curr.type == TOKEN_KW && ctx->curr.len == 5 &&
         strncmp(ctx->curr.start, "async", 5) == 0) {
-      Token next = peek_token(ctx->lex);
+      Token next = peek_token(ctx);
       if (next.type == TOKEN_PUNC && *next.start == '{') {
         is_async_block = true;
         adv(ctx);
@@ -1282,7 +1304,7 @@ bool parse_step(ParseCtx *ctx) {
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
           adv(ctx);
         } else {
-          fprintf(stderr, "Expected '(' after if\n");
+          report_error(ctx, "Expected '(' after if\n");
           return false;
         }
         break;
@@ -1300,7 +1322,7 @@ bool parse_step(ParseCtx *ctx) {
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
           adv(ctx);
         } else {
-          fprintf(stderr, "Expected '(' after while\n");
+          report_error(ctx, "Expected '(' after while\n");
           return false;
         }
         break;
@@ -1371,7 +1393,7 @@ bool parse_step(ParseCtx *ctx) {
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
           adv(ctx);
         } else {
-          fprintf(stderr, "Expected '(' after for\n");
+          report_error(ctx, "Expected '(' after for\n");
           return false;
         }
         break;
@@ -1401,14 +1423,14 @@ bool parse_step(ParseCtx *ctx) {
     if (is_type(ctx)) {
       DataType type = parse_type(ctx);
       if (type.is_async) {
-        fprintf(stderr,
+        report_error(ctx,
                 "Error: 'async' cannot be applied to variables at line %u, col "
                 "%u\n",
                 ctx->lex->line, ctx->lex->col);
         return false;
       }
       if (type.is_inline) {
-        fprintf(stderr,
+        report_error(ctx,
                 "Error: 'inline' cannot be applied to variables at line %u, "
                 "col %u\n",
                 ctx->lex->line, ctx->lex->col);
@@ -1493,7 +1515,7 @@ bool parse_step(ParseCtx *ctx) {
           strncmp(ctx->curr.start, "static", 6) == 0))) {
       is_decl = true;
     } else if (ctx->curr.type == TOKEN_IDENTIF) {
-      Token next = peek_token(ctx->lex);
+      Token next = peek_token(ctx);
       if (next.type == TOKEN_IDENTIF) {
         is_decl = true;
       }
@@ -1502,14 +1524,14 @@ bool parse_step(ParseCtx *ctx) {
     if (is_decl) {
       DataType type = parse_type(ctx);
       if (type.is_async) {
-        fprintf(stderr,
+        report_error(ctx,
                 "Error: 'async' cannot be applied to variables at line %u, col "
                 "%u\n",
                 ctx->lex->line, ctx->lex->col);
         return false;
       }
       if (type.is_inline) {
-        fprintf(stderr,
+        report_error(ctx,
                 "Error: 'inline' cannot be applied to variables at line %u, "
                 "col %u\n",
                 ctx->lex->line, ctx->lex->col);
@@ -1541,7 +1563,7 @@ bool parse_step(ParseCtx *ctx) {
         for_node->as.for_loop.init = var_node;
         adv(ctx);
       } else {
-        fprintf(stderr,
+        report_error(ctx,
                 "Expected '=' or ';' after variable declaration in for loop "
                 "at line %u, col %u\n",
                 ctx->lex->line, ctx->lex->col);
@@ -1569,7 +1591,7 @@ bool parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
     } else {
-      fprintf(stderr,
+      report_error(ctx,
               "Expected ';' after for-loop variable declaration at line %u, "
               "col %u\n",
               ctx->lex->line, ctx->lex->col);
@@ -1639,7 +1661,7 @@ bool parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
       adv(ctx);
     } else {
-      fprintf(stderr, "Expected ')' after while-condition\n");
+      report_error(ctx, "Expected ')' after while-condition\n");
       return false;
     }
 
@@ -1648,7 +1670,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *body_block = new_node(ctx->arena, AST_BLOCK);
       push_node(ctx, body_block);
     } else {
-      fprintf(stderr, "Expected '{' for while body\n");
+      report_error(ctx, "Expected '{' for while body\n");
       return false;
     }
     break;
@@ -1717,7 +1739,7 @@ bool parse_step(ParseCtx *ctx) {
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
           adv(ctx);
         } else {
-          fprintf(stderr, "Expected '(' after else if\n");
+          report_error(ctx, "Expected '(' after else if\n");
           return false;
         }
       } else {
@@ -1731,7 +1753,7 @@ bool parse_step(ParseCtx *ctx) {
           push_state(ctx, STATE_PARSE_BLOCK);
           adv(ctx);
         } else {
-          fprintf(stderr, "Expected '{' after else\n");
+          report_error(ctx, "Expected '{' after else\n");
           return false;
         }
       }
@@ -1833,14 +1855,14 @@ bool parse_step(ParseCtx *ctx) {
     DataType field_type = parse_type(ctx);
 
     if (field_type.is_async) {
-      fprintf(stderr,
+      report_error(ctx,
               "Error: 'async' cannot be applied to struct/union fields at line "
               "%u\n",
               ctx->lex->line);
       return false;
     }
     if (field_type.is_inline) {
-      fprintf(stderr,
+      report_error(ctx,
               "Error: 'inline' cannot be applied to struct/union fields at "
               "line %u, col %u\n",
               ctx->lex->line, ctx->lex->col);
@@ -1860,7 +1882,7 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
       if (field_type.is_threadlocal) {
-        fprintf(stderr,
+        report_error(ctx,
                 "Error: 'threadlocal' cannot be applied to method '%.*s' at "
                 "line %u, col %u\n",
                 name.len, name.start, ctx->lex->line, ctx->lex->col);
@@ -1936,7 +1958,7 @@ bool parse_step(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
         if (!fnode->as.func_def.is_extern) {
-          fprintf(stderr,
+          report_error(ctx,
                   "Error: Method '%.*s' must be marked 'extern' if no body at "
                   "line %u, col %u\n",
                   name.len, name.start, ctx->lex->line, ctx->lex->col);
@@ -2367,7 +2389,7 @@ DataType parse_type(ParseCtx *ctx) {
   if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
       strncmp(ctx->curr.start, "self", 4) == 0) {
     if (ctx->ag_depth == 0) {
-      fprintf(stderr,
+      report_error(ctx,
               "Error: 'self' type can only be used inside struct/union/enum at "
               "line %u, col %u\n",
               ctx->lex->line, ctx->lex->col);
@@ -2401,7 +2423,7 @@ DataType parse_type(ParseCtx *ctx) {
       type.is_custom = true;
     adv(ctx);
   } else {
-    fprintf(stderr, "Expected type name at line %u, col %u\n", ctx->lex->line,
+    report_error(ctx, "Expected type name at line %u, col %u\n", ctx->lex->line,
             ctx->lex->col);
   }
 
@@ -2433,7 +2455,7 @@ DataType parse_type(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ']') {
       adv(ctx);
     } else {
-      fprintf(stderr, "Expected ']' after array dimension at line %u, col %u\n",
+      report_error(ctx, "Expected ']' after array dimension at line %u, col %u\n",
               ctx->lex->line, ctx->lex->col);
     }
   }

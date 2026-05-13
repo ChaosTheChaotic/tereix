@@ -53,20 +53,22 @@ void append_stmt(AstNode **head, AstNode *new_stmt) {
   }
 }
 
-AstNode *str_to_ast(Arena *arena, const char *file) {
+AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath, DiagList *diag_list) {
   LexCtx lex = {0};
   lex.start = (char *)file;
   lex.curr = (char *)file;
   lex.line = 1;
   lex.col = 1;
+	lex.file = fpath;
   init_lex_maps(&lex, arena);
 
   ParseCtx pctx = {0};
   pctx.lex = &lex;
   pctx.arena = arena;
-  pctx.curr = next_token(&lex);
   pctx.state_cap = 64;
   pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
+	pctx.diags = diag_list;
+  pctx.curr = next_token(&pctx);
 
   AstNode *root = new_node(arena, AST_PROGRAM);
   push_node(&pctx, root);
@@ -84,5 +86,7 @@ AstNode *file_to_ast(Arena *arena, const char *path) {
   const char *file = load_file(path);
   if (!file)
     return NULL;
-  return str_to_ast(arena, file);
+	DiagList diags;
+	diaglist_init(&diags, 1024);
+  return str_to_ast(arena, file, path, &diags);
 }

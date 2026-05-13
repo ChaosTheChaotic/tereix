@@ -2,6 +2,7 @@
 #define AST_TYPES_H
 
 #include "arena.h"
+#include "diag.h"
 #include "types_core.h"
 
 typedef enum {
@@ -266,6 +267,6 @@ void write_ast(const char *path);
 void append_stmt(AstNode **head, AstNode *new_stmt);
 
 AstNode *file_to_ast(Arena *arena, const char *path);
-AstNode *str_to_ast(Arena *arena, const char *file);
+AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath, DiagList *diag_list);
 
 #endif // !AST_TYPES_H

@@ -1,5 +1,29 @@
 #include "sem_types.h"
 #include "util.h"
+#include <stdarg.h>
+
+void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
+                ...) {
+  va_list args;
+  va_start(args, fmt);
+
+  char *msg = NULL;
+  int len = vasprintf(&msg, fmt, args);
+  va_end(args);
+
+  if (!msg)
+    return;
+
+  if (ctx && ctx->diags) {
+    // Add to central list (converts 1 based→0 based)
+    diaglist_add(ctx->diags, sev, msg, NULL, token.line - 1,
+                 token.col - 1, token.line - 1, token.col - 1 + (int)token.len);
+    free(msg);
+  } else {
+    fprintf(stderr, "%s\n", msg);
+    free(msg);
+  }
+}
 
 void sem_init(SemCtx *ctx, Arena *arena) {
   ctx->arena = arena;
@@ -47,7 +71,7 @@ bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float) {
   return false;
 }
 
-bool is_type_compatible(DataType target, DataType source, bool is_explicit) {
+bool is_type_compatible(DataType target, DataType source, bool is_explicit, SemCtx *ctx) {
   if (target.name.len == 3 && strncmp(target.name.start, "any", 3) == 0) {
     return true;
   }
@@ -92,8 +116,8 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit) {
   }
 
   // No implicit conversion
-  fprintf(
-      stderr,
+  sem_report(
+      ctx, DIAG_ERROR, target.name,
       "Types %.*s (ptr_depth: %ld) and %.*s (ptr_depth: %ld) are not "
       "compatible (safely) at %u:%u, try explicit casting to get around this\n",
       (int)target.name.len, target.name.start, target.ptr_depth,
@@ -102,7 +126,7 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit) {
   return false;
 }
 
-void resolve_imports(Arena *arena, SemCtx *sem) {
+bool resolve_imports(Arena *arena, SemCtx *sem) {
   for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
     HashEntry *entry = sem->mod_cache.buckets[i];
     while (entry) {
@@ -140,13 +164,13 @@ void resolve_imports(Arena *arena, SemCtx *sem) {
               // Collision check
               if (map_get(&current_mod->imported_mods, import_key, key_len) !=
                   NULL) {
-                fprintf(stderr,
+                sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
                         "Error in %s at %u:%u: Duplicate mod import name "
                         "'%.*s'. Use an "
                         "'as' alias.\n",
                         current_mod->abs_path, stmt->as.use_stmt.path.line,
                         stmt->as.use_stmt.path.col, (int)key_len, import_key);
-                exit(1);
+								return false;
               }
 
               map_set(&current_mod->imported_mods, import_key, key_len,
@@ -159,9 +183,10 @@ void resolve_imports(Arena *arena, SemCtx *sem) {
       entry = entry->next;
     }
   }
+	return true;
 }
 
-void collect_mod_symbols(Arena *arena, Module *mod) {
+bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
   AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
     Token name = {0};
@@ -197,24 +222,25 @@ void collect_mod_symbols(Arena *arena, Module *mod) {
     if (is_valid) {
       // Check for local redeclarations
       if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
-        fprintf(stderr,
-                "Error in %u:%u: Symbol '%.*s' already defined in mod %s\n",
-                name.line, name.col, name.len, name.start, mod->mod_name);
-        exit(1);
+        sem_report(ctx, DIAG_ERROR, name,
+                   "Error: Symbol '%.*s' already defined in module %s",
+                   name.len, name.start, mod->mod_name);
+        return false;
       }
 
       if (map_get(&mod->imported_mods, name.start, name.len) != NULL) {
-        fprintf(stderr,
+        sem_report(ctx, DIAG_ERROR, name,
                 "Error: Symbol '%.*s' conflicts with an imported module or "
                 "alias in mod %s\n",
                 name.len, name.start, mod->mod_name);
-        exit(1);
+				return false;
       }
       Sym *sym = new_sym(arena, kind, name, stmt);
       map_set(&mod->local_symbols, name.start, name.len, sym);
     }
     stmt = stmt->next;
   }
+	return true;
 }
 
 Sym *scope_lookup(ScopeStack *ss, const char *key, size_t len) {
@@ -265,7 +291,7 @@ void pop_scope(ScopeStack *ss) {
   }
 }
 
-void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
+void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
   if (!mod || !mod->ast_root)
     return;
 
@@ -351,7 +377,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
       // Declare the function in the current scope
       Sym *func_sym = new_sym(arena, SYM_FUNC, node->as.func_def.fn_name, node);
       if (!scope_declare(ss, node->as.func_def.fn_name, func_sym)) {
-        fprintf(stderr, "Error: Duplicate function name '%.*s'\n",
+        sem_report(ctx, DIAG_ERROR, node->as.func_def.fn_name, "Error: Duplicate function name '%.*s'\n",
                 node->as.func_def.fn_name.len, node->as.func_def.fn_name.start);
       }
 
@@ -372,7 +398,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
     case AST_PARAM: {
       Sym *param_sym = new_sym(arena, SYM_VAR, node->as.fn_param.id, node);
       if (!scope_declare(ss, node->as.fn_param.id, param_sym)) {
-        fprintf(stderr, "Error: Duplicate parameter name '%.*s'\n",
+        sem_report(ctx, DIAG_ERROR, node->as.fn_param.id, "Error: Duplicate parameter name '%.*s'\n",
                 node->as.fn_param.id.len, node->as.fn_param.id.start);
       }
       break;
@@ -387,7 +413,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
       // Declare the variable in the current scope
       Sym *var_sym = new_sym(arena, SYM_VAR, node->as.var_decl.id, node);
       if (!scope_declare(ss, node->as.var_decl.id, var_sym)) {
-        fprintf(stderr,
+        sem_report(ctx, DIAG_ERROR, node->as.var_decl.id,
                 "Error: Variable '%.*s' already declared in this scope.\n",
                 node->as.var_decl.id.len, node->as.var_decl.id.start);
       }
@@ -398,8 +424,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss) {
       Token id = node->as.identif.val;
       Sym *found = scope_lookup(ss, id.start, id.len);
       if (!found) {
-        fprintf(stderr, "Error: Undeclared identifier '%.*s'\n", id.len,
-                id.start);
+        sem_report(ctx, DIAG_ERROR, id, "Undeclared identifier '%.*s'", id.len,
+                   id.start);
       } else {
         node->as.identif.res_sm = found;
       }
@@ -594,7 +620,7 @@ DataType create_basic_type(const char *name_str) {
 static DataType EXPECT_BOOL = {
     .name = {.start = "bool", .len = 4, .type = TOKEN_IDENTIF}};
 
-void type_check_ast(Arena *arena, AstNode *root) {
+void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
   if (!root)
     return;
 
@@ -926,12 +952,10 @@ void type_check_ast(Arena *arena, AstNode *root) {
       case AST_VAR_DECL:
         if (node->as.var_decl.init) {
           if (!is_type_compatible(node->as.var_decl.type,
-                                  node->as.var_decl.init->eval_type, false)) {
-            fprintf(stderr,
-                    "Type Error at %u:%u: Incompatible assignment for variable "
-                    "'%.*s'.\n",
-                    node->as.var_decl.id.line, node->as.var_decl.id.col,
-                    node->as.var_decl.id.len, node->as.var_decl.id.start);
+                                  node->as.var_decl.init->eval_type, false, ctx)) {
+            sem_report(ctx, DIAG_ERROR, node->as.var_decl.id,
+                       "Incompatible assignment for variable '%.*s'",
+                       node->as.var_decl.id.len, node->as.var_decl.id.start);
           }
         }
         break;
@@ -944,15 +968,15 @@ void type_check_ast(Arena *arena, AstNode *root) {
 
           if (right->type == AST_NUM_LIT) {
             if (atof(right->as.num_lit.val.start) == 0.0) {
-              fprintf(stderr, "Error at line %u, col %u: Division by zero.\n",
+              sem_report(ctx, DIAG_ERROR, right->as.num_lit.val, "Error at line %u, col %u: Division by zero.\n",
                       node->as.binop.op.line, node->as.binop.op.col);
             }
           }
         }
 
-        if (!is_type_compatible(left_t, right_t, false) &&
-            !is_type_compatible(right_t, left_t, false)) {
-          fprintf(stderr,
+        if (!is_type_compatible(left_t, right_t, false, ctx) &&
+            !is_type_compatible(right_t, left_t, false, ctx)) {
+          sem_report(ctx, DIAG_ERROR, node->as.binop.op,
                   "Type Error at %u:%u: Incompatible operands '%.*s' and "
                   "'%.*s' for "
                   "'%.*s'.\n",
@@ -981,8 +1005,8 @@ void type_check_ast(Arena *arena, AstNode *root) {
       }
       case AST_CAST:
         if (!is_type_compatible(node->as.cast.target,
-                                node->as.cast.op->eval_type, true)) {
-          fprintf(stderr, "Type Error at %u:%u: Invalid explicit cast.\n",
+                                node->as.cast.op->eval_type, true, ctx)) {
+          sem_report(ctx, DIAG_ERROR, node->as.cast.target.name, "Type Error at %u:%u: Invalid explicit cast.\n",
                   node->as.cast.target.name.line,
                   node->as.cast.target.name.col);
         }
@@ -991,9 +1015,9 @@ void type_check_ast(Arena *arena, AstNode *root) {
       case AST_RET:
         if (item.curr_func && node->as.ret_stmt.expr) {
           if (!is_type_compatible(item.curr_func->as.func_def.ret_type,
-                                  node->as.ret_stmt.expr->eval_type, false)) {
-            fprintf(
-                stderr, "Type Error at %u:%u: Function return type mismatch.\n",
+                                  node->as.ret_stmt.expr->eval_type, false, ctx)) {
+            sem_report(
+                ctx, DIAG_ERROR, node->as.ret_stmt.expr->eval_type.name, "Type Error at %u:%u: Function return type mismatch.\n",
                 node->as.ret_stmt.ret_kw.line, node->as.ret_stmt.ret_kw.col);
           }
         }
