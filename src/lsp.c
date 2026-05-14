@@ -164,6 +164,34 @@ void compile_doc(Doc *doc) {
         .abs_path = abspath, .mod_name = "lsp_temp", .ast_root = root};
     map_init(&mod.local_symbols, doc->ast_arena, 64);
     map_init(&mod.imported_mods, doc->ast_arena, 8);
+    AstNode *stmt = root->as.block.first_stmt;
+    while (stmt) {
+      if (stmt->type == AST_USE) {
+        if (stmt->as.use_stmt.alias.len > 0) {
+          // If aliased, register the alias
+          map_set(&mod.imported_mods, stmt->as.use_stmt.alias.start,
+                  stmt->as.use_stmt.alias.len, (void *)1);
+        } else if (stmt->as.use_stmt.path.len > 2) {
+          // Extract base module name from the path string
+          char *clean_rel =
+              arena_alloc(doc->ast_arena, stmt->as.use_stmt.path.len - 1);
+          strncpy(clean_rel, stmt->as.use_stmt.path.start + 1,
+                  stmt->as.use_stmt.path.len - 2);
+          clean_rel[stmt->as.use_stmt.path.len - 2] = '\0';
+
+          const char *base = strrchr(clean_rel, '/');
+          base = base ? base + 1 : clean_rel;
+
+          const char *ext = strrchr(base, '.');
+          size_t key_len = ext ? (size_t)(ext - base) : strlen(base);
+
+          // Insert dummy value
+					// resolve_scopes only checks the key presence
+          map_set(&mod.imported_mods, base, key_len, (void *)1);
+        }
+      }
+      stmt = stmt->next;
+    }
     ScopeStack ss;
     scope_stack_init(&ss, doc->ast_arena);
     resolve_scopes(doc->ast_arena, &mod, &ss, &sem);
