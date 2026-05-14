@@ -61,6 +61,7 @@ void lsp_send_doc(yyjson_mut_doc *doc) {
 }
 
 void handle_initialize(yyjson_val *params, yyjson_val *id) {
+	(void)params; // No use currently
   yyjson_mut_val *root;
   yyjson_mut_doc *doc = lsp_start_response(id, &root);
 
