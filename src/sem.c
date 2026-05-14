@@ -15,9 +15,8 @@ void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
     return;
 
   if (ctx && ctx->diags) {
-    // Add to central list (converts 1 based→0 based)
-    diaglist_add(ctx->diags, sev, msg, NULL, token.line - 1,
-                 token.col - 1, token.line - 1, token.col - 1 + (int)token.len);
+    diaglist_add(ctx->diags, sev, msg, NULL, token.line, token.col, token.line,
+                 token.col + (int)token.len);
     free(msg);
   } else {
     fprintf(stderr, "%s\n", msg);
