@@ -79,6 +79,8 @@ Token get_decl_token(AstNode *node) {
     return node->as.union_def.unionn;
   case AST_ENUM:
     return node->as.enum_def.enumn;
+  case AST_ENUM_MEMBER:
+    return node->as.enum_member.name;
   default:
     return t;
   }
@@ -103,6 +105,13 @@ AstNode *find_ident_at_pos(AstNode *root, unsigned int line, int character) {
 
     if (node->type == AST_IDENTIF) {
       Token t = node->as.identif.val;
+      if (t.line == target_line && character >= (int)t.col &&
+          character <= (int)(t.col + t.len)) {
+        found = node;
+        break;
+      }
+    } else if (node->type == AST_MEMBER) {
+      Token t = node->as.member.name;
       if (t.line == target_line && character >= (int)t.col &&
           character <= (int)(t.col + t.len)) {
         found = node;
@@ -219,6 +228,146 @@ AstNode *find_ident_at_pos(AstNode *root, unsigned int line, int character) {
   return found;
 }
 
+typedef struct {
+  AstNode *decl_node;
+  const char *fpath;
+} ResolvedNode;
+
+ResolvedNode resolve_node_to_decl(AstNode *ident) {
+  ResolvedNode res = {NULL, NULL};
+  if (!ident) return res;
+
+  if (ident->type == AST_IDENTIF && ident->as.identif.res_sm) {
+    res.decl_node = ident->as.identif.res_sm->decl_node;
+    res.fpath = ident->as.identif.res_sm->fpath;
+    return res;
+  }
+
+  if (ident->type == AST_MEMBER) {
+    AstNode *base = ident->as.member.base;
+    if (!base) return res;
+
+    if (base->type == AST_IDENTIF && base->as.identif.res_sm && base->as.identif.res_sm->is_imported_mod) {
+      const char *mod_fpath = base->as.identif.res_sm->fpath;
+      char target_uri[8192];
+      snprintf(target_uri, sizeof(target_uri), "file://%s", mod_fpath);
+      Doc *d = (Doc *)map_get(&server_state.open_docs, target_uri, strlen(target_uri));
+      if (d && d->ast_root) {
+        AstNode *stmt = d->ast_root->as.block.first_stmt;
+        while (stmt) {
+          Token t = get_decl_token(stmt);
+          if (t.len == ident->as.member.name.len && strncmp(t.start, ident->as.member.name.start, t.len) == 0) {
+            res.decl_node = stmt;
+            res.fpath = mod_fpath;
+            return res;
+          }
+          stmt = stmt->next;
+        }
+      }
+    } else {
+      Token ag_name = base->eval_type.name;
+      if (ag_name.len > 0) {
+        for (size_t i = 0; i < server_state.open_docs.capacity; i++) {
+          HashEntry *entry = server_state.open_docs.buckets[i];
+          while (entry) {
+            Doc *d = (Doc *)entry->value;
+            if (d->ast_root) {
+              AstNode *stmt = d->ast_root->as.block.first_stmt;
+              while (stmt) {
+                if (stmt->type == AST_STRUCT || stmt->type == AST_UNION || stmt->type == AST_ENUM) {
+                  Token t = get_decl_token(stmt);
+                  if (t.len == ag_name.len && strncmp(t.start, ag_name.start, t.len) == 0) {
+                    AstNode *curr = NULL;
+                    if (stmt->type == AST_STRUCT) curr = stmt->as.struct_def.contents;
+                    else if (stmt->type == AST_UNION) curr = stmt->as.union_def.contents;
+                    else if (stmt->type == AST_ENUM) curr = stmt->as.enum_def.contents;
+                    
+                    while (curr) {
+                      Token mt = get_decl_token(curr);
+                      if (mt.len == ident->as.member.name.len && strncmp(mt.start, ident->as.member.name.start, mt.len) == 0) {
+                        res.decl_node = curr;
+                        if (strncmp(d->uri, "file://", 7) == 0) res.fpath = d->uri + 7;
+                        else res.fpath = d->uri;
+                        return res;
+                      }
+                      curr = curr->next;
+                    }
+                  }
+                }
+                stmt = stmt->next;
+              }
+            }
+            entry = entry->next;
+          }
+        }
+      }
+    }
+  }
+  return res;
+}
+
+void handle_definition(yyjson_val *params, yyjson_val *id) {
+  yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
+  const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
+  yyjson_val *pos = yyjson_obj_get(params, "position");
+  int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
+  int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
+
+  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  if (!doc || !doc->ast_root) {
+    goto empty_response;
+  }
+
+  AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
+  ResolvedNode res = resolve_node_to_decl(ident);
+
+  if (res.decl_node) {
+    AstNode *decl = res.decl_node;
+    Token target_tok = get_decl_token(decl);
+    const char *target_fpath = res.fpath;
+
+    if (target_tok.len > 0) {
+      yyjson_mut_val *root;
+      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+      yyjson_mut_val *result = yyjson_mut_obj(jdoc);
+
+      char target_uri[8192];
+      if (target_fpath) {
+        snprintf(target_uri, sizeof(target_uri), "file://%s", target_fpath);
+      } else {
+        snprintf(target_uri, sizeof(target_uri), "%s", uri);
+      }
+
+      yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
+
+      yyjson_mut_val *range = yyjson_mut_obj(jdoc);
+      yyjson_mut_val *start = yyjson_mut_obj(jdoc);
+      yyjson_mut_obj_add_int(jdoc, start, "line", target_tok.line - 1);
+      yyjson_mut_obj_add_int(jdoc, start, "character", target_tok.col);
+
+      yyjson_mut_val *end = yyjson_mut_obj(jdoc);
+      yyjson_mut_obj_add_int(jdoc, end, "line", target_tok.line - 1);
+      yyjson_mut_obj_add_int(jdoc, end, "character",
+                             target_tok.col + target_tok.len);
+
+      yyjson_mut_obj_add_val(jdoc, range, "start", start);
+      yyjson_mut_obj_add_val(jdoc, range, "end", end);
+      yyjson_mut_obj_add_val(jdoc, result, "range", range);
+      yyjson_mut_obj_add_val(jdoc, root, "result", result);
+
+      lsp_send_doc(jdoc);
+      return;
+    }
+  }
+
+empty_response: {
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
+  lsp_send_doc(jdoc);
+}
+}
+
 char *get_comments_above(const char *source, Token target) {
   if (!source || !target.start)
     return NULL;
@@ -269,67 +418,6 @@ char *get_comments_above(const char *source, Token target) {
   return comments;
 }
 
-void handle_definition(yyjson_val *params, yyjson_val *id) {
-  yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
-  const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
-  yyjson_val *pos = yyjson_obj_get(params, "position");
-  int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
-  int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
-
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
-  if (!doc || !doc->ast_root) {
-    goto empty_response;
-  }
-
-  AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
-
-  if (ident && ident->as.identif.res_sm &&
-      ident->as.identif.res_sm->decl_node) {
-    AstNode *decl = ident->as.identif.res_sm->decl_node;
-    Token target_tok = get_decl_token(decl);
-    const char *target_fpath = ident->as.identif.res_sm->fpath;
-
-    if (target_tok.len > 0) {
-      yyjson_mut_val *root;
-      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-      yyjson_mut_val *result = yyjson_mut_obj(jdoc);
-
-      char target_uri[8192];
-      if (target_fpath) {
-        snprintf(target_uri, sizeof(target_uri), "file://%s", target_fpath);
-      } else {
-        snprintf(target_uri, sizeof(target_uri), "%s", uri);
-      }
-
-      yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
-
-      yyjson_mut_val *range = yyjson_mut_obj(jdoc);
-      yyjson_mut_val *start = yyjson_mut_obj(jdoc);
-      yyjson_mut_obj_add_int(jdoc, start, "line", target_tok.line - 1);
-      yyjson_mut_obj_add_int(jdoc, start, "character", target_tok.col);
-
-      yyjson_mut_val *end = yyjson_mut_obj(jdoc);
-      yyjson_mut_obj_add_int(jdoc, end, "line", target_tok.line - 1);
-      yyjson_mut_obj_add_int(jdoc, end, "character",
-                             target_tok.col + target_tok.len);
-
-      yyjson_mut_obj_add_val(jdoc, range, "start", start);
-      yyjson_mut_obj_add_val(jdoc, range, "end", end);
-      yyjson_mut_obj_add_val(jdoc, result, "range", range);
-      yyjson_mut_obj_add_val(jdoc, root, "result", result);
-
-      lsp_send_doc(jdoc);
-      return;
-    }
-  }
-
-empty_response: {
-  yyjson_mut_val *root;
-  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-  yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-  lsp_send_doc(jdoc);
-}
-}
 
 void handle_hover(yyjson_val *params, yyjson_val *id) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
@@ -344,18 +432,17 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
   }
 
   AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
+  ResolvedNode res = resolve_node_to_decl(ident);
 
-  if (ident && ident->as.identif.res_sm &&
-      ident->as.identif.res_sm->decl_node) {
-    Sym *sym = ident->as.identif.res_sm;
-    AstNode *decl = sym->decl_node;
+  if (res.decl_node) {
+    AstNode *decl = res.decl_node;
     Token t = get_decl_token(decl);
 
     if (t.len > 0) {
       const char *source_txt = doc->txt;
-      if (sym->fpath) {
+      if (res.fpath) {
         char target_uri[8192];
-        snprintf(target_uri, sizeof(target_uri), "file://%s", sym->fpath);
+        snprintf(target_uri, sizeof(target_uri), "file://%s", res.fpath);
         Doc *target_doc = (Doc *)map_get(&server_state.open_docs, target_uri,
                                          strlen(target_uri));
         if (target_doc) {
@@ -401,6 +488,8 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
         snprintf(signature, sizeof(signature), "union %.*s", t.len, t.start);
       } else if (decl->type == AST_ENUM) {
         snprintf(signature, sizeof(signature), "enum %.*s", t.len, t.start);
+      } else if (decl->type == AST_ENUM_MEMBER) {
+        snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
       } else {
         snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
       }
