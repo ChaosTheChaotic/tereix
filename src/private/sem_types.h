@@ -38,6 +38,7 @@ typedef struct Sym {
   Token name;
   AstNode *decl_node;
   bool is_imported_mod;
+	const char *fpath;
 } Sym;
 
 typedef struct {

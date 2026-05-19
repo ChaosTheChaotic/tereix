@@ -86,3 +86,17 @@ char *uri_from_absolute(const char *absolute) {
     }
     return uri;
 }
+
+const char *extract_mod_name(Arena *arena, const char *abs_path) {
+  const char *base = strrchr(abs_path, '/');
+  base = base ? base + 1 : abs_path;
+
+  const char *ext = strrchr(base, '.');
+  size_t len = ext ? (size_t)(ext - base) : strlen(base);
+
+  char *mod_name = arena_alloc(arena, len + 1);
+  strncpy(mod_name, base, len);
+  mod_name[len] = '\0';
+
+  return mod_name;
+}

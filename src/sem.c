@@ -1,6 +1,42 @@
 #include "sem_types.h"
 #include "util.h"
 #include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+Module *sem_current_mod = NULL;
+Module *sem_main_mod = NULL;
+
+typedef struct {
+  Module *mod;
+  Module *parent_mod;
+  AstNode *use_stmt;
+} ImportRelation;
+
+#define MAX_IMPORT_RELATIONS 1024
+static ImportRelation import_relations[MAX_IMPORT_RELATIONS];
+static int import_relations_count = 0;
+
+void record_import(Module *mod, Module *parent_mod, AstNode *use_stmt) {
+  for (int i = 0; i < import_relations_count; i++) {
+    if (import_relations[i].mod == mod) {
+      return;
+    }
+  }
+  if (import_relations_count < MAX_IMPORT_RELATIONS) {
+    import_relations[import_relations_count++] = (ImportRelation){mod, parent_mod, use_stmt};
+  }
+}
+
+ImportRelation *get_import_relation(Module *mod) {
+  for (int i = 0; i < import_relations_count; i++) {
+    if (import_relations[i].mod == mod) {
+      return &import_relations[i];
+    }
+  }
+  return NULL;
+}
 
 void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
                 ...) {
@@ -17,11 +53,37 @@ void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
   if (!msg)
     return;
 
+  const char *report_file = NULL;
+  int report_line = token.line;
+  int report_col = token.col;
+  int report_len = (int)token.len;
+
+  // Determine the file/line context based on inclusion depth
+  if (sem_current_mod != NULL) {
+    if (sem_current_mod == sem_main_mod) {
+      report_file = sem_current_mod->abs_path;
+    } else {
+      // Its a dependency module so report error at its corresponding 'use' statement context
+      ImportRelation *rel = get_import_relation(sem_current_mod);
+      if (rel && rel->parent_mod && rel->use_stmt) {
+        report_file = rel->parent_mod->abs_path;
+        report_line = rel->use_stmt->as.use_stmt.path.line;
+        report_col = rel->use_stmt->as.use_stmt.path.col;
+        report_len = (int)rel->use_stmt->as.use_stmt.path.len;
+      } else {
+        report_file = sem_current_mod->abs_path;
+      }
+    }
+  }
+
   if (ctx && ctx->diags) {
-    diaglist_add(ctx->diags, sev, msg, NULL, token.line, token.col, token.line,
-                 token.col + (int)token.len);
+    diaglist_add(ctx->diags, sev, msg, report_file, report_line, report_col, report_line,
+                 report_col + report_len);
     free(msg);
   } else {
+    if (report_file) {
+      fprintf(stderr, "%s:%d:%d: ", report_file, report_line, report_col);
+    }
     fprintf(stderr, "%s\n", msg);
     free(msg);
   }
@@ -35,12 +97,13 @@ void sem_init(SemCtx *ctx, Arena *arena) {
 
 void sem_deinit(SemCtx *ctx) { map_free_buckets(&ctx->mod_cache); }
 
-Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl) {
+Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl, const char *fpath) {
   Sym *s = arena_alloc(arena, sizeof(Sym));
   s->kind = kind;
   s->name = name;
   s->decl_node = decl;
   s->is_imported_mod = false;
+  s->fpath = fpath;
   return s;
 }
 
@@ -57,7 +120,6 @@ Module *new_mod(Arena *arena, const char *abs_path, const char *mod_name,
 }
 
 bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float) {
-  // Pointers and arrays arent simple numbers
   if (t.ptr_depth > 0 || t.array_dimens > 0 || t.is_custom)
     return false;
   if (t.name.len < 2)
@@ -84,7 +146,6 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit,
   if (source.name.len == 4 && strncmp(source.name.start, "null", 4) == 0) {
     return true;
   }
-  // Exact match
   if (target.ptr_depth == source.ptr_depth &&
       target.array_dimens == source.array_dimens &&
       target.name.len == source.name.len &&
@@ -92,13 +153,10 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit,
     return true;
   }
 
-  // Explicit casts bypass standard protections
-  // We pray developer understands risks
   if (is_explicit) {
     return true;
   }
 
-  // Implicit cast logic (bigger conversions only)
   int t_width = 0, s_width = 0;
   bool t_signed = false, s_signed = false, t_float = false, s_float = false;
 
@@ -106,19 +164,15 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit,
   bool s_is_num = get_numeric_info(source, &s_width, &s_signed, &s_float);
 
   if (t_is_num && s_is_num) {
-    // Dont implicitly convert floats to ints (loss of precision)
     if (s_float && !t_float)
       return false;
 
-    // Dont implicitly convert signed to unsigned (loss of negative values)
     if (!t_signed && s_signed)
       return false;
 
-    // Target must be able to hold the source safely
     return t_width >= s_width;
   }
 
-  // No implicit conversion
   sem_report(
       ctx, DIAG_ERROR, target.name,
       "Types %.*s (ptr_depth: %ld) and %.*s (ptr_depth: %ld) are not "
@@ -134,8 +188,8 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
     HashEntry *entry = sem->mod_cache.buckets[i];
     while (entry) {
       Module *current_mod = (Module *)entry->value;
+      sem_current_mod = current_mod;
 
-      // Walk the top level AST of this specific mod
       AstNode *stmt = current_mod->ast_root->as.block.first_stmt;
       while (stmt) {
         if (stmt->type == AST_USE) {
@@ -144,18 +198,15 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
           Token alias = stmt->as.use_stmt.alias;
 
           if (path_len > 2) {
-            // Resolve the path of the imported file
             char *clean_rel = arena_alloc(arena, path_len - 1);
             strncpy(clean_rel, raw_path + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
             const char *abs_import_path = resolve_alloc(arena, clean_rel);
 
-            // Fetch the actual Module* from the global cache
             Module *imported_mod = map_get(&sem->mod_cache, abs_import_path,
                                            strlen(abs_import_path));
 
             if (imported_mod) {
-              // Determine the key alias or mod name
               const char *import_key = imported_mod->mod_name;
               size_t key_len = strlen(import_key);
 
@@ -164,7 +215,6 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
                 key_len = alias.len;
               }
 
-              // Collision check
               if (map_get(&current_mod->imported_mods, import_key, key_len) !=
                   NULL) {
                 sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
@@ -179,6 +229,7 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
 
               map_set(&current_mod->imported_mods, import_key, key_len,
                       imported_mod);
+              record_import(imported_mod, current_mod, stmt);
             }
           }
         }
@@ -224,7 +275,6 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
     }
 
     if (is_valid) {
-      // Check for local redeclarations
       if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
         sem_report(ctx, DIAG_ERROR, name,
                    "Error: Symbol '%.*s' already defined in module %s",
@@ -239,7 +289,7 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
                    name.len, name.start, mod->mod_name);
         return false;
       }
-      Sym *sym = new_sym(arena, kind, name, stmt);
+      Sym *sym = new_sym(arena, kind, name, stmt, mod->abs_path);
       map_set(&mod->local_symbols, name.start, name.len, sym);
     }
     stmt = stmt->next;
@@ -253,14 +303,14 @@ Sym *scope_lookup(ScopeStack *ss, const char *key, size_t len) {
     if (sym != NULL)
       return sym;
   }
-  return NULL; // Not found in local scope
+  return NULL;
 }
 
 bool scope_declare(ScopeStack *ss, Token name, Sym *symbol) {
   Scope *current_scope = &ss->scopes[ss->count - 1];
 
   if (map_get(&current_scope->symbols, name.start, name.len) != NULL) {
-    return false; // Dupe in scope
+    return false;
   }
 
   map_set(&current_scope->symbols, name.start, name.len, symbol);
@@ -289,7 +339,6 @@ void push_scope(ScopeStack *ss) {
 
 void pop_scope(ScopeStack *ss) {
   if (ss->count > 0) {
-    // Free the hashmap buckets to prevent memory leaks
     map_free_buckets(&ss->scopes[ss->count - 1].symbols);
     ss->count--;
   }
@@ -307,7 +356,6 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
 
   stack[top++] = (TravItem){root, ACTION_VISIT_NODE};
 
-  // Global scope
   push_scope(ss);
 
   for (size_t i = 0; i < mod->imported_mods.capacity; i++) {
@@ -315,15 +363,13 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     while (entry) {
       Token import_tok = {
           .start = entry->key, .len = entry->key_len, .type = TOKEN_IDENTIF};
-      // SYM_VAR acts as a placeholder so the identifier resolves cleanly
-      Sym *import_sym = new_sym(arena, SYM_VAR, import_tok, NULL);
+      Sym *import_sym = new_sym(arena, SYM_VAR, import_tok, NULL, mod->abs_path);
       import_sym->is_imported_mod = true;
       scope_declare(ss, import_tok, import_sym);
       entry = entry->next;
     }
   }
 
-// Push to traversal stack
 #define PUSH_TRAV(n, act)                                                      \
   do {                                                                         \
     if (top >= stack_cap) {                                                    \
@@ -333,7 +379,6 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     stack[top++] = (TravItem){n, act};                                         \
   } while (0)
 
-// Push a linked list of statements/expressions in reverse
 #define PUSH_LL_REVERSE(head, act)                                             \
   do {                                                                         \
     AstNode *_curr = (head);                                                   \
@@ -378,8 +423,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_FUNC: {
-      // Declare the function in the current scope
-      Sym *func_sym = new_sym(arena, SYM_FUNC, node->as.func_def.fn_name, node);
+      Sym *func_sym = new_sym(arena, SYM_FUNC, node->as.func_def.fn_name, node, mod->abs_path);
       if (!scope_declare(ss, node->as.func_def.fn_name, func_sym)) {
         sem_report(ctx, DIAG_ERROR, node->as.func_def.fn_name,
                    "Error: Duplicate function name '%.*s'\n",
@@ -387,22 +431,19 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
                    node->as.func_def.fn_name.start);
       }
 
-      // Create a new scope for parameters and body
       push_scope(ss);
       PUSH_TRAV(NULL, ACTION_POP_SCOPE);
 
-      // Push body
       if (node->as.func_def.block) {
         PUSH_TRAV(node->as.func_def.block, ACTION_VISIT_NODE);
       }
 
-      // Push parameters
       PUSH_LL_REVERSE(node->as.func_def.params, ACTION_VISIT_NODE);
       break;
     }
 
     case AST_PARAM: {
-      Sym *param_sym = new_sym(arena, SYM_VAR, node->as.fn_param.id, node);
+      Sym *param_sym = new_sym(arena, SYM_VAR, node->as.fn_param.id, node, mod->abs_path);
       if (!scope_declare(ss, node->as.fn_param.id, param_sym)) {
         sem_report(ctx, DIAG_ERROR, node->as.fn_param.id,
                    "Error: Duplicate parameter name '%.*s'\n",
@@ -412,13 +453,11 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_VAR_DECL: {
-      // Push the initialization expression to be evaluated first (if it exists)
       if (node->as.var_decl.init) {
         PUSH_TRAV(node->as.var_decl.init, ACTION_VISIT_NODE);
       }
 
-      // Declare the variable in the current scope
-      Sym *var_sym = new_sym(arena, SYM_VAR, node->as.var_decl.id, node);
+      Sym *var_sym = new_sym(arena, SYM_VAR, node->as.var_decl.id, node, mod->abs_path);
       if (!scope_declare(ss, node->as.var_decl.id, var_sym)) {
         sem_report(ctx, DIAG_ERROR, node->as.var_decl.id,
                    "Error: Variable '%.*s' already declared in this scope.\n",
@@ -473,8 +512,6 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_FOR: {
-      // For loops create an immediate scope for any variables declared in the
-      // init stage
       push_scope(ss);
       PUSH_TRAV(NULL, ACTION_POP_SCOPE);
 
@@ -510,8 +547,6 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_MEMBER: {
-      // The right hand side (name) is a field lookup, not a local identifier so
-      // we only traverse the base.
       if (node->as.member.base)
         PUSH_TRAV(node->as.member.base, ACTION_VISIT_NODE);
       break;
@@ -548,7 +583,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
 
     case AST_STRUCT: {
       Sym *struct_sym =
-          new_sym(arena, SYM_STRUCT, node->as.struct_def.structn, node);
+          new_sym(arena, SYM_STRUCT, node->as.struct_def.structn, node, mod->abs_path);
       scope_declare(ss, node->as.struct_def.structn, struct_sym);
 
       push_scope(ss);
@@ -563,7 +598,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
 
     case AST_UNION: {
       Sym *union_sym =
-          new_sym(arena, SYM_UNION, node->as.union_def.unionn, node);
+          new_sym(arena, SYM_UNION, node->as.union_def.unionn, node, mod->abs_path);
       scope_declare(ss, node->as.union_def.unionn, union_sym);
 
       push_scope(ss);
@@ -577,7 +612,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_ENUM: {
-      Sym *enum_sym = new_sym(arena, SYM_ENUM, node->as.enum_def.enumn, node);
+      Sym *enum_sym = new_sym(arena, SYM_ENUM, node->as.enum_def.enumn, node, mod->abs_path);
       scope_declare(ss, node->as.enum_def.enumn, enum_sym);
 
       push_scope(ss);
@@ -603,7 +638,6 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     default:
-      // Other literal nodes do not need scope resolution
       break;
     }
   }
@@ -611,7 +645,6 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
 #undef PUSH_TRAV
 #undef PUSH_LL_REVERSE
 
-  // Pop the global scope
   pop_scope(ss);
   free(stack);
 }
@@ -645,7 +678,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
     DataType *expected = item.expected;
 
     if (item.state == TC_VISIT_CHILDREN) {
-      // Expand stack if getting full
       if (top >= cap - 32) {
         cap *= 2;
         stack = realloc(stack, sizeof(TCItem) * cap);
@@ -656,7 +688,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       switch (node->type) {
       case AST_PROGRAM:
       case AST_BLOCK: {
-        // Push linked list of statements to process
         AstNode *curr = node->as.block.first_stmt;
         size_t count = 0;
         while (curr) {
@@ -691,7 +722,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_BINOP: {
         DataType *operand_expected = item.expected;
 
-        // Comparisons just have to be compatible
         if (node->as.binop.op.type == TOKEN_COMPARE) {
           operand_expected = NULL;
         }
@@ -705,7 +735,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_UOP:
       case AST_ADDR_OF:
       case AST_DEREF: {
-        // If we expect T, then operand must be *T
         DataType *inner = NULL;
         if (item.expected) {
           inner = arena_alloc(arena, sizeof(DataType));
@@ -747,14 +776,12 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
                                   NULL, item.curr_func};
         break;
       case AST_FUNC_CALL: {
-        // Resolve the function signature from the caller
         AstNode *fn_decl = NULL;
         if (node->as.func_call.caller->type == AST_IDENTIF &&
             node->as.func_call.caller->as.identif.res_sm) {
           fn_decl = node->as.func_call.caller->as.identif.res_sm->decl_node;
         }
 
-        // We match args to params to set expected types
         int arg_count = 0;
         AstNode *temp = node->as.func_call.args;
         while (temp) {
@@ -885,21 +912,17 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         break;
       }
       default:
-        // Nodes without type checked children handled directly below
         break;
       }
     } else {
-      // Children are done so push types up
       switch (node->type) {
       case AST_NUM_LIT: {
         if (expected) {
           node->eval_type = *expected;
         } else {
-          // Smallest fitting signed type
           const char *val_str = node->as.num_lit.val.start;
           int len = node->as.num_lit.val.len;
 
-          // Check if its a float
           bool is_float = false;
           for (int i = 0; i < len; i++) {
             if (val_str[i] == '.') {
@@ -911,7 +934,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           if (is_float) {
             node->eval_type = create_basic_type("f32");
           } else {
-            // Smallest fitting integer calculation
             long long val = atoll(val_str);
             if (val >= -128 && val <= 127)
               node->eval_type = create_basic_type("i8");
@@ -949,7 +971,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
             node->eval_type = sym->decl_node->as.func_def.ret_type;
           } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
                      sym->kind == SYM_ENUM) {
-            // sue name used as a type expression
             node->eval_type = create_basic_type("");
             node->eval_type.name = sym->name;
             node->eval_type.is_custom = true;
@@ -995,14 +1016,11 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
                      node->as.binop.op.start);
         }
 
-        // Resolve the result type
         if (node->as.binop.op.type == TOKEN_COMPARE) {
-          // Comparisons always result in a bool
           node->eval_type = EXPECT_BOOL;
         } else if (item.expected) {
           node->eval_type = *item.expected;
         } else {
-          // Use wider type
           int l_w = 0, r_w = 0;
           bool l_s, r_s, l_f, r_f;
           get_numeric_info(left_t, &l_w, &l_s, &l_f);
@@ -1044,14 +1062,12 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           if (sym->kind == SYM_FUNC) {
             node->eval_type = sym->decl_node->as.func_def.ret_type;
           } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION) {
-            // Assign the Struct/Union type for constructor calls
             node->eval_type.name = sym->name;
             node->eval_type.is_custom = true;
           } else {
             node->eval_type = create_basic_type("any");
           }
         } else if (node->as.func_call.caller->type == AST_MEMBER) {
-          // TODO: Run a lookup for the struct methods
           node->eval_type = create_basic_type("any");
         }
         break;
@@ -1059,13 +1075,11 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         if (item.expected) {
           node->eval_type = *item.expected;
         } else if (node->as.array_lit.elements) {
-          // Get type from the first element and increment array dimensions
           node->eval_type = node->as.array_lit.elements->eval_type;
           node->eval_type.array_dimens++;
         }
         break;
       case AST_BLOCK: {
-        // A blocks type evaluates to the type of its last statement
         AstNode *last = node->as.block.first_stmt;
         while (last && last->next) {
           last = last->next;
@@ -1076,7 +1090,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         break;
       }
       case AST_IF:
-        // For if expressions inside blocks
         if (node->as.if_check.action) {
           node->eval_type = node->as.if_check.action->eval_type;
         }
@@ -1085,7 +1098,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_INDEX:
         if (node->as.index.base) {
           node->eval_type = node->as.index.base->eval_type;
-          // Strip one array dimension off since we are indexing into it
           if (node->eval_type.array_dimens > 0) {
             node->eval_type.array_dimens--;
           }
@@ -1107,7 +1119,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         break;
 
       case AST_UOP:
-        // Prefix/Postfix operators keep the base type
         if (node->as.unop.operand) {
           node->eval_type = node->as.unop.operand->eval_type;
         }
@@ -1119,7 +1130,6 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
             node->as.member.type = base_t.name;
           }
         }
-        // TODO: Look up the actual field type from the struct/union definition
         node->eval_type = create_basic_type("any");
         break;
       }

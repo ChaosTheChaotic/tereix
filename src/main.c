@@ -3,12 +3,16 @@
 #include "lsp.h"
 #include "sem_types.h"
 #include "util.h"
+#include "worklist.h"
 #include <limits.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+extern Module *sem_current_mod;
+extern Module *sem_main_mod;
 
 bool check_exists(const char *path) {
   FILE *fp = NULL;
@@ -78,7 +82,6 @@ void print_ast(AstNode *root) {
     if (!node)
       continue;
 
-    // Print indentation
     for (int i = 0; i < item.depth; i++) {
       printf("  | ");
     }
@@ -401,38 +404,14 @@ void print_ast(AstNode *root) {
   printf("\n");
 }
 
-void wl_push(Worklist *wl, const char *path) {
-  if (wl->count >= wl->capacity) {
-    wl->capacity = (wl->capacity == 0) ? 32 : wl->capacity * 2;
-    wl->paths = realloc((void *)wl->paths, sizeof(const char *) * wl->capacity);
-  }
-  wl->paths[wl->count++] = path;
-}
-
-const char *wl_pop(Worklist *wl) {
-  if (wl->count == 0)
-    return NULL;
-  return wl->paths[--wl->count];
-}
-
-const char *extract_mod_name(Arena *arena, const char *abs_path) {
-  const char *base = strrchr(abs_path, '/');
-  base = base ? base + 1 : abs_path;
-
-  const char *ext = strrchr(base, '.');
-  size_t len = ext ? (size_t)(ext - base) : strlen(base);
-
-  char *mod_name = arena_alloc(arena, len + 1);
-  strncpy(mod_name, base, len);
-  mod_name[len] = '\0';
-
-  return mod_name;
-}
-
 void compile_project(const char *entry_file) {
   Arena arena = {0};
   SemCtx sem = {0};
   sem_init(&sem, &arena);
+
+  // Initialize module mapping tracking configurations
+  sem_current_mod = NULL;
+  sem_main_mod = NULL;
 
   Worklist pending = {0};
   wl_push(&pending, entry_file);
@@ -453,13 +432,16 @@ void compile_project(const char *entry_file) {
     const char *mod_name = extract_mod_name(&arena, abs_path);
     Module *mod = new_mod(&arena, abs_path, mod_name, ast);
 
+    // Track the entry main module layer context first
+    if (sem_main_mod == NULL) {
+      sem_main_mod = mod;
+    }
+
     printf("Module: %s\n", mod_name);
     print_ast(ast);
 
-    // Add to global cache
     map_set(&sem.mod_cache, abs_path, strlen(abs_path), mod);
 
-    // Push dependencies
     AstNode *stmt = ast->as.block.first_stmt;
     while (stmt) {
       if (stmt->type == AST_USE) {
@@ -480,11 +462,11 @@ void compile_project(const char *entry_file) {
   resolve_imports(&arena, &sem);
   printf("Import graph resolved.\n");
 
-  // Collect local symbols
   for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
     HashEntry *entry = sem.mod_cache.buckets[i];
     while (entry) {
       Module *mod = (Module *)entry->value;
+      sem_current_mod = mod;
       collect_mod_symbols(&arena, mod, &sem);
       entry = entry->next;
     }
@@ -500,11 +482,8 @@ void compile_project(const char *entry_file) {
     while (entry) {
       Module *mod = (Module *)entry->value;
 
-      // Reset the scope stack count for each new module so scopes dont bleed
-      // over from the previous module.
       ss.count = 0;
-
-      // Resolve scopes for this specific modules AST
+      sem_current_mod = mod;
       resolve_scopes(&arena, mod, &ss, &sem);
 
       entry = entry->next;
@@ -518,7 +497,7 @@ void compile_project(const char *entry_file) {
     while (entry) {
       Module *mod = (Module *)entry->value;
 
-      // Post-order type propagation
+      sem_current_mod = mod;
       type_check_ast(&arena, mod->ast_root, &sem);
 
       entry = entry->next;

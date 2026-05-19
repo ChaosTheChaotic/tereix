@@ -1,8 +1,9 @@
 #ifndef LSP_H
 #define LSP_H
 
-#include "hashmap.h"
 #include "ast_types.h"
+#include "hashmap.h"
+#include "sem_types.h"
 #include "yyjson.h"
 #include <stdbool.h>
 
@@ -26,6 +27,7 @@ typedef struct {
   unsigned int doc_count;
   yyjson_doc *capabilities;
   const char *root_uri;
+  SemCtx proj_sem;
 } LspState;
 
 void start_lsp_server();

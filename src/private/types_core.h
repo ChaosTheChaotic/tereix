@@ -41,10 +41,4 @@ typedef struct {
   struct AstNode **dim_sizes; // Per dimensions [][][] etc.
 } DataType;
 
-typedef struct {
-  const char **paths;
-  size_t count;
-  size_t capacity;
-} Worklist;
-
 #endif // !TYPES_CORE_H

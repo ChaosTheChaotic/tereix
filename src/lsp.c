@@ -4,6 +4,7 @@
 #include "diag.h"
 #include "sem_types.h"
 #include "util.h"
+#include "worklist.h"
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -286,14 +287,21 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
       ident->as.identif.res_sm->decl_node) {
     AstNode *decl = ident->as.identif.res_sm->decl_node;
     Token target_tok = get_decl_token(decl);
+    const char *target_fpath = ident->as.identif.res_sm->fpath;
 
     if (target_tok.len > 0) {
       yyjson_mut_val *root;
       yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
       yyjson_mut_val *result = yyjson_mut_obj(jdoc);
 
-      // TODO: Jump to imports
-      yyjson_mut_obj_add_str(jdoc, result, "uri", uri);
+      char target_uri[8192];
+      if (target_fpath) {
+        snprintf(target_uri, sizeof(target_uri), "file://%s", target_fpath);
+      } else {
+        snprintf(target_uri, sizeof(target_uri), "%s", uri);
+      }
+
+      yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
 
       yyjson_mut_val *range = yyjson_mut_obj(jdoc);
       yyjson_mut_val *start = yyjson_mut_obj(jdoc);
@@ -339,15 +347,50 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
 
   if (ident && ident->as.identif.res_sm &&
       ident->as.identif.res_sm->decl_node) {
-    AstNode *decl = ident->as.identif.res_sm->decl_node;
+    Sym *sym = ident->as.identif.res_sm;
+    AstNode *decl = sym->decl_node;
     Token t = get_decl_token(decl);
 
     if (t.len > 0) {
       char *comments = get_comments_above(doc->txt, t);
 
+      char signature[8192] = {0};
+
+      // Format the signature based on the symbol kind
+      if (sym->kind == SYM_VAR) {
+        snprintf(signature, sizeof(signature), "var %.*s: %.*s", t.len, t.start,
+                 decl->as.var_decl.type.name.len,
+                 decl->as.var_decl.type.name.start);
+      } else if (sym->kind == SYM_FUNC) {
+        char params_buf[4096] = {0};
+        size_t offset = 0;
+        AstNode *param = decl->as.func_def.params;
+
+        while (param) {
+          Token p_id = param->as.fn_param.id;
+          Token p_type = param->as.fn_param.type.name;
+
+          int written =
+              snprintf(params_buf + offset, sizeof(params_buf) - offset,
+                       "%.*s: %.*s%s", p_id.len, p_id.start, p_type.len,
+                       p_type.start, param->next ? ", " : "");
+          if (written > 0) {
+            offset += written;
+          }
+          param = param->next;
+        }
+
+        snprintf(signature, sizeof(signature), "func %.*s(%s) -> %.*s", t.len,
+                 t.start, params_buf, decl->as.func_def.ret_type.name.len,
+                 decl->as.func_def.ret_type.name.start);
+        snprintf(signature, sizeof(signature), "struct %.*s", t.len, t.start);
+      } else {
+        snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
+      }
+
       char md_buffer[4096];
-      snprintf(md_buffer, sizeof(md_buffer), "```tereix\n%.*s\n```\n%s", t.len,
-               t.start, comments ? comments : "");
+      snprintf(md_buffer, sizeof(md_buffer), "```tereix\n%s\n```\n%s",
+               signature, comments ? comments : "");
 
       if (comments)
         free(comments);
@@ -425,6 +468,66 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
   lsp_send_doc(jdoc);
 }
 
+void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
+  yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
+  const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
+
+  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  if (!doc || !doc->ast_root) {
+    yyjson_mut_val *root;
+    yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+    yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
+    lsp_send_doc(jdoc);
+    return;
+  }
+
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  yyjson_mut_val *result = yyjson_mut_arr(jdoc);
+
+  AstNode *stmt = doc->ast_root->as.block.first_stmt;
+  while (stmt) {
+    Token t = get_decl_token(stmt);
+    if (t.len > 0) {
+      yyjson_mut_val *symbol = yyjson_mut_obj(jdoc);
+
+      char name_buf[256];
+      snprintf(name_buf, sizeof(name_buf), "%.*s", t.len, t.start);
+      yyjson_mut_obj_add_str(jdoc, symbol, "name", name_buf);
+
+      // LSP SymbolKinds Function=12, Variable=13, Struct=23, Enum=10
+      int kind = 13;
+      if (stmt->type == AST_FUNC)
+        kind = 12;
+      else if (stmt->type == AST_STRUCT)
+        kind = 23;
+      else if (stmt->type == AST_ENUM)
+        kind = 10;
+      yyjson_mut_obj_add_int(jdoc, symbol, "kind", kind);
+
+      // Range where the symbol exists in the file
+      yyjson_mut_val *range = yyjson_mut_obj(jdoc);
+      yyjson_mut_val *start = yyjson_mut_obj(jdoc);
+      yyjson_mut_obj_add_int(jdoc, start, "line", t.line - 1);
+      yyjson_mut_obj_add_int(jdoc, start, "character", t.col);
+      yyjson_mut_val *end = yyjson_mut_obj(jdoc);
+      yyjson_mut_obj_add_int(jdoc, end, "line", t.line - 1);
+      yyjson_mut_obj_add_int(jdoc, end, "character", t.col + t.len);
+      yyjson_mut_obj_add_val(jdoc, range, "start", start);
+      yyjson_mut_obj_add_val(jdoc, range, "end", end);
+
+      yyjson_mut_obj_add_val(jdoc, symbol, "range", range);
+      yyjson_mut_obj_add_val(jdoc, symbol, "selectionRange", range);
+
+      yyjson_mut_arr_append(result, symbol);
+    }
+    stmt = stmt->next;
+  }
+
+  yyjson_mut_obj_add_val(jdoc, root, "result", result);
+  lsp_send_doc(jdoc);
+}
+
 void handle_initialize(yyjson_val *params, yyjson_val *id) {
   (void)params; // No use currently
   yyjson_mut_val *root;
@@ -435,10 +538,12 @@ void handle_initialize(yyjson_val *params, yyjson_val *id) {
   yyjson_mut_obj_add_int(doc, capabilities, "textDocumentSync", 1);
   yyjson_mut_obj_add_bool(doc, capabilities, "definitionProvider", true);
   yyjson_mut_obj_add_bool(doc, capabilities, "hoverProvider", true);
+  yyjson_mut_obj_add_bool(doc, capabilities, "documentSymbolProvider", true);
   yyjson_mut_val *comp_options = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_bool(doc, comp_options, "resolveProvider", false);
-  // TODO: add yyjson_mut_obj_add_val(doc, comp_options,
-  // "triggerCharacters", ...);
+  yyjson_mut_val *trigger_chars = yyjson_mut_arr(doc);
+  yyjson_mut_arr_add_str(doc, trigger_chars, ".");
+  yyjson_mut_obj_add_val(doc, comp_options, "triggerCharacters", trigger_chars);
   yyjson_mut_obj_add_val(doc, capabilities, "completionProvider", comp_options);
   yyjson_mut_obj_add_val(doc, result, "capabilities", capabilities);
   yyjson_mut_obj_add_val(doc, root, "result", result);
@@ -529,45 +634,105 @@ void compile_doc(Doc *doc) {
   }
 
   AstNode *root = str_to_ast(doc->ast_arena, doc->txt, abspath, &diags);
+
   if (root) {
-    SemCtx sem = {.arena = doc->ast_arena, .diags = &diags};
-    Module mod = {
-        .abs_path = abspath, .mod_name = "lsp_temp", .ast_root = root};
-    map_init(&mod.local_symbols, doc->ast_arena, 64);
-    map_init(&mod.imported_mods, doc->ast_arena, 8);
-    AstNode *stmt = root->as.block.first_stmt;
-    while (stmt) {
-      if (stmt->type == AST_USE) {
-        if (stmt->as.use_stmt.alias.len > 0) {
-          // If aliased, register the alias
-          map_set(&mod.imported_mods, stmt->as.use_stmt.alias.start,
-                  stmt->as.use_stmt.alias.len, (void *)1);
-        } else if (stmt->as.use_stmt.path.len > 2) {
-          // Extract base module name from the path string
-          char *clean_rel =
-              arena_alloc(doc->ast_arena, stmt->as.use_stmt.path.len - 1);
-          strncpy(clean_rel, stmt->as.use_stmt.path.start + 1,
-                  stmt->as.use_stmt.path.len - 2);
-          clean_rel[stmt->as.use_stmt.path.len - 2] = '\0';
+    SemCtx sem = {0};
+    sem_init(&sem, doc->ast_arena);
+    sem.diags = &diags;
 
-          const char *base = strrchr(clean_rel, '/');
-          base = base ? base + 1 : clean_rel;
+    Worklist pending = {0};
+    wl_push(&pending, abspath);
 
-          const char *ext = strrchr(base, '.');
-          size_t key_len = ext ? (size_t)(ext - base) : strlen(base);
+    const char *current_path;
+    while ((current_path = wl_pop(&pending)) != NULL) {
+      const char *curr_abs = resolve_alloc(doc->ast_arena, current_path);
+      if (!curr_abs || map_get(&sem.mod_cache, curr_abs, strlen(curr_abs)))
+        continue;
 
-          // Insert dummy value
-          // resolve_scopes only checks the key presence
-          map_set(&mod.imported_mods, base, key_len, (void *)1);
+      AstNode *ast = NULL;
+
+      if (strcmp(curr_abs, abspath) == 0) {
+        ast = root;
+      } else {
+        // Get deps currently open in editor
+        char uri_buf[8192];
+        snprintf(uri_buf, sizeof(uri_buf), "file://%s", curr_abs);
+        Doc *open_doc =
+            (Doc *)map_get(&server_state.open_docs, uri_buf, strlen(uri_buf));
+
+        if (open_doc) {
+          // Pass null for diags to avoid displaying external syntax errors in
+          // the current file
+          ast = str_to_ast(doc->ast_arena, open_doc->txt, curr_abs, NULL);
+        } else {
+          // Fall back to reading straight off the disk
+          ast = file_to_ast(doc->ast_arena, curr_abs);
         }
       }
-      stmt = stmt->next;
+
+      if (!ast)
+        continue;
+
+      const char *mod_name = extract_mod_name(doc->ast_arena, curr_abs);
+      Module *mod = new_mod(doc->ast_arena, curr_abs, mod_name, ast);
+
+      map_set(&sem.mod_cache, curr_abs, strlen(curr_abs), mod);
+
+      // Push extracted dependencies back to the worklist
+      AstNode *stmt = ast->as.block.first_stmt;
+      while (stmt) {
+        if (stmt->type == AST_USE) {
+          size_t path_len = stmt->as.use_stmt.path.len;
+          if (path_len > 2) {
+            char *clean_rel = arena_alloc(doc->ast_arena, path_len - 1);
+            strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
+            clean_rel[path_len - 2] = '\0';
+            wl_push(&pending, clean_rel);
+          }
+        }
+        stmt = stmt->next;
+      }
     }
+
+    resolve_imports(doc->ast_arena, &sem);
+
+    for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+      HashEntry *entry = sem.mod_cache.buckets[i];
+      while (entry) {
+        Module *mod = (Module *)entry->value;
+        collect_mod_symbols(doc->ast_arena, mod, &sem);
+        entry = entry->next;
+      }
+    }
+
     ScopeStack ss;
     scope_stack_init(&ss, doc->ast_arena);
-    resolve_scopes(doc->ast_arena, &mod, &ss, &sem);
-    type_check_ast(doc->ast_arena, root, &sem);
-    doc->ast_root = root; // cache the AST
+
+    for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+      HashEntry *entry = sem.mod_cache.buckets[i];
+      while (entry) {
+        Module *mod = (Module *)entry->value;
+        ss.count = 0;
+        resolve_scopes(doc->ast_arena, mod, &ss, &sem);
+        entry = entry->next;
+      }
+    }
+
+    for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+      HashEntry *entry = sem.mod_cache.buckets[i];
+      while (entry) {
+        Module *mod = (Module *)entry->value;
+        type_check_ast(doc->ast_arena, mod->ast_root, &sem);
+        entry = entry->next;
+      }
+    }
+
+    doc->ast_root = root; // Cache the primary AST for Hover/Go-To definitions
+
+    if (pending.paths) {
+      free((void *)pending.paths);
+    }
+    sem_deinit(&sem);
   }
 
   publish_diagnostics_from_list(doc->uri, &diags);
@@ -721,6 +886,8 @@ void start_lsp_server() {
           handle_did_save(yyjson_obj_get(root, "params"));
         } else if (strcmp(method, "textDocument/definition") == 0) {
           handle_definition(yyjson_obj_get(root, "params"), id);
+        } else if (strcmp(method, "textDocument/documentSymbol") == 0) {
+          handle_document_symbols(yyjson_obj_get(root, "params"), id);
         } else if (strcmp(method, "textDocument/hover") == 0) {
           handle_hover(yyjson_obj_get(root, "params"), id);
         } else if (strcmp(method, "textDocument/completion") == 0) {
