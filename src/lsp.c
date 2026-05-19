@@ -352,16 +352,27 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
     Token t = get_decl_token(decl);
 
     if (t.len > 0) {
-      char *comments = get_comments_above(doc->txt, t);
+      const char *source_txt = doc->txt;
+      if (sym->fpath) {
+        char target_uri[8192];
+        snprintf(target_uri, sizeof(target_uri), "file://%s", sym->fpath);
+        Doc *target_doc = (Doc *)map_get(&server_state.open_docs, target_uri,
+                                         strlen(target_uri));
+        if (target_doc) {
+          source_txt = target_doc->txt;
+        } else {
+          source_txt = NULL;
+        }
+      }
+      char *comments = get_comments_above(source_txt, t);
 
       char signature[8192] = {0};
 
-      // Format the signature based on the symbol kind
-      if (sym->kind == SYM_VAR) {
+      if (decl->type == AST_VAR_DECL) {
         snprintf(signature, sizeof(signature), "var %.*s: %.*s", t.len, t.start,
                  decl->as.var_decl.type.name.len,
                  decl->as.var_decl.type.name.start);
-      } else if (sym->kind == SYM_FUNC) {
+      } else if (decl->type == AST_FUNC) {
         char params_buf[4096] = {0};
         size_t offset = 0;
         AstNode *param = decl->as.func_def.params;
@@ -372,18 +383,24 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
 
           int written =
               snprintf(params_buf + offset, sizeof(params_buf) - offset,
-                       "%.*s: %.*s%s", p_id.len, p_id.start, p_type.len,
-                       p_type.start, param->next ? ", " : "");
+                       "%.*s %.*s%s", p_type.len, p_type.start, p_id.len,
+                       p_id.start, param->next ? ", " : "");
           if (written > 0) {
             offset += written;
           }
           param = param->next;
         }
 
-        snprintf(signature, sizeof(signature), "func %.*s(%s) -> %.*s", t.len,
-                 t.start, params_buf, decl->as.func_def.ret_type.name.len,
-                 decl->as.func_def.ret_type.name.start);
+        snprintf(signature, sizeof(signature), "%.*s %.*s(%s)",
+                 decl->as.func_def.ret_type.name.len,
+                 decl->as.func_def.ret_type.name.start, t.len, t.start,
+                 params_buf);
+      } else if (decl->type == AST_STRUCT) {
         snprintf(signature, sizeof(signature), "struct %.*s", t.len, t.start);
+      } else if (decl->type == AST_UNION) {
+        snprintf(signature, sizeof(signature), "union %.*s", t.len, t.start);
+      } else if (decl->type == AST_ENUM) {
+        snprintf(signature, sizeof(signature), "enum %.*s", t.len, t.start);
       } else {
         snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
       }

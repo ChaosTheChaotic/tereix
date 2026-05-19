@@ -70,6 +70,7 @@ union Testor {
 	}
 }
 
+// Gets the value of a or a - 1 if x
 async inline i32 get_a(bool x) {
 	ret {
 		if (x) {
