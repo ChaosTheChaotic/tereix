@@ -523,7 +523,38 @@ char *get_comments_above(const char *source, Token target) {
   for (size_t i = 0; i < line_count; i++) {
     const char *ln_start = comment_lines[i];
     const char *ln_end = (i == 0) ? line_end : comment_lines[i - 1];
-    total_len += (ln_end - ln_start);
+
+    // Skip leading whitespace
+    const char *scan = ln_start;
+    while (scan < ln_end && isspace((unsigned char)*scan))
+      scan++;
+    // Find and skip "//"
+    if (scan + 1 < ln_end && scan[0] == '/' && scan[1] == '/') {
+      scan += 2;
+      while (scan < ln_end && isspace((unsigned char)*scan))
+        scan++;
+
+      // Find end of line (to strip newline and trailing spaces)
+      const char *line_end_no_nl = ln_end;
+      while (line_end_no_nl > scan &&
+             (line_end_no_nl[-1] == '\n' || line_end_no_nl[-1] == '\r'))
+        line_end_no_nl--;
+      while (line_end_no_nl > scan &&
+             isspace((unsigned char)line_end_no_nl[-1]))
+        line_end_no_nl--;
+
+      size_t line_len = line_end_no_nl - scan;
+      if (line_len > 0) {
+        total_len += line_len;
+        if (i < line_count - 1)
+          total_len += 1;
+      }
+    }
+  }
+
+  if (total_len == 0) {
+    free(comment_lines);
+    return NULL;
   }
 
   char *result = malloc(total_len + 1);
@@ -536,9 +567,31 @@ char *get_comments_above(const char *source, Token target) {
   for (size_t i = 0; i < line_count; i++) {
     const char *ln_start = comment_lines[i];
     const char *ln_end = (i == 0) ? line_end : comment_lines[i - 1];
-    size_t len = ln_end - ln_start;
-    memcpy(out, ln_start, len);
-    out += len;
+
+    const char *scan = ln_start;
+    while (scan < ln_end && isspace((unsigned char)*scan))
+      scan++;
+    if (scan + 1 < ln_end && scan[0] == '/' && scan[1] == '/') {
+      scan += 2;
+      while (scan < ln_end && isspace((unsigned char)*scan))
+        scan++;
+
+      const char *line_end_no_nl = ln_end;
+      while (line_end_no_nl > scan &&
+             (line_end_no_nl[-1] == '\n' || line_end_no_nl[-1] == '\r'))
+        line_end_no_nl--;
+      while (line_end_no_nl > scan &&
+             isspace((unsigned char)line_end_no_nl[-1]))
+        line_end_no_nl--;
+
+      size_t line_len = line_end_no_nl - scan;
+      if (line_len > 0) {
+        memcpy(out, scan, line_len);
+        out += line_len;
+        if (i < line_count - 1)
+          *out++ = '\n';
+      }
+    }
   }
   *out = '\0';
 
