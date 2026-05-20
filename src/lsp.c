@@ -117,6 +117,16 @@ AstNode *find_ident_at_pos(AstNode *root, unsigned int line, int character) {
         found = node;
         break;
       }
+    } else if (node->type == AST_USE) {
+      Token start = node->as.use_stmt.use_kw;
+      Token end = node->as.use_stmt.semicln;
+      if (end.len == 0)
+        end = node->as.use_stmt.path;
+      if (start.line == target_line && character >= (int)start.col - 1 &&
+          character <= (int)(end.col + end.len)) {
+        found = node;
+        break;
+      }
     }
 
     if (node->next) {
@@ -346,6 +356,63 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
   Arena tmp_arena = {0};
 
   AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
+  if (ident && ident->type == AST_USE) {
+    Token path_tok = ident->as.use_stmt.path;
+    // Extract the path inside the quotes
+    if (path_tok.len >= 2 && path_tok.start[0] == '"' &&
+        path_tok.start[path_tok.len - 1] == '"') {
+
+      char *rel_path = arena_alloc(&tmp_arena, path_tok.len - 1);
+      strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
+      rel_path[path_tok.len - 2] = '\0';
+
+      char *current_abs = absolute_from_uri(uri);
+      if (current_abs) {
+        char *last_slash = strrchr(current_abs, '/');
+        if (last_slash) {
+          *last_slash = '\0';
+          char full_path[PATH_MAX];
+          if (rel_path[0] == '/') {
+            snprintf(full_path, sizeof(full_path), "%s", rel_path);
+          } else {
+            snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
+                     rel_path);
+          }
+          char *resolved = realpath(full_path, NULL);
+          if (resolved) {
+            yyjson_mut_val *root;
+            yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+            yyjson_mut_val *result = yyjson_mut_obj(jdoc);
+
+            char target_uri[8192];
+            snprintf(target_uri, sizeof(target_uri), "file://%s", resolved);
+            yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
+
+            yyjson_mut_val *range = yyjson_mut_obj(jdoc);
+            yyjson_mut_val *start = yyjson_mut_obj(jdoc);
+            yyjson_mut_obj_add_int(jdoc, start, "line", 0);
+            yyjson_mut_obj_add_int(jdoc, start, "character", 0);
+            yyjson_mut_val *end = yyjson_mut_obj(jdoc);
+            yyjson_mut_obj_add_int(jdoc, end, "line", 0);
+            yyjson_mut_obj_add_int(jdoc, end, "character", 0);
+            yyjson_mut_obj_add_val(jdoc, range, "start", start);
+            yyjson_mut_obj_add_val(jdoc, range, "end", end);
+            yyjson_mut_obj_add_val(jdoc, result, "range", range);
+            yyjson_mut_obj_add_val(jdoc, root, "result", result);
+
+            lsp_send_doc(jdoc);
+            free(resolved);
+            free(current_abs);
+            arena_free_all(&tmp_arena);
+            return;
+          }
+        }
+        free(current_abs);
+      }
+    }
+    goto empty_response;
+  }
+
   ResolvedNode res = resolve_node_to_decl(ident, &tmp_arena);
 
   if (res.decl_node) {

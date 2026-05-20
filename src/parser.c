@@ -653,12 +653,14 @@ bool parse_step(ParseCtx *ctx) {
         break;
       } else if (ctx->curr.type == TOKEN_KW &&
                  strncmp(ctx->curr.start, "use", 3) == 0) {
+        Token use_kw = ctx->curr;
         adv(ctx);
         if (ctx->curr.type == TOKEN_STR_LIT) {
           Token path_token = ctx->curr;
           adv(ctx);
 
           Token alias_token = {0};
+          Token semi_token = {0};
 
           if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 2 &&
               strncmp(ctx->curr.start, "as", 2) == 0) {
@@ -679,11 +681,14 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *use_node = new_node(ctx->arena, AST_USE);
           use_node->as.use_stmt.path = path_token;
           use_node->as.use_stmt.alias = alias_token;
+          use_node->as.use_stmt.use_kw = use_kw;
+          use_node->as.use_stmt.semicln = semi_token;
           append_stmt(target_list, use_node);
 
-          if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';')
+          if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+            semi_token = ctx->curr;
             adv(ctx);
-          else {
+          } else {
             report_error(ctx, ctx->curr, "Expected ';' after use");
             adv(ctx);
             sync(ctx);

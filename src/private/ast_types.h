@@ -170,6 +170,8 @@ typedef struct AstNode {
     struct {
       Token path;
       Token alias; // .len == 0 if no alias
+			Token use_kw;
+			Token semicln;
     } use_stmt;
     struct {
       Token val;
