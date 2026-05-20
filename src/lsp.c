@@ -233,9 +233,10 @@ typedef struct {
   const char *fpath;
 } ResolvedNode;
 
-ResolvedNode resolve_node_to_decl(AstNode *ident) {
+ResolvedNode resolve_node_to_decl(AstNode *ident, Arena *tmp_arena) {
   ResolvedNode res = {NULL, NULL};
-  if (!ident) return res;
+  if (!ident)
+    return res;
 
   if (ident->type == AST_IDENTIF && ident->as.identif.res_sm) {
     res.decl_node = ident->as.identif.res_sm->decl_node;
@@ -245,18 +246,33 @@ ResolvedNode resolve_node_to_decl(AstNode *ident) {
 
   if (ident->type == AST_MEMBER) {
     AstNode *base = ident->as.member.base;
-    if (!base) return res;
+    if (!base)
+      return res;
 
-    if (base->type == AST_IDENTIF && base->as.identif.res_sm && base->as.identif.res_sm->is_imported_mod) {
+    if (base->type == AST_IDENTIF && base->as.identif.res_sm &&
+        base->as.identif.res_sm->is_imported_mod) {
       const char *mod_fpath = base->as.identif.res_sm->fpath;
       char target_uri[8192];
       snprintf(target_uri, sizeof(target_uri), "file://%s", mod_fpath);
-      Doc *d = (Doc *)map_get(&server_state.open_docs, target_uri, strlen(target_uri));
+
+      Doc *d = (Doc *)map_get(&server_state.open_docs, target_uri,
+                              strlen(target_uri));
+      AstNode *ast_root = NULL;
+
       if (d && d->ast_root) {
-        AstNode *stmt = d->ast_root->as.block.first_stmt;
+        ast_root = d->ast_root;
+      } else if (tmp_arena) {
+        // Fall back to reading straight off the disk if the document is not
+        // open
+        ast_root = file_to_ast(tmp_arena, mod_fpath);
+      }
+
+      if (ast_root) {
+        AstNode *stmt = ast_root->as.block.first_stmt;
         while (stmt) {
           Token t = get_decl_token(stmt);
-          if (t.len == ident->as.member.name.len && strncmp(t.start, ident->as.member.name.start, t.len) == 0) {
+          if (t.len == ident->as.member.name.len &&
+              strncmp(t.start, ident->as.member.name.start, t.len) == 0) {
             res.decl_node = stmt;
             res.fpath = mod_fpath;
             return res;
@@ -274,20 +290,29 @@ ResolvedNode resolve_node_to_decl(AstNode *ident) {
             if (d->ast_root) {
               AstNode *stmt = d->ast_root->as.block.first_stmt;
               while (stmt) {
-                if (stmt->type == AST_STRUCT || stmt->type == AST_UNION || stmt->type == AST_ENUM) {
+                if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
+                    stmt->type == AST_ENUM) {
                   Token t = get_decl_token(stmt);
-                  if (t.len == ag_name.len && strncmp(t.start, ag_name.start, t.len) == 0) {
+                  if (t.len == ag_name.len &&
+                      strncmp(t.start, ag_name.start, t.len) == 0) {
                     AstNode *curr = NULL;
-                    if (stmt->type == AST_STRUCT) curr = stmt->as.struct_def.contents;
-                    else if (stmt->type == AST_UNION) curr = stmt->as.union_def.contents;
-                    else if (stmt->type == AST_ENUM) curr = stmt->as.enum_def.contents;
-                    
+                    if (stmt->type == AST_STRUCT)
+                      curr = stmt->as.struct_def.contents;
+                    else if (stmt->type == AST_UNION)
+                      curr = stmt->as.union_def.contents;
+                    else if (stmt->type == AST_ENUM)
+                      curr = stmt->as.enum_def.contents;
+
                     while (curr) {
                       Token mt = get_decl_token(curr);
-                      if (mt.len == ident->as.member.name.len && strncmp(mt.start, ident->as.member.name.start, mt.len) == 0) {
+                      if (mt.len == ident->as.member.name.len &&
+                          strncmp(mt.start, ident->as.member.name.start,
+                                  mt.len) == 0) {
                         res.decl_node = curr;
-                        if (strncmp(d->uri, "file://", 7) == 0) res.fpath = d->uri + 7;
-                        else res.fpath = d->uri;
+                        if (strncmp(d->uri, "file://", 7) == 0)
+                          res.fpath = d->uri + 7;
+                        else
+                          res.fpath = d->uri;
                         return res;
                       }
                       curr = curr->next;
@@ -318,8 +343,10 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
     goto empty_response;
   }
 
+  Arena tmp_arena = {0};
+
   AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
-  ResolvedNode res = resolve_node_to_decl(ident);
+  ResolvedNode res = resolve_node_to_decl(ident, &tmp_arena);
 
   if (res.decl_node) {
     AstNode *decl = res.decl_node;
@@ -356,9 +383,12 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
       yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
       lsp_send_doc(jdoc);
+      arena_free_all(&tmp_arena);
       return;
     }
   }
+
+  arena_free_all(&tmp_arena);
 
 empty_response: {
   yyjson_mut_val *root;
@@ -369,55 +399,79 @@ empty_response: {
 }
 
 char *get_comments_above(const char *source, Token target) {
-  if (!source || !target.start)
+  if (!source || target.line <= 1)
     return NULL;
 
-  const char *ptr = target.start - 1;
+  const char *ptr = source;
+  unsigned int current_line = 1;
+  while (*ptr && current_line < target.line) {
+    if (*ptr == '\n') {
+      current_line++;
+    }
+    ptr++;
+  }
 
-  while (ptr > source && *ptr != '\n')
+  if (ptr > source && *(ptr - 1) == '\n') {
     ptr--;
+  }
 
   const char *end_of_comments = ptr;
 
   while (ptr > source) {
-    while (ptr > source && isspace(*ptr))
+    while (ptr > source && isspace((unsigned char)*ptr)) {
       ptr--;
-    if (ptr <= source + 1)
+    }
+    if (ptr <= source)
       break;
 
-    bool is_comment = false;
-    const char *line_start = ptr;
+    const char *line_end = ptr;
+    while (ptr > source && *ptr != '\n') {
+      ptr--;
+    }
+    const char *line_start = (ptr == source && *ptr != '\n') ? source : ptr + 1;
 
-    while (line_start > source && *line_start != '\n')
-      line_start--;
-    if (line_start < ptr) {
-      const char *scan = line_start + 1;
-      while (isspace(*scan))
-        scan++;
-      if (scan[0] == '/' && scan[1] == '/') {
-        is_comment = true;
-      }
+    const char *scan = line_start;
+    while (scan <= line_end && isspace((unsigned char)*scan)) {
+      scan++;
     }
 
-    if (!is_comment) {
-      break;
+    if (scan + 1 <= line_end && scan[0] == '/' && scan[1] == '/') {
+      if (line_start > source) {
+        ptr = line_start - 1;
+      } else {
+        ptr = source;
+      }
     } else {
-      ptr = line_start;
+      break;
     }
   }
 
-  const char *start_of_comments = ptr + 1;
+  const char *start_of_comments = ptr;
+  if (start_of_comments >= end_of_comments)
+    return NULL;
+
+  // Clean up any remaining leading formatting spaces
+  while (start_of_comments < end_of_comments &&
+         isspace((unsigned char)*start_of_comments)) {
+    if (start_of_comments + 1 < end_of_comments &&
+        start_of_comments[0] == '/' && start_of_comments[1] == '/') {
+      break;
+    }
+    start_of_comments++;
+  }
+
   if (start_of_comments >= end_of_comments)
     return NULL;
 
   size_t len = end_of_comments - start_of_comments;
   char *comments = malloc(len + 1);
+  if (!comments)
+    return NULL;
   strncpy(comments, start_of_comments, len);
   comments[len] = '\0';
 
   return comments;
 }
-
 
 void handle_hover(yyjson_val *params, yyjson_val *id) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
@@ -431,15 +485,19 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
     goto empty_response;
   }
 
+  Arena tmp_arena = {0};
+
   AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
-  ResolvedNode res = resolve_node_to_decl(ident);
+  ResolvedNode res = resolve_node_to_decl(ident, &tmp_arena);
 
   if (res.decl_node) {
     AstNode *decl = res.decl_node;
     Token t = get_decl_token(decl);
 
     if (t.len > 0) {
-      const char *source_txt = doc->txt;
+      char *source_txt = NULL;
+      bool allocated_source = false;
+
       if (res.fpath) {
         char target_uri[8192];
         snprintf(target_uri, sizeof(target_uri), "file://%s", res.fpath);
@@ -448,10 +506,32 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
         if (target_doc) {
           source_txt = target_doc->txt;
         } else {
-          source_txt = NULL;
+          // If the destination file isnt open, load text from disk so hover
+          // documentation still works
+          FILE *f = fopen(res.fpath, "rb");
+          if (f) {
+            fseek(f, 0, SEEK_END);
+            long flen = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (flen >= 0) {
+              source_txt = malloc(flen + 1);
+              if (source_txt) {
+                size_t read_bytes = fread(source_txt, 1, flen, f);
+                source_txt[read_bytes] = '\0';
+                allocated_source = true;
+              }
+            }
+            fclose(f);
+          }
         }
+      } else {
+        source_txt = doc->txt;
       }
+
       char *comments = get_comments_above(source_txt, t);
+      if (allocated_source && source_txt) {
+        free(source_txt);
+      }
 
       char signature[8192] = {0};
 
@@ -494,7 +574,7 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
         snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
       }
 
-      char md_buffer[4096];
+      char md_buffer[16384];
       snprintf(md_buffer, sizeof(md_buffer), "```tereix\n%s\n```\n%s",
                signature, comments ? comments : "");
 
@@ -513,9 +593,12 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
       yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
       lsp_send_doc(jdoc);
+      arena_free_all(&tmp_arena);
       return;
     }
   }
+
+  arena_free_all(&tmp_arena);
 
 empty_response: {
   yyjson_mut_val *root;

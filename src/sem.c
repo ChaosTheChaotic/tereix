@@ -25,7 +25,8 @@ void record_import(Module *mod, Module *parent_mod, AstNode *use_stmt) {
     }
   }
   if (import_relations_count < MAX_IMPORT_RELATIONS) {
-    import_relations[import_relations_count++] = (ImportRelation){mod, parent_mod, use_stmt};
+    import_relations[import_relations_count++] =
+        (ImportRelation){mod, parent_mod, use_stmt};
   }
 }
 
@@ -63,7 +64,8 @@ void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
     if (sem_current_mod == sem_main_mod) {
       report_file = sem_current_mod->abs_path;
     } else {
-      // Its a dependency module so report error at its corresponding 'use' statement context
+      // Its a dependency module so report error at its corresponding 'use'
+      // statement context
       ImportRelation *rel = get_import_relation(sem_current_mod);
       if (rel && rel->parent_mod && rel->use_stmt) {
         report_file = rel->parent_mod->abs_path;
@@ -77,8 +79,8 @@ void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
   }
 
   if (ctx && ctx->diags) {
-    diaglist_add(ctx->diags, sev, msg, report_file, report_line, report_col, report_line,
-                 report_col + report_len);
+    diaglist_add(ctx->diags, sev, msg, report_file, report_line, report_col,
+                 report_line, report_col + report_len);
     free(msg);
   } else {
     if (report_file) {
@@ -97,7 +99,8 @@ void sem_init(SemCtx *ctx, Arena *arena) {
 
 void sem_deinit(SemCtx *ctx) { map_free_buckets(&ctx->mod_cache); }
 
-Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl, const char *fpath) {
+Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl,
+             const char *fpath) {
   Sym *s = arena_alloc(arena, sizeof(Sym));
   s->kind = kind;
   s->name = name;
@@ -361,9 +364,13 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
   for (size_t i = 0; i < mod->imported_mods.capacity; i++) {
     HashEntry *entry = mod->imported_mods.buckets[i];
     while (entry) {
+      Module *imported_mod = (Module *)entry->value;
+
       Token import_tok = {
           .start = entry->key, .len = entry->key_len, .type = TOKEN_IDENTIF};
-      Sym *import_sym = new_sym(arena, SYM_VAR, import_tok, NULL, mod->abs_path);
+
+      Sym *import_sym =
+          new_sym(arena, SYM_VAR, import_tok, NULL, imported_mod->abs_path);
       import_sym->is_imported_mod = true;
       scope_declare(ss, import_tok, import_sym);
       entry = entry->next;
@@ -423,7 +430,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_FUNC: {
-      Sym *func_sym = new_sym(arena, SYM_FUNC, node->as.func_def.fn_name, node, mod->abs_path);
+      Sym *func_sym = new_sym(arena, SYM_FUNC, node->as.func_def.fn_name, node,
+                              mod->abs_path);
       if (!scope_declare(ss, node->as.func_def.fn_name, func_sym)) {
         sem_report(ctx, DIAG_ERROR, node->as.func_def.fn_name,
                    "Error: Duplicate function name '%.*s'\n",
@@ -443,7 +451,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_PARAM: {
-      Sym *param_sym = new_sym(arena, SYM_VAR, node->as.fn_param.id, node, mod->abs_path);
+      Sym *param_sym =
+          new_sym(arena, SYM_VAR, node->as.fn_param.id, node, mod->abs_path);
       if (!scope_declare(ss, node->as.fn_param.id, param_sym)) {
         sem_report(ctx, DIAG_ERROR, node->as.fn_param.id,
                    "Error: Duplicate parameter name '%.*s'\n",
@@ -457,7 +466,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
         PUSH_TRAV(node->as.var_decl.init, ACTION_VISIT_NODE);
       }
 
-      Sym *var_sym = new_sym(arena, SYM_VAR, node->as.var_decl.id, node, mod->abs_path);
+      Sym *var_sym =
+          new_sym(arena, SYM_VAR, node->as.var_decl.id, node, mod->abs_path);
       if (!scope_declare(ss, node->as.var_decl.id, var_sym)) {
         sem_report(ctx, DIAG_ERROR, node->as.var_decl.id,
                    "Error: Variable '%.*s' already declared in this scope.\n",
@@ -582,8 +592,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_STRUCT: {
-      Sym *struct_sym =
-          new_sym(arena, SYM_STRUCT, node->as.struct_def.structn, node, mod->abs_path);
+      Sym *struct_sym = new_sym(arena, SYM_STRUCT, node->as.struct_def.structn,
+                                node, mod->abs_path);
       scope_declare(ss, node->as.struct_def.structn, struct_sym);
 
       push_scope(ss);
@@ -597,8 +607,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_UNION: {
-      Sym *union_sym =
-          new_sym(arena, SYM_UNION, node->as.union_def.unionn, node, mod->abs_path);
+      Sym *union_sym = new_sym(arena, SYM_UNION, node->as.union_def.unionn,
+                               node, mod->abs_path);
       scope_declare(ss, node->as.union_def.unionn, union_sym);
 
       push_scope(ss);
@@ -612,7 +622,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_ENUM: {
-      Sym *enum_sym = new_sym(arena, SYM_ENUM, node->as.enum_def.enumn, node, mod->abs_path);
+      Sym *enum_sym = new_sym(arena, SYM_ENUM, node->as.enum_def.enumn, node,
+                              mod->abs_path);
       scope_declare(ss, node->as.enum_def.enumn, enum_sym);
 
       push_scope(ss);
