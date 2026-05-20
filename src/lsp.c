@@ -410,67 +410,73 @@ char *get_comments_above(const char *source, Token target) {
     }
     ptr++;
   }
-
   if (ptr > source && *(ptr - 1) == '\n') {
     ptr--;
   }
 
-  const char *end_of_comments = ptr;
+  const char *line_end = ptr;
+
+  const char **comment_lines = NULL;
+  size_t line_count = 0;
+  size_t cap = 0;
 
   while (ptr > source) {
-    while (ptr > source && isspace((unsigned char)*ptr)) {
+    while (ptr > source && *(ptr - 1) != '\n') {
       ptr--;
     }
-    if (ptr <= source)
-      break;
-
-    const char *line_end = ptr;
-    while (ptr > source && *ptr != '\n') {
+    const char *line_start = (ptr == source && *ptr != '\n') ? source : ptr;
+    if (ptr > source) {
       ptr--;
     }
-    const char *line_start = (ptr == source && *ptr != '\n') ? source : ptr + 1;
 
     const char *scan = line_start;
-    while (scan <= line_end && isspace((unsigned char)*scan)) {
+    while (scan < line_end && isspace((unsigned char)*scan)) {
       scan++;
     }
 
-    if (scan + 1 <= line_end && scan[0] == '/' && scan[1] == '/') {
-      if (line_start > source) {
-        ptr = line_start - 1;
-      } else {
-        ptr = source;
+    if (scan + 1 < line_end && scan[0] == '/' && scan[1] == '/') {
+      if (line_count + 1 > cap) {
+        cap = cap ? cap * 2 : 16;
+        comment_lines = realloc(comment_lines, sizeof(const char *) * cap);
+        if (!comment_lines)
+          return NULL;
       }
+      comment_lines[line_count++] = line_start;
     } else {
       break;
     }
   }
 
-  const char *start_of_comments = ptr;
-  if (start_of_comments >= end_of_comments)
+  if (line_count == 0) {
+    free(comment_lines);
     return NULL;
-
-  // Clean up any remaining leading formatting spaces
-  while (start_of_comments < end_of_comments &&
-         isspace((unsigned char)*start_of_comments)) {
-    if (start_of_comments + 1 < end_of_comments &&
-        start_of_comments[0] == '/' && start_of_comments[1] == '/') {
-      break;
-    }
-    start_of_comments++;
   }
 
-  if (start_of_comments >= end_of_comments)
-    return NULL;
+  size_t total_len = 0;
+  for (size_t i = 0; i < line_count; i++) {
+    const char *ln_start = comment_lines[i];
+    const char *ln_end = (i == 0) ? line_end : comment_lines[i - 1];
+    total_len += (ln_end - ln_start);
+  }
 
-  size_t len = end_of_comments - start_of_comments;
-  char *comments = malloc(len + 1);
-  if (!comments)
+  char *result = malloc(total_len + 1);
+  if (!result) {
+    free(comment_lines);
     return NULL;
-  strncpy(comments, start_of_comments, len);
-  comments[len] = '\0';
+  }
 
-  return comments;
+  char *out = result;
+  for (size_t i = 0; i < line_count; i++) {
+    const char *ln_start = comment_lines[i];
+    const char *ln_end = (i == 0) ? line_end : comment_lines[i - 1];
+    size_t len = ln_end - ln_start;
+    memcpy(out, ln_start, len);
+    out += len;
+  }
+  *out = '\0';
+
+  free(comment_lines);
+  return result;
 }
 
 void handle_hover(yyjson_val *params, yyjson_val *id) {
