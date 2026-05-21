@@ -96,7 +96,6 @@ AstNode *file_to_ast(Arena *arena, const char *path) {
   DiagList diags;
   diaglist_init(&diags, 1024);
   AstNode *root = str_to_ast(arena, file, path, &diags);
-  free((void *)file);
   diaglist_free(&diags);
   return root;
 }
