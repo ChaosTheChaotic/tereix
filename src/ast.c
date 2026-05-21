@@ -74,7 +74,13 @@ AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath, DiagList 
   push_node(&pctx, root);
 
   bool success = parse(&pctx);
+  map_free_buckets(&lex.kw_map);
+  map_free_buckets(&lex.op_map);
+  map_free_buckets(&lex.comp_map);
+  map_free_buckets(&lex.type_kw_map);
   free(pctx.state_stack);
+  free(pctx.node_stack);
+  free(pctx.op_stack);
 
   if (!success) {
     return NULL;
@@ -86,7 +92,10 @@ AstNode *file_to_ast(Arena *arena, const char *path) {
   const char *file = load_file(path);
   if (!file)
     return NULL;
-	DiagList diags;
-	diaglist_init(&diags, 1024);
-  return str_to_ast(arena, file, path, &diags);
+  DiagList diags;
+  diaglist_init(&diags, 1024);
+  AstNode *root = str_to_ast(arena, file, path, &diags);
+  free((void *)file);
+  diaglist_free(&diags);
+  return root;
 }

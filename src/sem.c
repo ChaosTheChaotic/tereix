@@ -101,7 +101,19 @@ void sem_init(SemCtx *ctx, Arena *arena) {
   sem_main_mod = NULL;
 }
 
-void sem_deinit(SemCtx *ctx) { map_free_buckets(&ctx->mod_cache); }
+void sem_deinit(SemCtx *ctx) {
+  // Free module maps
+  for (size_t i = 0; i < ctx->mod_cache.capacity; i++) {
+    HashEntry *entry = ctx->mod_cache.buckets[i];
+    while (entry) {
+      Module *mod = (Module *)entry->value;
+      map_free_buckets(&mod->local_symbols);
+      map_free_buckets(&mod->imported_mods);
+      entry = entry->next;
+    }
+  }
+  map_free_buckets(&ctx->mod_cache);
+}
 
 Sym *new_sym(Arena *arena, SymKind kind, Token name, AstNode *decl,
              const char *fpath) {

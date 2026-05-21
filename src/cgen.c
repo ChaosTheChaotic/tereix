@@ -1472,6 +1472,7 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
           local_entry = local_entry->next;
         }
       }
+      map_free_buckets(local_funcs);
       entry = entry->next;
     }
   }
@@ -1521,6 +1522,8 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
   // TODO: Change to fork and exec later?
   int res = system(cmd.buf);
   sb_free(&cmd);
+
+	map_free_buckets(global_func_map);
 
   return res == 0;
 }
@@ -1870,4 +1873,5 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
 
 #undef RENAME_TOK
   free(stack);
+	map_free_buckets(rename_map);
 }
