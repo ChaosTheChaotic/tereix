@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+extern Module *sem_current_mod;
+extern Module *sem_main_mod;
+
 static LspState server_state = {.state = UNINITIALIZED};
 
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
@@ -991,6 +994,9 @@ void compile_doc(Doc *doc) {
       const char *mod_name = extract_mod_name(doc->ast_arena, curr_abs);
       Module *mod = new_mod(doc->ast_arena, curr_abs, mod_name, ast);
 
+      if (strcmp(curr_abs, abspath) == 0)
+        sem_main_mod = mod;
+
       map_set(&sem.mod_cache, curr_abs, strlen(curr_abs), mod);
 
       // Push extracted dependencies back to the worklist
@@ -1015,6 +1021,7 @@ void compile_doc(Doc *doc) {
       HashEntry *entry = sem.mod_cache.buckets[i];
       while (entry) {
         Module *mod = (Module *)entry->value;
+				sem_current_mod = mod;
         collect_mod_symbols(doc->ast_arena, mod, &sem);
         entry = entry->next;
       }
@@ -1028,6 +1035,7 @@ void compile_doc(Doc *doc) {
       while (entry) {
         Module *mod = (Module *)entry->value;
         ss.count = 0;
+				sem_current_mod = mod;
         resolve_scopes(doc->ast_arena, mod, &ss, &sem);
         entry = entry->next;
       }
@@ -1037,6 +1045,7 @@ void compile_doc(Doc *doc) {
       HashEntry *entry = sem.mod_cache.buckets[i];
       while (entry) {
         Module *mod = (Module *)entry->value;
+				sem_current_mod = mod;
         type_check_ast(doc->ast_arena, mod->ast_root, &sem);
         entry = entry->next;
       }

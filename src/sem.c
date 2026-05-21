@@ -95,6 +95,10 @@ void sem_init(SemCtx *ctx, Arena *arena) {
   ctx->arena = arena;
   map_init(&ctx->mod_cache, arena, 1024);
   ctx->std_lib_env_path = getenv("TX_LIB_SEARCH_PATH");
+
+  import_relations_count = 0;
+  sem_current_mod = NULL;
+  sem_main_mod = NULL;
 }
 
 void sem_deinit(SemCtx *ctx) { map_free_buckets(&ctx->mod_cache); }
@@ -138,8 +142,7 @@ bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float) {
   return false;
 }
 
-bool is_type_compatible(DataType target, DataType source, bool is_explicit,
-                        SemCtx *ctx) {
+bool is_type_compatible(DataType target, DataType source, bool is_explicit) {
   if (target.name.len == 3 && strncmp(target.name.start, "any", 3) == 0) {
     return true;
   }
@@ -175,14 +178,6 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit,
 
     return t_width >= s_width;
   }
-
-  sem_report(
-      ctx, DIAG_WARNING, target.name,
-      "Types %.*s (ptr_depth: %ld) and %.*s (ptr_depth: %ld) are not "
-      "compatible (safely) at %u:%u, try explicit casting to get around this\n",
-      (int)target.name.len, target.name.start, target.ptr_depth,
-      (int)source.name.len, source.name.start, source.ptr_depth,
-      target.name.line, target.name.col);
   return false;
 }
 
@@ -991,8 +986,7 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_VAR_DECL:
         if (node->as.var_decl.init) {
           if (!is_type_compatible(node->as.var_decl.type,
-                                  node->as.var_decl.init->eval_type, false,
-                                  ctx)) {
+                                  node->as.var_decl.init->eval_type, false)) {
             sem_report(ctx, DIAG_WARNING, node->as.var_decl.id,
                        "Incompatible assignment for variable '%.*s'",
                        node->as.var_decl.id.len, node->as.var_decl.id.start);
@@ -1015,9 +1009,9 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           }
         }
 
-        if (!is_type_compatible(left_t, right_t, false, ctx) &&
-            !is_type_compatible(right_t, left_t, false, ctx)) {
-          sem_report(ctx, DIAG_ERROR, node->as.binop.op,
+        if (!is_type_compatible(left_t, right_t, false) &&
+            !is_type_compatible(right_t, left_t, false)) {
+          sem_report(ctx, DIAG_WARNING, node->as.binop.op,
                      "Type Error at %u:%u: Incompatible operands '%.*s' and "
                      "'%.*s' for "
                      "'%.*s'.\n",
@@ -1043,7 +1037,7 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       }
       case AST_CAST:
         if (!is_type_compatible(node->as.cast.target,
-                                node->as.cast.op->eval_type, true, ctx)) {
+                                node->as.cast.op->eval_type, true)) {
           sem_report(ctx, DIAG_ERROR, node->as.cast.target.name,
                      "Type Error at %u:%u: Invalid explicit cast.\n",
                      node->as.cast.target.name.line,
@@ -1054,9 +1048,8 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_RET:
         if (item.curr_func && node->as.ret_stmt.expr) {
           if (!is_type_compatible(item.curr_func->as.func_def.ret_type,
-                                  node->as.ret_stmt.expr->eval_type, false,
-                                  ctx)) {
-            sem_report(ctx, DIAG_ERROR, node->as.ret_stmt.expr->eval_type.name,
+                                  node->as.ret_stmt.expr->eval_type, false)) {
+            sem_report(ctx, DIAG_ERROR, node->as.ret_stmt.ret_kw,
                        "Type Error at %u:%u: Function return type mismatch.\n",
                        node->as.ret_stmt.ret_kw.line,
                        node->as.ret_stmt.ret_kw.col);
