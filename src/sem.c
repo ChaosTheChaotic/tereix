@@ -177,7 +177,7 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit,
   }
 
   sem_report(
-      ctx, DIAG_ERROR, target.name,
+      ctx, DIAG_WARNING, target.name,
       "Types %.*s (ptr_depth: %ld) and %.*s (ptr_depth: %ld) are not "
       "compatible (safely) at %u:%u, try explicit casting to get around this\n",
       (int)target.name.len, target.name.start, target.ptr_depth,
@@ -993,7 +993,7 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           if (!is_type_compatible(node->as.var_decl.type,
                                   node->as.var_decl.init->eval_type, false,
                                   ctx)) {
-            sem_report(ctx, DIAG_ERROR, node->as.var_decl.id,
+            sem_report(ctx, DIAG_WARNING, node->as.var_decl.id,
                        "Incompatible assignment for variable '%.*s'",
                        node->as.var_decl.id.len, node->as.var_decl.id.start);
           }
