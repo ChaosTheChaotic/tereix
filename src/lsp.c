@@ -862,6 +862,12 @@ void handle_initialize(yyjson_val *params, yyjson_val *id) {
   yyjson_mut_val *trigger_chars = yyjson_mut_arr(doc);
   yyjson_mut_arr_add_str(doc, trigger_chars, ".");
   yyjson_mut_obj_add_val(doc, comp_options, "triggerCharacters", trigger_chars);
+  yyjson_mut_val *sig_help = yyjson_mut_obj(doc);
+  yyjson_mut_val *sig_trigger = yyjson_mut_arr(doc);
+  yyjson_mut_arr_add_str(doc, sig_trigger, "(");
+  yyjson_mut_arr_add_str(doc, sig_trigger, ",");
+  yyjson_mut_obj_add_val(doc, sig_help, "triggerCharacters", sig_trigger);
+  yyjson_mut_obj_add_val(doc, capabilities, "signatureHelpProvider", sig_help);
   yyjson_mut_obj_add_val(doc, capabilities, "completionProvider", comp_options);
   yyjson_mut_obj_add_val(doc, result, "capabilities", capabilities);
   yyjson_mut_obj_add_val(doc, root, "result", result);
@@ -1151,6 +1157,183 @@ void handle_did_close(yyjson_val *params) {
   publish_diagnostics_from_list(uri, &empty);
 }
 
+int get_index_from_pos(const char *txt, int line, int character) {
+  int cur_l = 0, cur_c = 0, i = 0;
+  while (txt[i] != '\0') {
+    if (cur_l == line && cur_c == character) return i;
+    if (txt[i] == '\n') { cur_l++; cur_c = 0; } 
+    else { cur_c++; }
+    i++;
+  }
+  return i;
+}
+
+void get_pos_from_index(const char *txt, int index, int *line, int *character) {
+  *line = 0; *character = 0;
+  for (int i = 0; i < index && txt[i] != '\0'; i++) {
+    if (txt[i] == '\n') { (*line)++; *character = 0; } 
+    else { (*character)++; }
+  }
+}
+
+void handle_signature_help(yyjson_val *params, yyjson_val *id) {
+  yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
+  const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
+  yyjson_val *pos = yyjson_obj_get(params, "position");
+  int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
+  int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
+
+  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  if (!doc || !doc->txt)
+    goto empty_response;
+
+  int cursor_idx = get_index_from_pos(doc->txt, line, character);
+  int active_param = 0;
+  int depth = 0;
+  int p = cursor_idx - 1;
+
+  while (p >= 0) {
+    char c = doc->txt[p];
+    if (c == '"') {
+      p--;
+      while (p >= 0) {
+        if (doc->txt[p] == '"' && (p == 0 || doc->txt[p - 1] != '\\'))
+          break;
+        p--;
+      }
+    } else if (c == '\'') {
+      p--;
+      while (p >= 0) {
+        if (doc->txt[p] == '\'' && (p == 0 || doc->txt[p - 1] != '\\'))
+          break;
+        p--;
+      }
+    } else if (c == ')') {
+      depth++;
+    } else if (c == '(') {
+      depth--;
+      if (depth < 0)
+        break;
+    } else if (c == ',' && depth == 0) {
+      active_param++;
+    }
+    p--;
+  }
+
+  if (p < 0)
+    goto empty_response;
+
+  p--;
+  while (p >= 0 && isspace((unsigned char)doc->txt[p]))
+    p--;
+  if (p < 0 || (!isalnum((unsigned char)doc->txt[p]) && doc->txt[p] != '_'))
+    goto empty_response;
+
+  unsigned int ident_end = p;
+  while (p >= 0 && (isalnum((unsigned char)doc->txt[p]) || doc->txt[p] == '_'))
+    p--;
+  unsigned int ident_start = p + 1;
+  unsigned int ident_len = ident_end - ident_start + 1;
+
+  int ident_line, ident_char;
+  get_pos_from_index(doc->txt, ident_start, &ident_line, &ident_char);
+
+  Arena tmp_arena = {0};
+  ResolvedNode res = {NULL, NULL};
+
+  if (doc->ast_root) {
+    AstNode *ident = find_ident_at_pos(doc->ast_root, ident_line, ident_char);
+    res = resolve_node_to_decl(ident, &tmp_arena);
+  }
+
+  if (!res.decl_node) {
+    const char *target_name = &doc->txt[ident_start];
+    for (size_t i = 0; i < server_state.open_docs.capacity; i++) {
+      HashEntry *entry = server_state.open_docs.buckets[i];
+      while (entry) {
+        Doc *d = (Doc *)entry->value;
+        if (d->ast_root) {
+          AstNode *stmt = d->ast_root->as.block.first_stmt;
+          while (stmt) {
+            if (stmt->type == AST_FUNC) {
+              Token t = stmt->as.func_def.fn_name;
+              if (t.len == ident_len &&
+                  strncmp(t.start, target_name, ident_len) == 0) {
+                res.decl_node = stmt;
+                goto fallback_found;
+              }
+            }
+            stmt = stmt->next;
+          }
+        }
+        entry = entry->next;
+      }
+    }
+  }
+
+fallback_found:
+  if (res.decl_node && res.decl_node->type == AST_FUNC) {
+    AstNode *decl = res.decl_node;
+    Token fn_name = decl->as.func_def.fn_name;
+    Token ret_type = decl->as.func_def.ret_type.name;
+
+    yyjson_mut_val *root;
+    yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+    yyjson_mut_val *result = yyjson_mut_obj(jdoc);
+    yyjson_mut_val *signatures = yyjson_mut_arr(jdoc);
+    yyjson_mut_val *sig_obj = yyjson_mut_obj(jdoc);
+    yyjson_mut_val *params_arr = yyjson_mut_arr(jdoc);
+
+    char sig_label[4096] = {0};
+
+    int offset = snprintf(sig_label, sizeof(sig_label), "%.*s(", fn_name.len,
+                          fn_name.start);
+
+    AstNode *param = decl->as.func_def.params;
+    while (param) {
+      char param_label[256];
+      Token p_id = param->as.fn_param.id;
+      Token p_type = param->as.fn_param.type.name;
+
+      snprintf(param_label, sizeof(param_label), "%.*s %.*s", p_type.len,
+               p_type.start, p_id.len, p_id.start);
+
+      yyjson_mut_val *p_obj = yyjson_mut_obj(jdoc);
+      yyjson_mut_obj_add_str(jdoc, p_obj, "label", param_label);
+      yyjson_mut_arr_append(params_arr, p_obj);
+
+      offset += snprintf(sig_label + offset, sizeof(sig_label) - offset, "%s%s",
+                         param_label, param->next ? ", " : "");
+      param = param->next;
+    }
+
+    snprintf(sig_label + offset, sizeof(sig_label) - offset, "): %.*s",
+             ret_type.len, ret_type.start);
+
+    yyjson_mut_obj_add_str(jdoc, sig_obj, "label", sig_label);
+    yyjson_mut_obj_add_val(jdoc, sig_obj, "parameters", params_arr);
+    yyjson_mut_arr_append(signatures, sig_obj);
+
+    yyjson_mut_obj_add_val(jdoc, result, "signatures", signatures);
+    yyjson_mut_obj_add_int(jdoc, result, "activeSignature", 0);
+    yyjson_mut_obj_add_int(jdoc, result, "activeParameter", active_param);
+    yyjson_mut_obj_add_val(jdoc, root, "result", result);
+
+    lsp_send_doc(jdoc);
+    arena_free_all(&tmp_arena);
+    return;
+  }
+
+  arena_free_all(&tmp_arena);
+
+empty_response: {
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
+  lsp_send_doc(jdoc);
+}
+}
+
 void start_lsp_server() {
   // Disable stdout buffering so messages go straight to the editor
   setvbuf(stdout, NULL, _IONBF, 0);
@@ -1216,6 +1399,8 @@ void start_lsp_server() {
           handle_hover(yyjson_obj_get(root, "params"), id);
         } else if (strcmp(method, "textDocument/completion") == 0) {
           handle_completion(yyjson_obj_get(root, "params"), id);
+        } else if (strcmp(method, "textDocument/signatureHelp") == 0) {
+          handle_signature_help(yyjson_obj_get(root, "params"), id);
         } else {
           if (id) {
             // MethodNotFound

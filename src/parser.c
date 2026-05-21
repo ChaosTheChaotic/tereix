@@ -2192,6 +2192,9 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',') {
       adv(ctx);
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+        break;
+      }
     }
 
     push_state(ctx, STATE_IN_FUNC_ARGS);
