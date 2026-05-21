@@ -1523,7 +1523,7 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
   int res = system(cmd.buf);
   sb_free(&cmd);
 
-	map_free_buckets(global_func_map);
+  map_free_buckets(global_func_map);
 
   return res == 0;
 }
@@ -1873,5 +1873,5 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
 
 #undef RENAME_TOK
   free(stack);
-	map_free_buckets(rename_map);
+  map_free_buckets(rename_map);
 }

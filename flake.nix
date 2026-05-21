@@ -5,11 +5,16 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  outputs = { self, nixpkgs }:
+  outputs =
+    { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+      ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
-    in {
+    in
+    {
       packages = forAllSystems (system: {
         default = nixpkgs.legacyPackages.${system}.callPackage ./package.nix { };
       });
@@ -20,7 +25,7 @@
           packages = with nixpkgs.legacyPackages.${system}; [
             gdb
             clang-tools
-						valgrind
+            valgrind
           ];
         };
       });

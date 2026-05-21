@@ -1021,7 +1021,7 @@ void compile_doc(Doc *doc) {
       HashEntry *entry = sem.mod_cache.buckets[i];
       while (entry) {
         Module *mod = (Module *)entry->value;
-				sem_current_mod = mod;
+        sem_current_mod = mod;
         collect_mod_symbols(doc->ast_arena, mod, &sem);
         entry = entry->next;
       }
@@ -1035,7 +1035,7 @@ void compile_doc(Doc *doc) {
       while (entry) {
         Module *mod = (Module *)entry->value;
         ss.count = 0;
-				sem_current_mod = mod;
+        sem_current_mod = mod;
         resolve_scopes(doc->ast_arena, mod, &ss, &sem);
         entry = entry->next;
       }
@@ -1045,7 +1045,7 @@ void compile_doc(Doc *doc) {
       HashEntry *entry = sem.mod_cache.buckets[i];
       while (entry) {
         Module *mod = (Module *)entry->value;
-				sem_current_mod = mod;
+        sem_current_mod = mod;
         type_check_ast(doc->ast_arena, mod->ast_root, &sem);
         entry = entry->next;
       }

@@ -66,8 +66,7 @@ char *absolute_from_uri(const char *uri) {
 
   if (strncmp(path_start, "localhost/", 10) == 0) {
     path_start += 9; // Point to the '/'
-  }
-  else if (*path_start == '/') {
+  } else if (*path_start == '/') {
   } else {
     return NULL;
   }
@@ -77,14 +76,15 @@ char *absolute_from_uri(const char *uri) {
 }
 
 char *uri_from_absolute(const char *absolute) {
-    if (!absolute || absolute[0] != '/') return NULL;
+  if (!absolute || absolute[0] != '/')
+    return NULL;
 
-    const char *prefix = "file://";
-    char *uri = malloc(strlen(prefix) + strlen(absolute) + 1);
-    if (uri) {
-        sprintf(uri, "%s%s", prefix, absolute);
-    }
-    return uri;
+  const char *prefix = "file://";
+  char *uri = malloc(strlen(prefix) + strlen(absolute) + 1);
+  if (uri) {
+    sprintf(uri, "%s%s", prefix, absolute);
+  }
+  return uri;
 }
 
 const char *extract_mod_name(Arena *arena, const char *abs_path) {
