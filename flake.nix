@@ -20,6 +20,7 @@
           packages = with nixpkgs.legacyPackages.${system}; [
             gdb
             clang-tools
+						valgrind
           ];
         };
       });
