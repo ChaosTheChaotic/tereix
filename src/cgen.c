@@ -7,6 +7,8 @@
 void gen_type(DataType type, StringBuilder *sb) {
   if (type.is_static)
     sb_append(sb, "static ");
+  if (type.is_threadlocal)
+    sb_append(sb, "_Thread_local ");
   if (type.is_extern)
     sb_append(sb, "extern ");
 
@@ -811,6 +813,9 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             if (!is_void) {
               DataType mut_type = block->eval_type;
               mut_type.is_mut = true;
+							mut_type.is_threadlocal = false;
+							mut_type.is_static = false;
+							mut_type.is_extern = false;
               gen_type(mut_type, sb);
               sb_append(sb, var_name);
               sb_append(sb, ";\n");
@@ -1682,6 +1687,9 @@ void lower_defers(AstNode *root, Arena *arena) {
           memset(ret_val_decl, 0, sizeof(AstNode));
           ret_val_decl->type = AST_VAR_DECL;
           ret_val_decl->as.var_decl.type = n->as.ret_stmt.expr->eval_type;
+          ret_val_decl->as.var_decl.type.is_threadlocal = false;
+          ret_val_decl->as.var_decl.type.is_static = false;
+          ret_val_decl->as.var_decl.type.is_extern = false;
 
           char *tmp_name = arena_alloc(arena, 64);
           sprintf(tmp_name, "_tx_ret_%zu", (size_t)(uintptr_t)n);
