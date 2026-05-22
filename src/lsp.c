@@ -108,15 +108,15 @@ AstNode *find_ident_at_pos(AstNode *root, unsigned int line, int character) {
 
     if (node->type == AST_IDENTIF) {
       Token t = node->as.identif.val;
-      if (t.line == target_line && character >= (int)t.col &&
-          character <= (int)(t.col + t.len)) {
+      if (t.line == target_line && character >= (int)t.col - 1 &&
+          character <= (int)(t.col - 1 + t.len)) {
         found = node;
         break;
       }
     } else if (node->type == AST_MEMBER) {
       Token t = node->as.member.name;
-      if (t.line == target_line && character >= (int)t.col &&
-          character <= (int)(t.col + t.len)) {
+      if (t.line == target_line && character >= (int)t.col - 1 &&
+          character <= (int)(t.col - 1 + t.len)) {
         found = node;
         break;
       }
@@ -126,7 +126,7 @@ AstNode *find_ident_at_pos(AstNode *root, unsigned int line, int character) {
       if (end.len == 0)
         end = node->as.use_stmt.path;
       if (start.line == target_line && character >= (int)start.col - 1 &&
-          character <= (int)(end.col + end.len)) {
+          character <= (int)(end.col - 1 + end.len)) {
         found = node;
         break;
       }
@@ -867,6 +867,9 @@ void handle_initialize(yyjson_val *params, yyjson_val *id) {
   yyjson_mut_arr_add_str(doc, sig_trigger, "(");
   yyjson_mut_arr_add_str(doc, sig_trigger, ",");
   yyjson_mut_obj_add_val(doc, sig_help, "triggerCharacters", sig_trigger);
+  yyjson_mut_val *retrigger = yyjson_mut_arr(doc);
+  yyjson_mut_arr_add_str(doc, retrigger, ",");
+  yyjson_mut_obj_add_val(doc, sig_help, "retriggerCharacters", retrigger);
   yyjson_mut_obj_add_val(doc, capabilities, "signatureHelpProvider", sig_help);
   yyjson_mut_obj_add_val(doc, capabilities, "completionProvider", comp_options);
   yyjson_mut_obj_add_val(doc, result, "capabilities", capabilities);
@@ -1298,12 +1301,28 @@ fallback_found:
       snprintf(param_label, sizeof(param_label), "%.*s %.*s", p_type.len,
                p_type.start, p_id.len, p_id.start);
 
+      int start_idx = offset;
+      int written = snprintf(sig_label + offset, sizeof(sig_label) - offset,
+                             "%s", param_label);
+      if (written > 0)
+        offset += written;
+      int end_idx = offset;
+
       yyjson_mut_val *p_obj = yyjson_mut_obj(jdoc);
-      yyjson_mut_obj_add_str(jdoc, p_obj, "label", param_label);
+      yyjson_mut_val *label_arr = yyjson_mut_arr(jdoc);
+
+      yyjson_mut_arr_add_int(jdoc, label_arr, start_idx);
+      yyjson_mut_arr_add_int(jdoc, label_arr, end_idx);
+      yyjson_mut_obj_add_val(jdoc, p_obj, "label", label_arr);
+
       yyjson_mut_arr_append(params_arr, p_obj);
 
-      offset += snprintf(sig_label + offset, sizeof(sig_label) - offset, "%s%s",
-                         param_label, param->next ? ", " : "");
+      if (param->next) {
+        written =
+            snprintf(sig_label + offset, sizeof(sig_label) - offset, ", ");
+        if (written > 0)
+          offset += written;
+      }
       param = param->next;
     }
 

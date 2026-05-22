@@ -1165,6 +1165,14 @@ bool parse_step(ParseCtx *ctx) {
       break;
     }
 
+    if (ctx->curr.type == TOKEN_EOF ||
+        (ctx->curr.type == TOKEN_PUNC &&
+         (*ctx->curr.start == ';' || *ctx->curr.start == '}'))) {
+      report_error(ctx, ctx->curr, "Unexpected token in function arguments");
+      recover_state(ctx, current_state);
+      break;
+    }
+
     push_state(ctx, STATE_IN_ARRAY_LIT);
     push_state(ctx, STATE_ARRAY_ELEMENT_DONE);
     ctx->expect_operand = true;
@@ -2193,8 +2201,23 @@ bool parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',') {
       adv(ctx);
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+        adv(ctx);
+        if (ctx->op_count > 0 &&
+            *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+          ctx->op_count--;
+        }
+        ctx->expect_operand = false;
+        push_state(ctx, STATE_IN_EXPR);
         break;
       }
+    }
+
+    if (ctx->curr.type == TOKEN_EOF ||
+        (ctx->curr.type == TOKEN_PUNC &&
+         (*ctx->curr.start == ';' || *ctx->curr.start == '}'))) {
+      report_error(ctx, ctx->curr, "Unexpected token in function arguments");
+      recover_state(ctx, current_state);
+      break;
     }
 
     push_state(ctx, STATE_IN_FUNC_ARGS);
