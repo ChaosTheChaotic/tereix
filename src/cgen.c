@@ -1433,6 +1433,442 @@ void flatten_sues(AstNode *root, Arena *arena) {
   free(stack);
 }
 
+AstNode *clone_ast(AstNode *root, Arena *arena) {
+  if (!root)
+    return NULL;
+
+  AstNode *new_root = arena_alloc(arena, sizeof(AstNode));
+  *new_root = *root;
+  new_root->next = NULL;
+
+  size_t cap = 256;
+  ClonePair *stack = malloc(sizeof(ClonePair) * cap);
+  size_t top = 0;
+  stack[top++] = (ClonePair){root, new_root};
+
+  while (top > 0) {
+    ClonePair p = stack[--top];
+    AstNode *src = p.src;
+    AstNode *dst = p.dst;
+
+// Macro to safely clone and push child nodes without recursion
+#define CLONE_CHILD(child_ptr)                                                 \
+  if (src->child_ptr) {                                                        \
+    dst->child_ptr = arena_alloc(arena, sizeof(AstNode));                      \
+    *dst->child_ptr = *src->child_ptr;                                         \
+    dst->child_ptr->next = NULL;                                               \
+    if (top >= cap) {                                                          \
+      cap *= 2;                                                                \
+      stack = realloc(stack, sizeof(ClonePair) * cap);                         \
+    }                                                                          \
+    stack[top++] = (ClonePair){src->child_ptr, dst->child_ptr};                \
+  }
+
+    CLONE_CHILD(next)
+
+    switch (src->type) {
+    case AST_PROGRAM:
+    case AST_BLOCK:
+      CLONE_CHILD(as.block.first_stmt);
+      break;
+    case AST_FUNC:
+      CLONE_CHILD(as.func_def.params);
+      CLONE_CHILD(as.func_def.block);
+      break;
+    case AST_VAR_DECL:
+      CLONE_CHILD(as.var_decl.init);
+      break;
+    case AST_BINOP:
+      CLONE_CHILD(as.binop.left);
+      CLONE_CHILD(as.binop.right);
+      break;
+    case AST_UOP:
+    case AST_ADDR_OF:
+    case AST_DEREF:
+      CLONE_CHILD(as.unop.operand);
+      break;
+    case AST_IF:
+      CLONE_CHILD(as.if_check.check);
+      CLONE_CHILD(as.if_check.action);
+      CLONE_CHILD(as.if_check.elseAct);
+      break;
+    case AST_WHILE:
+      CLONE_CHILD(as.while_loop.check);
+      CLONE_CHILD(as.while_loop.action);
+      break;
+    case AST_FOR:
+      CLONE_CHILD(as.for_loop.init);
+      CLONE_CHILD(as.for_loop.check);
+      CLONE_CHILD(as.for_loop.inc);
+      CLONE_CHILD(as.for_loop.action);
+      break;
+    case AST_FUNC_CALL:
+      CLONE_CHILD(as.func_call.caller);
+      CLONE_CHILD(as.func_call.args);
+      break;
+    case AST_ARRAY_LIT:
+      CLONE_CHILD(as.array_lit.elements);
+      break;
+    case AST_INDEX:
+      CLONE_CHILD(as.index.base);
+      CLONE_CHILD(as.index.index);
+      break;
+    case AST_MEMBER:
+      CLONE_CHILD(as.member.base);
+      break;
+    case AST_RET:
+      CLONE_CHILD(as.ret_stmt.expr);
+      break;
+    case AST_DEFER:
+      CLONE_CHILD(as.defer_stmt.contents);
+      break;
+    case AST_SWITCH:
+      CLONE_CHILD(as.switch_stmt.check);
+      CLONE_CHILD(as.switch_stmt.cases);
+      CLONE_CHILD(as.switch_stmt.default_case);
+      break;
+    case AST_CASE:
+      CLONE_CHILD(as.case_stmt.val);
+      CLONE_CHILD(as.case_stmt.action);
+      break;
+    case AST_EXTERN:
+      CLONE_CHILD(as.extern_block.contents);
+      break;
+    case AST_CAST:
+      CLONE_CHILD(as.cast.op);
+      break;
+    case AST_STRUCT:
+      CLONE_CHILD(as.struct_def.contents);
+      break;
+    case AST_UNION:
+      CLONE_CHILD(as.union_def.contents);
+      break;
+    case AST_ENUM:
+      CLONE_CHILD(as.enum_def.contents);
+      break;
+    case AST_ENUM_MEMBER:
+      CLONE_CHILD(as.enum_member.val);
+      break;
+    default:
+      break;
+    }
+#undef CLONE_CHILD
+  }
+  free(stack);
+  return new_root;
+}
+
+void lower_defers(AstNode *root, Arena *arena) {
+  if (!root)
+    return;
+
+  size_t cap = 1024;
+  LowerFrame *stack = malloc(sizeof(LowerFrame) * cap);
+  size_t top = 0;
+
+  AstNode **defers = malloc(sizeof(AstNode *) * 1024);
+  size_t defer_count = 0;
+
+  stack[top++] = (LowerFrame){root, 0, 0, 0, 0};
+
+  while (top > 0) {
+    LowerFrame *f = &stack[top - 1];
+    AstNode *n = f->node;
+
+    if (n->type == AST_FUNC) {
+      if (f->step == 0) {
+        f->func_base = defer_count;
+        f->step = 1;
+        if (n->as.func_def.block) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (LowerFrame){n->as.func_def.block, 0, f->func_base,
+                                      f->loop_base, defer_count};
+        }
+      } else {
+        top--;
+      }
+    } else if (n->type == AST_WHILE || n->type == AST_FOR) {
+      if (f->step == 0) {
+        f->loop_base = defer_count;
+        f->step = 1;
+        AstNode *body = (n->type == AST_WHILE) ? n->as.while_loop.action
+                                               : n->as.for_loop.action;
+        if (body) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] =
+              (LowerFrame){body, 0, f->func_base, f->loop_base, defer_count};
+        }
+      } else {
+        top--;
+      }
+    } else if (n->type == AST_BLOCK) {
+      if (f->step == 0) {
+        f->block_base = defer_count;
+
+        AstNode **ptr = &n->as.block.first_stmt;
+        while (*ptr) {
+          if ((*ptr)->type == AST_DEFER) {
+            defers[defer_count++] = *ptr;
+            *ptr = (*ptr)->next;
+          } else {
+            ptr = &(*ptr)->next;
+          }
+        }
+
+        f->step = 1;
+
+        AstNode *stmt = n->as.block.first_stmt;
+        size_t count = 0;
+        while (stmt) {
+          count++;
+          stmt = stmt->next;
+        }
+        if (count > 0) {
+          AstNode **arr = malloc(sizeof(AstNode *) * count);
+          stmt = n->as.block.first_stmt;
+          for (size_t i = 0; i < count; i++) {
+            arr[i] = stmt;
+            stmt = stmt->next;
+          }
+          for (int i = count - 1; i >= 0; i--) {
+            if (top >= cap) {
+              cap *= 2;
+              stack = realloc(stack, sizeof(LowerFrame) * cap);
+              f = &stack[top - 1];
+            }
+            stack[top++] = (LowerFrame){arr[i], 0, f->func_base, f->loop_base,
+                                        defer_count};
+          }
+          free(arr);
+        }
+      } else if (f->step == 1) {
+        AstNode *tail = n->as.block.first_stmt;
+        while (tail && tail->next)
+          tail = tail->next;
+
+        // Inject block-specific defers at the very end of the block
+        for (size_t i = defer_count; i > f->block_base; i--) {
+          AstNode *cloned =
+              clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
+          if (!n->as.block.first_stmt)
+            n->as.block.first_stmt = cloned;
+          else
+            tail->next = cloned;
+          while (tail->next)
+            tail = tail->next;
+        }
+        defer_count = f->block_base;
+        top--;
+      }
+    } else if (n->type == AST_RET) {
+      if (defer_count > f->func_base) {
+        AstNode *blk = arena_alloc(arena, sizeof(AstNode));
+        memset(blk, 0, sizeof(AstNode));
+        blk->type = AST_BLOCK;
+
+        AstNode *ret_val_decl = NULL;
+        AstNode *ret_val_ident = NULL;
+
+        if (n->as.ret_stmt.expr) {
+          ret_val_decl = arena_alloc(arena, sizeof(AstNode));
+          memset(ret_val_decl, 0, sizeof(AstNode));
+          ret_val_decl->type = AST_VAR_DECL;
+          ret_val_decl->as.var_decl.type = n->as.ret_stmt.expr->eval_type;
+
+          char *tmp_name = arena_alloc(arena, 64);
+          sprintf(tmp_name, "_tx_ret_%zu", (size_t)(uintptr_t)n);
+          ret_val_decl->as.var_decl.id = (Token){
+              tmp_name, (unsigned int)strlen(tmp_name), TOKEN_IDENTIF, 0, 0};
+          ret_val_decl->as.var_decl.init = n->as.ret_stmt.expr;
+
+          ret_val_ident = arena_alloc(arena, sizeof(AstNode));
+          memset(ret_val_ident, 0, sizeof(AstNode));
+          ret_val_ident->type = AST_IDENTIF;
+          ret_val_ident->as.identif.val = ret_val_decl->as.var_decl.id;
+        }
+
+        AstNode *tail = NULL;
+        if (ret_val_decl) {
+          blk->as.block.first_stmt = ret_val_decl;
+          tail = ret_val_decl;
+        }
+
+        for (size_t i = defer_count; i > f->func_base; i--) {
+          AstNode *cloned =
+              clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
+          if (!blk->as.block.first_stmt)
+            blk->as.block.first_stmt = cloned;
+          else
+            tail->next = cloned;
+          while (tail->next)
+            tail = tail->next;
+        }
+
+        AstNode *new_ret = arena_alloc(arena, sizeof(AstNode));
+        memset(new_ret, 0, sizeof(AstNode));
+        new_ret->type = AST_RET;
+        new_ret->as.ret_stmt.expr = ret_val_ident;
+
+        if (!blk->as.block.first_stmt)
+          blk->as.block.first_stmt = new_ret;
+        else
+          tail->next = new_ret;
+
+        AstNode *nxt = n->next;
+        *n = *blk;
+        n->next = nxt;
+      }
+      top--;
+    } else if (n->type == AST_BREAK || n->type == AST_CONTINUE) {
+      if (defer_count > f->loop_base) {
+        AstNode *blk = arena_alloc(arena, sizeof(AstNode));
+        memset(blk, 0, sizeof(AstNode));
+        blk->type = AST_BLOCK;
+        AstNode *tail = NULL;
+
+        for (size_t i = defer_count; i > f->loop_base; i--) {
+          AstNode *cloned =
+              clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
+          if (!blk->as.block.first_stmt)
+            blk->as.block.first_stmt = cloned;
+          else
+            tail->next = cloned;
+          while (tail->next)
+            tail = tail->next;
+        }
+
+        AstNode *new_ctrl = arena_alloc(arena, sizeof(AstNode));
+        memset(new_ctrl, 0, sizeof(AstNode));
+        new_ctrl->type = n->type;
+        if (n->type == AST_BREAK)
+          new_ctrl->as.break_stmt = n->as.break_stmt;
+        else
+          new_ctrl->as.continue_stmt = n->as.continue_stmt;
+
+        if (!blk->as.block.first_stmt)
+          blk->as.block.first_stmt = new_ctrl;
+        else
+          tail->next = new_ctrl;
+
+        AstNode *nxt = n->next;
+        *n = *blk;
+        n->next = nxt;
+      }
+      top--;
+    } else if (n->type == AST_IF) {
+      if (f->step == 0) {
+        f->step = 1;
+        if (n->as.if_check.elseAct) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (LowerFrame){n->as.if_check.elseAct, 0, f->func_base,
+                                      f->loop_base, f->block_base};
+        }
+        if (n->as.if_check.action) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (LowerFrame){n->as.if_check.action, 0, f->func_base,
+                                      f->loop_base, f->block_base};
+        }
+      } else {
+        top--;
+      }
+    } else if (n->type == AST_SWITCH) {
+      if (f->step == 0) {
+        f->step = 1;
+        if (n->as.switch_stmt.default_case) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] =
+              (LowerFrame){n->as.switch_stmt.default_case, 0, f->func_base,
+                           f->loop_base, f->block_base};
+        }
+        AstNode *c = n->as.switch_stmt.cases;
+        while (c) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] =
+              (LowerFrame){c, 0, f->func_base, f->loop_base, f->block_base};
+          c = c->next;
+        }
+      } else {
+        top--;
+      }
+    } else if (n->type == AST_CASE) {
+      if (f->step == 0) {
+        f->step = 1;
+        if (n->as.case_stmt.action) {
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] = (LowerFrame){n->as.case_stmt.action, 0, f->func_base,
+                                      f->loop_base, f->block_base};
+        }
+      } else {
+        top--;
+      }
+    } else if (n->type == AST_PROGRAM || n->type == AST_EXTERN) {
+      if (f->step == 0) {
+        f->step = 1;
+        AstNode *stmt = (n->type == AST_PROGRAM) ? n->as.block.first_stmt
+                                                 : n->as.extern_block.contents;
+        size_t count = 0;
+        while (stmt) {
+          count++;
+          stmt = stmt->next;
+        }
+        if (count > 0) {
+          AstNode **arr = malloc(sizeof(AstNode *) * count);
+          stmt = (n->type == AST_PROGRAM) ? n->as.block.first_stmt
+                                          : n->as.extern_block.contents;
+          for (size_t i = 0; i < count; i++) {
+            arr[i] = stmt;
+            stmt = stmt->next;
+          }
+          for (int i = count - 1; i >= 0; i--) {
+            if (top >= cap) {
+              cap *= 2;
+              stack = realloc(stack, sizeof(LowerFrame) * cap);
+              f = &stack[top - 1];
+            }
+            stack[top++] = (LowerFrame){arr[i], 0, f->func_base, f->loop_base,
+                                        f->block_base};
+          }
+          free(arr);
+        }
+      } else {
+        top--;
+      }
+    } else {
+      top--;
+    }
+  }
+  free(stack);
+  free(defers);
+}
+
 bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
                              const char **flags, int flag_count, Arena *arena,
                              Module *main_mod) {
@@ -1460,6 +1896,7 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
 
       if (mod != main_mod)
         mangle_mod_symbols(arena, mod);
+      lower_defers(mod->ast_root, arena);
       flatten_sues(mod->ast_root, arena);
 
       HashMap *local_funcs = build_func_map(arena, mod->ast_root);

@@ -18,6 +18,19 @@ typedef struct {
   Token sue;
 } FlattenFrame;
 
+typedef struct { 
+    AstNode *src; 
+    AstNode *dst; 
+} ClonePair;
+
+typedef struct {
+  AstNode *node;
+  int step;
+  size_t func_base;
+  size_t loop_base;
+  size_t block_base;
+} LowerFrame;
+
 HashMap *build_func_map(Arena *arena, AstNode *root);
 bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
                              const char **flags, int flag_count, Arena *arena,
