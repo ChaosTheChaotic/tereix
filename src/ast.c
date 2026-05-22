@@ -54,7 +54,7 @@ void append_stmt(AstNode **head, AstNode *new_stmt) {
 }
 
 AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath,
-                    DiagList *diag_list) {
+                    DiagList *diag_list, bool partial) {
   LexCtx lex = {0};
   lex.start = (char *)file;
   lex.curr = (char *)file;
@@ -83,19 +83,19 @@ AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath,
   free(pctx.node_stack);
   free(pctx.op_stack);
 
-  if (!success) {
+  if (!success && !partial) {
     return NULL;
   }
   return root;
 }
 
-AstNode *file_to_ast(Arena *arena, const char *path) {
+AstNode *file_to_ast(Arena *arena, const char *path, bool partial) {
   const char *file = load_file(path);
   if (!file)
     return NULL;
   DiagList diags;
   diaglist_init(&diags, 1024);
-  AstNode *root = str_to_ast(arena, file, path, &diags);
+  AstNode *root = str_to_ast(arena, file, path, &diags, partial);
   diaglist_free(&diags);
   return root;
 }

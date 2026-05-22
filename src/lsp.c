@@ -277,7 +277,7 @@ ResolvedNode resolve_node_to_decl(AstNode *ident, Arena *tmp_arena) {
       } else if (tmp_arena) {
         // Fall back to reading straight off the disk if the document is not
         // open
-        ast_root = file_to_ast(tmp_arena, mod_fpath);
+        ast_root = file_to_ast(tmp_arena, mod_fpath, true);
       }
 
       if (ast_root) {
@@ -957,7 +957,7 @@ void compile_doc(Doc *doc) {
     return;
   }
 
-  AstNode *root = str_to_ast(doc->ast_arena, doc->txt, abspath, &diags);
+  AstNode *root = str_to_ast(doc->ast_arena, doc->txt, abspath, &diags, true);
 
   if (root) {
     SemCtx sem = {0};
@@ -987,10 +987,10 @@ void compile_doc(Doc *doc) {
         if (open_doc) {
           // Pass null for diags to avoid displaying external syntax errors in
           // the current file
-          ast = str_to_ast(doc->ast_arena, open_doc->txt, curr_abs, NULL);
+          ast = str_to_ast(doc->ast_arena, open_doc->txt, curr_abs, NULL, true);
         } else {
           // Fall back to reading straight off the disk
-          ast = file_to_ast(doc->ast_arena, curr_abs);
+          ast = file_to_ast(doc->ast_arena, curr_abs, true);
         }
       }
 

@@ -268,7 +268,7 @@ void write_ast(const char *path);
 
 void append_stmt(AstNode **head, AstNode *new_stmt);
 
-AstNode *file_to_ast(Arena *arena, const char *path);
-AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath, DiagList *diag_list);
+AstNode *file_to_ast(Arena *arena, const char *path, bool partial);
+AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath, DiagList *diag_list, bool partial);
 
 #endif // !AST_TYPES_H
