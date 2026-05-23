@@ -1046,6 +1046,24 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         DataType left_t = node->as.binop.left->eval_type;
         DataType right_t = node->as.binop.right->eval_type;
 
+        bool is_assign = (node->as.binop.op.type == TOKEN_ASSIGN);
+
+        if (!is_assign && node->as.binop.op.type != TOKEN_COMPARE &&
+            node->as.binop.op.len >= 2) {
+          if (node->as.binop.op.start[node->as.binop.op.len - 1] == '=') {
+            is_assign = true;
+          }
+        }
+
+        if (is_assign && !left_t.is_mut) {
+          Token err_tok = get_expr_token(node->as.binop.left);
+          if (err_tok.len == 0)
+            err_tok = node->as.binop.op;
+          sem_report(ctx, DIAG_ERROR, err_tok,
+                     "Cannot mutate immutable variable '%.*s'", err_tok.len,
+                     err_tok.start);
+        }
+
         if (node->as.binop.op.start[0] == '/') {
           AstNode *right = node->as.binop.right;
 
@@ -1216,6 +1234,18 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         if (node->as.unop.operand) {
           node->eval_type = node->as.unop.operand->eval_type;
         }
+        Token op = node->as.unop.op;
+        if (op.len == 2 && (strncmp(op.start, "++", 2) == 0 ||
+                            strncmp(op.start, "--", 2) == 0)) {
+          if (!node->eval_type.is_mut) {
+            Token err_tok = get_expr_token(node->as.unop.operand);
+            if (err_tok.len == 0)
+              err_tok = op;
+            sem_report(ctx, DIAG_ERROR, err_tok,
+                       "Cannot mutate immutable variable '%.*s' using '%.*s'",
+                       err_tok.len, err_tok.start, op.len, op.start);
+          }
+        }
         break;
       case AST_MEMBER: {
         if (node->as.member.base) {
@@ -1223,8 +1253,9 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           if (base_t.name.len > 0) {
             node->as.member.type = base_t.name;
           }
+          node->eval_type = create_basic_type("any");
+          node->eval_type.is_mut = base_t.is_mut;
         }
-        node->eval_type = create_basic_type("any");
         break;
       }
       default:
