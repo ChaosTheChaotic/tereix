@@ -9,6 +9,7 @@ struct Hello {
 
 extern {
 	extern mut *void malloc(size size);
+	i32 puts(str s);
 }
 
 inline i32 add(i32 x, i32 y) {
