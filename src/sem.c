@@ -678,6 +678,43 @@ DataType create_basic_type(const char *name_str) {
 static DataType EXPECT_BOOL = {
     .name = {.start = "bool", .len = 4, .type = TOKEN_IDENTIF}};
 
+static Token get_expr_token(AstNode *node) {
+  if (!node)
+    return (Token){0};
+  switch (node->type) {
+  case AST_IDENTIF:
+    return node->as.identif.val;
+  case AST_NUM_LIT:
+    return node->as.num_lit.val;
+  case AST_STR_LIT:
+    return node->as.str_lit.val;
+  case AST_CHAR_LIT:
+    return node->as.char_lit.val;
+  case AST_BOOL_LIT:
+    return node->as.bool_lit.val;
+  case AST_NULL_LIT:
+    return node->as.null_lit.val;
+  case AST_BINOP:
+    return get_expr_token(node->as.binop.left);
+  case AST_UOP:
+    return get_expr_token(node->as.unop.operand);
+  case AST_ADDR_OF:
+    return get_expr_token(node->as.unop.operand);
+  case AST_DEREF:
+    return get_expr_token(node->as.unop.operand);
+  case AST_FUNC_CALL:
+    return get_expr_token(node->as.func_call.caller);
+  case AST_MEMBER:
+    return get_expr_token(node->as.member.base);
+  case AST_INDEX:
+    return get_expr_token(node->as.index.base);
+  case AST_CAST:
+    return get_expr_token(node->as.cast.op);
+  default:
+    return (Token){0};
+  }
+}
+
 void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
   if (!root)
     return;
@@ -1082,6 +1119,47 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
             node->eval_type.is_custom = true;
           } else {
             node->eval_type = create_basic_type("any");
+          }
+          if (sym->kind == SYM_FUNC) {
+            AstNode *func_decl = sym->decl_node;
+            AstNode *param = func_decl->as.func_def.params;
+            AstNode *arg = node->as.func_call.args;
+
+            // Count arguments and parameters
+            int arg_count = 0, param_count = 0;
+            for (AstNode *a = arg; a; a = a->next)
+              arg_count++;
+            for (AstNode *p = param; p; p = p->next)
+              param_count++;
+
+            if (arg_count != param_count) {
+              sem_report(ctx, DIAG_ERROR,
+                         node->as.func_call.caller->as.identif.val,
+                         "Function '%.*s' expects %d argument(s), got %d",
+                         node->as.func_call.caller->as.identif.val.len,
+                         node->as.func_call.caller->as.identif.val.start,
+                         param_count, arg_count);
+            } else {
+              // Check each argument type against the corresponding parameter
+              param = func_decl->as.func_def.params;
+              arg = node->as.func_call.args;
+              while (arg && param) {
+                DataType expected = param->as.fn_param.type;
+                DataType actual = arg->eval_type;
+                if (!is_type_compatible(expected, actual, false)) {
+                  Token err_tok = get_expr_token(arg);
+                  if (err_tok.len == 0)
+                    err_tok = node->as.func_call.caller->as.identif.val;
+                  sem_report(
+                      ctx, DIAG_ERROR, err_tok,
+                      "Argument type mismatch: expected '%.*s', got '%.*s'",
+                      expected.name.len, expected.name.start, actual.name.len,
+                      actual.name.start);
+                }
+                arg = arg->next;
+                param = param->next;
+              }
+            }
           }
         } else if (node->as.func_call.caller->type == AST_MEMBER) {
           node->eval_type = create_basic_type("any");
