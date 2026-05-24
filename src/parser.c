@@ -1035,6 +1035,7 @@ bool parse_step(ParseCtx *ctx) {
           sz_node->as.sizeof_expr.is_type = false;
           push_node(ctx, sz_node);
 
+          push_state(ctx, STATE_IN_EXPR);
           push_state(ctx, STATE_SIZEOF_EXPR_DONE);
           ctx->expect_operand = true;
           push_state(ctx, STATE_IN_EXPR);
@@ -1564,8 +1565,23 @@ bool parse_step(ParseCtx *ctx) {
       break;
     }
 
+    bool is_expr_start = false;
     if (ctx->curr.type == TOKEN_IDENTIF || is_lit_type(ctx->curr.type) ||
         ctx->curr.type == TOKEN_OP) {
+      is_expr_start = true;
+    } else if (ctx->curr.type == TOKEN_KW) {
+      if (strncmp(ctx->curr.start, "sizeof", 6) == 0 ||
+          strncmp(ctx->curr.start, "null", 4) == 0 ||
+          is_builtin_type_kw(ctx, ctx->curr)) {
+        is_expr_start = true;
+      }
+    } else if (ctx->curr.type == TOKEN_PUNC) {
+      if (*ctx->curr.start == '(' || *ctx->curr.start == '[') {
+        is_expr_start = true;
+      }
+    }
+
+    if (is_expr_start) {
       push_state(ctx, STATE_EXPR_STMT_DONE);
       push_state(ctx, STATE_IN_EXPR);
     } else {

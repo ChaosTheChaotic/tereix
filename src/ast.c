@@ -22,6 +22,9 @@ void init_lex_maps(LexCtx *ctx, Arena *arena) {
 
   for (size_t i = 0; i < typelistlen; i++)
     map_set(&ctx->type_kw_map, typelist[i], strlen(typelist[i]), (void *)1);
+
+	// Its not technically a keyword but its an inbuilt function
+  map_set(&ctx->kw_map, "sizeof", 6, (void *)1);
 }
 
 AstNode *new_node(Arena *arena, ASTN_TYPE type) {
@@ -96,6 +99,13 @@ AstNode *file_to_ast(Arena *arena, const char *path, bool partial) {
   DiagList diags;
   diaglist_init(&diags, 1024);
   AstNode *root = str_to_ast(arena, file, path, &diags, partial);
+  if (!partial) {
+    for (size_t i = 0; i < diags.count; i++) {
+      printf("Error on %u:%u in file %s: %s\n", diags.items[i].start_line,
+             diags.items[i].start_char, diags.items[i].file,
+             diags.items[i].message);
+    }
+  }
   diaglist_free(&diags);
   return root;
 }

@@ -425,7 +425,7 @@ void compile_project(const char *entry_file) {
     printf("Compiling %s\n", abs_path);
     AstNode *ast = file_to_ast(&arena, abs_path, false);
     if (!ast) {
-      fprintf(stderr, "No ast found after trying to parse %s", abs_path);
+      fprintf(stderr, "No ast found after trying to parse %s\n", abs_path);
       exit(1);
     }
 
