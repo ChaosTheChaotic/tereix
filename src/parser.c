@@ -1004,6 +1004,51 @@ bool parse_step(ParseCtx *ctx) {
       break;
     }
 
+    if (ctx->curr.type == TOKEN_KW && ctx->curr.len == 6 &&
+        strncmp(ctx->curr.start, "sizeof", 6) == 0) {
+
+      adv(ctx);
+
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
+        adv(ctx);
+
+        AstNode *sz_node = new_node(ctx->arena, AST_SIZEOF);
+
+        if (is_type(ctx)) {
+          sz_node->as.sizeof_expr.is_type = true;
+          sz_node->as.sizeof_expr.target_type = parse_type(ctx);
+
+          if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+            adv(ctx);
+            push_node(ctx, sz_node);
+            ctx->expect_operand = false;
+            push_state(ctx, STATE_IN_EXPR);
+            break;
+          } else {
+            report_error(ctx, ctx->curr, "Expected ')' after sizeof type");
+            adv(ctx);
+            sync(ctx);
+            recover_state(ctx, current_state);
+            break;
+          }
+        } else {
+          sz_node->as.sizeof_expr.is_type = false;
+          push_node(ctx, sz_node);
+
+          push_state(ctx, STATE_SIZEOF_EXPR_DONE);
+          ctx->expect_operand = true;
+          push_state(ctx, STATE_IN_EXPR);
+          break;
+        }
+      } else {
+        report_error(ctx, ctx->curr, "Expected '(' after sizeof");
+        adv(ctx);
+        sync(ctx);
+        recover_state(ctx, current_state);
+        break;
+      }
+    }
+
     if (ctx->curr.type == TOKEN_IDENTIF || is_lit_type(ctx->curr.type) ||
         (ctx->curr.type == TOKEN_KW &&
          strncmp(ctx->curr.start, "null", 4) == 0) ||
@@ -1131,6 +1176,24 @@ bool parse_step(ParseCtx *ctx) {
     adv(ctx);
     sync(ctx);
     recover_state(ctx, current_state);
+    break;
+  }
+
+  case STATE_SIZEOF_EXPR_DONE: {
+    AstNode *expr = pop_node(ctx);
+    AstNode *sz_node = ctx->node_stack[ctx->node_count - 1];
+    sz_node->as.sizeof_expr.target_expr = expr;
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+      adv(ctx);
+      ctx->expect_operand = false;
+    } else {
+      report_error(ctx, ctx->curr, "Expected ')' after sizeof expression");
+      adv(ctx);
+      sync(ctx);
+      recover_state(ctx, current_state);
+      break;
+    }
     break;
   }
 

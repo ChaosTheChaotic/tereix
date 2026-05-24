@@ -655,6 +655,13 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
       break;
     }
 
+    case AST_SIZEOF: {
+      if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr) {
+        PUSH_TRAV(node->as.sizeof_expr.target_expr, ACTION_VISIT_NODE);
+      }
+      break;
+    }
+
     default:
       break;
     }
@@ -966,6 +973,12 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         }
         break;
       }
+      case AST_SIZEOF:
+        if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr) {
+          stack[top++] = (TCItem){node->as.sizeof_expr.target_expr,
+                                  TC_VISIT_CHILDREN, NULL, item.curr_func};
+        }
+        break;
       default:
         break;
       }
@@ -1258,6 +1271,9 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         }
         break;
       }
+      case AST_SIZEOF:
+        node->eval_type = create_basic_type("size");
+        break;
       default:
         break;
       }

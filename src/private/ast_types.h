@@ -40,6 +40,7 @@ typedef enum {
   AST_BREAK,
   AST_CONTINUE,
   AST_CAST,
+  AST_SIZEOF,
   AST_PROGRAM, // The root node
 } ASTN_TYPE;
 
@@ -186,6 +187,11 @@ typedef struct AstNode {
       DataType target;
       struct AstNode *op;
     } cast;
+    struct {
+      bool is_type;
+      DataType target_type;
+      struct AstNode *target_expr;
+    } sizeof_expr;
   } as;
 } AstNode;
 

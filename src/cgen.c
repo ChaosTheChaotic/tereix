@@ -84,7 +84,8 @@ bool is_c_expr(AstNode *n) {
          n->type == AST_INDEX || n->type == AST_CAST ||
          n->type == AST_BOOL_LIT || n->type == AST_CHAR_LIT ||
          n->type == AST_NULL_LIT || n->type == AST_ARRAY_LIT ||
-         n->type == AST_ADDR_OF || n->type == AST_DEREF;
+         n->type == AST_ADDR_OF || n->type == AST_DEREF ||
+         n->type == AST_SIZEOF;
 }
 
 void inject_yield_assignments(AstNode *node, const char *var_name,
@@ -1057,6 +1058,27 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
     } else if (n->type == AST_CONTINUE) {
       sb_append(sb, "continue;\n");
       top--;
+    } else if (n->type == AST_SIZEOF) {
+      if (f->step == 0) {
+        sb_append(sb, "sizeof(");
+        if (n->as.sizeof_expr.is_type) {
+          gen_type(n->as.sizeof_expr.target_type, sb);
+          sb_append(sb, ")");
+          top--;
+        } else {
+          f->step = 1;
+          if (top >= cap) {
+            cap *= 2;
+            stack = realloc(stack, sizeof(IterFrame) * cap);
+            f = &stack[top - 1];
+          }
+          stack[top++] =
+              (IterFrame){n->as.sizeof_expr.target_expr, 0, NULL, NULL, 2};
+        }
+      } else if (f->step == 1) {
+        sb_append(sb, ")");
+        top--;
+      }
     } else {
       top--;
     }
@@ -1553,6 +1575,9 @@ AstNode *clone_ast(AstNode *root, Arena *arena) {
       break;
     case AST_ENUM_MEMBER:
       CLONE_CHILD(as.enum_member.val);
+      break;
+    case AST_SIZEOF:
+      CLONE_CHILD(as.sizeof_expr.target_expr);
       break;
     default:
       break;

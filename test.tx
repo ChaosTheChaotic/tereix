@@ -132,6 +132,7 @@ u8 main(u32 argc, str[] argv) {
 	defer rarray = null;
 
 	putchar((char){b+(i8)'0'});
+	putchar((char){sizeof(Xexor)+(i8)'0'});
 
 	ret (u8)b;
 }
