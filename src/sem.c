@@ -286,18 +286,20 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
 
     if (is_valid) {
       if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
-        sem_report(ctx, DIAG_ERROR, name,
-                   "Error: Symbol '%.*s' already defined in module %s",
-                   name.len, name.start, mod->mod_name);
-        return false;
-      }
+        Sym *existing = map_get(&mod->local_symbols, name.start, name.len);
 
-      if (map_get(&mod->imported_mods, name.start, name.len) != NULL) {
-        sem_report(ctx, DIAG_ERROR, name,
-                   "Error: Symbol '%.*s' conflicts with an imported module or "
-                   "alias in mod %s\n",
-                   name.len, name.start, mod->mod_name);
-        return false;
+        bool is_existing_opaque =
+            (existing->decl_node->type == AST_STRUCT &&
+             !existing->decl_node->as.struct_def.contents) ||
+            (existing->decl_node->type == AST_UNION &&
+             !existing->decl_node->as.union_def.contents);
+
+        if (!is_existing_opaque) {
+          sem_report(ctx, DIAG_ERROR, name,
+                     "Error: Symbol '%.*s' already defined in module %s",
+                     name.len, name.start, mod->mod_name);
+          return false;
+        }
       }
       Sym *sym = new_sym(arena, kind, name, stmt, mod->abs_path);
       map_set(&mod->local_symbols, name.start, name.len, sym);

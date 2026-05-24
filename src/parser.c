@@ -561,6 +561,7 @@ bool parse_step(ParseCtx *ctx) {
   switch (current_state) {
   case STATE_IN_EXTERN_BLOCK:
   case STATE_GLOBAL: {
+    bool is_extern = (current_state == STATE_IN_EXTERN_BLOCK);
     AstNode *container = ctx->node_stack[ctx->node_count - 1];
     AstNode **target_list = (container->type == AST_EXTERN)
                                 ? &container->as.extern_block.contents
@@ -576,6 +577,11 @@ bool parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_KW &&
         strncmp(ctx->curr.start, "extern", 6) == 0) {
       Token next = peek_token(ctx);
+      if (next.type == TOKEN_KW && (strncmp(next.start, "struct", 6) == 0 ||
+                                    strncmp(next.start, "union", 5) == 0)) {
+        is_extern = true;
+        adv(ctx);
+      }
       if (next.type == TOKEN_PUNC && *next.start == '{') {
         adv(ctx);
         adv(ctx);
@@ -599,6 +605,13 @@ bool parse_step(ParseCtx *ctx) {
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
           ctx->ag_depth++;
+        } else if (is_extern && ctx->curr.type == TOKEN_PUNC &&
+                   *ctx->curr.start == ';') {
+          adv(ctx);
+          snode->as.struct_def.contents = NULL;
+          append_stmt(target_list, snode);
+          push_state(ctx, current_state);
+          break;
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after struct name");
           adv(ctx);
@@ -619,6 +632,13 @@ bool parse_step(ParseCtx *ctx) {
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
           ctx->ag_depth++;
+        } else if (is_extern && ctx->curr.type == TOKEN_PUNC &&
+                   *ctx->curr.start == ';') {
+          adv(ctx);
+          unode->as.struct_def.contents = NULL;
+          append_stmt(target_list, unode);
+          push_state(ctx, current_state);
+          break;
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after union name");
           adv(ctx);

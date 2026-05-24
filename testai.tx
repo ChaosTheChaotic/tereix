@@ -12,6 +12,8 @@ extern {
 	i32 puts(str s);
 }
 
+extern struct exstruct;
+
 inline i32 add(i32 x, i32 y) {
 	ret x + y;
 }

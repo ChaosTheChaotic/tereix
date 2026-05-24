@@ -946,6 +946,9 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       bool is_enum = (n->type == AST_ENUM);
       bool is_nested = n->is_nested_sue;
 
+      bool is_opaque = (n->type == AST_STRUCT && !n->as.struct_def.contents) ||
+                       (n->type == AST_UNION && !n->as.union_def.contents);
+
       if (f->step == 0) {
         if (is_nested) {
           sb_append(sb, is_enum                   ? "enum {\n"
@@ -955,6 +958,17 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           Token tag = is_enum                   ? n->as.enum_def.enumn
                       : (n->type == AST_STRUCT) ? n->as.struct_def.structn
                                                 : n->as.union_def.unionn;
+
+          if (is_opaque && !is_enum) {
+            sb_append(sb, "typedef ");
+            sb_append(sb, (n->type == AST_STRUCT) ? "struct " : "union ");
+            sb_append_len(sb, tag.start, tag.len);
+            sb_append(sb, " ");
+            sb_append_len(sb, tag.start, tag.len);
+            sb_append(sb, ";\n");
+						top--;
+						continue;
+          }
 
           if (is_enum) {
             sb_append(sb, "typedef enum ");
@@ -2008,7 +2022,8 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
 
     if (stmt->type == AST_FUNC && !stmt->as.func_def.is_extern) {
       old_tok = &stmt->as.func_def.fn_name;
-    } else if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
+    } else if ((stmt->type == AST_STRUCT && stmt->as.struct_def.contents) ||
+               (stmt->type == AST_UNION && stmt->as.union_def.contents) ||
                stmt->type == AST_ENUM) {
       old_tok = (stmt->type == AST_STRUCT)  ? &stmt->as.struct_def.structn
                 : (stmt->type == AST_UNION) ? &stmt->as.union_def.unionn
