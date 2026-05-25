@@ -1058,6 +1058,8 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         }
         break;
       case AST_BINOP: {
+        if (!node->as.binop.left || !node->as.binop.right)
+          break;
         DataType left_t = node->as.binop.left->eval_type;
         DataType right_t = node->as.binop.right->eval_type;
 
@@ -1139,7 +1141,8 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         }
         break;
       case AST_FUNC_CALL:
-        if (node->as.func_call.caller->type == AST_IDENTIF &&
+        if (node->as.func_call.caller &&
+            node->as.func_call.caller->type == AST_IDENTIF &&
             node->as.func_call.caller->as.identif.res_sm &&
             node->as.func_call.caller->as.identif.res_sm->decl_node) {
 

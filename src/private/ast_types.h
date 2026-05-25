@@ -252,7 +252,7 @@ static const char *complist[] = {"==", "!=", "<=", ">=", "<", ">"};
 static const size_t complistlen = sizeof(complist) / sizeof(complist[0]);
 
 static const char *typelist[] = {
-    SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT) "mut",
+    SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT)
     "size",
     "bool",
     "str", // Technically should be parsed as char[] but oh well

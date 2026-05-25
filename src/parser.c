@@ -337,11 +337,10 @@ void sync(ParseCtx *ctx) {
     }
 
     if (ctx->curr.type == TOKEN_KW) {
-      const char *kw = ctx->curr.start;
-      size_t len = ctx->curr.len;
-      if (strncmp(kw, "struct", len) == 0 || strncmp(kw, "enum", len) == 0 ||
-          strncmp(kw, "extern", len) == 0 || strncmp(kw, "u8", len) == 0 ||
-          strncmp(kw, "i32", len) == 0 || strncmp(kw, "void", len) == 0) {
+      if (map_get(&ctx->lex->type_kw_map, ctx->curr.start, ctx->curr.len) ||
+          (strncmp(ctx->curr.start, "struct", ctx->curr.len) == 0) ||
+          (strncmp(ctx->curr.start, "enum", ctx->curr.len) == 0) ||
+          (strncmp(ctx->curr.start, "extern", ctx->curr.len) == 0)) {
         ctx->panic_mode = false;
         return;
       }

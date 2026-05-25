@@ -15,6 +15,24 @@ extern Module *sem_main_mod;
 
 static LspState server_state = {.state = UNINITIALIZED};
 
+size_t token_to_buf(Token t, char *buf, size_t buf_size) {
+  if (!t.start || t.len == 0 || buf_size == 0) {
+    if (buf_size > 0)
+      buf[0] = '\0';
+    return 0;
+  }
+  // Find first null byte within the token length
+  size_t actual_len = strnlen(t.start, t.len);
+  if (actual_len == 0) {
+    buf[0] = '\0';
+    return 0;
+  }
+  size_t copy_len = actual_len < buf_size - 1 ? actual_len : buf_size - 1;
+  memcpy(buf, t.start, copy_len);
+  buf[copy_len] = '\0';
+  return copy_len;
+}
+
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -737,53 +755,422 @@ empty_response: {
 }
 }
 
+void add_completion_item(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
+                         const char *label, int kind, const char *detail) {
+  yyjson_mut_val *item = yyjson_mut_obj(jdoc);
+
+  yyjson_mut_obj_add_val(jdoc, item, "label", yyjson_mut_strcpy(jdoc, label));
+  yyjson_mut_obj_add_int(jdoc, item, "kind", kind);
+
+  if (detail) {
+    yyjson_mut_obj_add_val(jdoc, item, "detail",
+                           yyjson_mut_strcpy(jdoc, detail));
+  }
+  yyjson_mut_arr_append(arr, item);
+}
+
+void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
+                           AstNode *func_node, int target_line) {
+  if (!func_node || func_node->type != AST_FUNC)
+    return;
+
+  AstNode *param = func_node->as.func_def.params;
+  while (param && param->type == AST_PARAM) {
+    Token id = param->as.fn_param.id;
+    if (id.len > 0 && id.line <= (unsigned int)target_line) {
+      char name_buf[256];
+      snprintf(name_buf, sizeof(name_buf), "%.*s", (int)id.len, id.start);
+      add_completion_item(jdoc, arr, name_buf, 6, "parameter");
+    }
+    param = param->next;
+  }
+
+  if (!func_node->as.func_def.block)
+    return;
+
+  size_t cap = 256;
+  AstNode **stack = malloc(sizeof(AstNode *) * cap);
+  size_t top = 0;
+  stack[top++] = func_node->as.func_def.block;
+
+  while (top > 0) {
+    AstNode *node = stack[--top];
+    if (!node)
+      continue;
+
+    if (node->type == AST_VAR_DECL) {
+      Token id = node->as.var_decl.id;
+      // Only suggest variables declared BEFORE or ON the cursor line
+      if (id.line <= (unsigned int)target_line) {
+        char name_buf[256];
+        if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
+          continue;
+        add_completion_item(jdoc, arr, name_buf, 6, "local variable");
+      }
+    }
+
+    // Push sibling
+    if (node->next) {
+      if (top >= cap - 1) {
+        cap *= 2;
+        stack = realloc(stack, cap * sizeof(AstNode *));
+      }
+      stack[top++] = node->next;
+    }
+
+// Push children based on node type
+#define PUSH_CHILD(n)                                                          \
+  do {                                                                         \
+    if (n) {                                                                   \
+      if (top >= cap - 1) {                                                    \
+        cap *= 2;                                                              \
+        stack = realloc(stack, cap * sizeof(AstNode *));                       \
+      }                                                                        \
+      stack[top++] = (n);                                                      \
+    }                                                                          \
+  } while (0)
+
+    if (node->type == AST_BLOCK)
+      PUSH_CHILD(node->as.block.first_stmt);
+    else if (node->type == AST_IF) {
+      PUSH_CHILD(node->as.if_check.elseAct);
+      PUSH_CHILD(node->as.if_check.action);
+    } else if (node->type == AST_WHILE)
+      PUSH_CHILD(node->as.while_loop.action);
+    else if (node->type == AST_FOR)
+      PUSH_CHILD(node->as.for_loop.action);
+    else if (node->type == AST_DEFER)
+      PUSH_CHILD(node->as.defer_stmt.contents);
+    else if (node->type == AST_SWITCH) {
+      PUSH_CHILD(node->as.switch_stmt.default_case);
+      PUSH_CHILD(node->as.switch_stmt.cases);
+    } else if (node->type == AST_CASE)
+      PUSH_CHILD(node->as.case_stmt.action);
+#undef PUSH_CHILD
+  }
+  free(stack);
+}
+
+AstNode *find_struct_decl(AstNode *root, const char *target_name,
+                          size_t target_len) {
+  AstNode *stmt = root->as.block.first_stmt;
+  while (stmt) {
+    if (stmt->type == AST_STRUCT || stmt->type == AST_UNION) {
+      Token t = get_decl_token(stmt);
+      if (t.len == target_len &&
+          strncmp(t.start, target_name, target_len) == 0) {
+        return stmt;
+      }
+    }
+    stmt = stmt->next;
+  }
+  return NULL;
+}
+
+AstNode *find_enum_decl(AstNode *root, const char *target_name,
+                        size_t target_len) {
+  AstNode *stmt = root->as.block.first_stmt;
+  while (stmt) {
+    if (stmt->type == AST_ENUM) {
+      Token t = get_decl_token(stmt);
+      if (t.len == target_len && strncmp(t.start, target_name, target_len) == 0)
+        return stmt;
+    }
+    stmt = stmt->next;
+  }
+  return NULL;
+}
+
+int get_index_from_pos(const char *txt, int line, int character) {
+  if (!txt)
+    return 0;
+  int cur_l = 0, cur_c = 0, i = 0;
+  while (txt[i] != '\0') {
+    if (cur_l == line && cur_c == character)
+      return i;
+    if (txt[i] == '\n') {
+      cur_l++;
+      cur_c = 0;
+    } else
+      cur_c++;
+    i++;
+  }
+  return i; // end of string
+}
+
+void get_pos_from_index(const char *txt, int index, int *line, int *character) {
+  *line = 0;
+  *character = 0;
+  for (int i = 0; i < index && txt[i] != '\0'; i++) {
+    if (txt[i] == '\n') {
+      (*line)++;
+      *character = 0;
+    } else {
+      (*character)++;
+    }
+  }
+}
+
 void handle_completion(yyjson_val *params, yyjson_val *id) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
+  yyjson_val *pos = yyjson_obj_get(params, "position");
+  int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
+  int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
 
   Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
   if (!doc || !doc->ast_root) {
-    yyjson_mut_val *root;
-    yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-    yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-    lsp_send_doc(jdoc);
-    return;
+    goto empty_response;
   }
 
   yyjson_mut_val *root;
   yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
   yyjson_mut_val *result = yyjson_mut_arr(jdoc);
 
+  AstNode *containing_func = NULL;
   AstNode *stmt = doc->ast_root->as.block.first_stmt;
   while (stmt) {
-    Token t = get_decl_token(stmt);
-    if (t.len > 0) {
-      yyjson_mut_val *item = yyjson_mut_obj(jdoc);
-
-      char name_buf[256];
-      snprintf(name_buf, sizeof(name_buf), "%.*s", t.len, t.start);
-      yyjson_mut_obj_add_str(jdoc, item, "label", name_buf);
-
-      int kind = 1;
-      if (stmt->type == AST_FUNC)
-        kind = 3;
-      else if (stmt->type == AST_VAR_DECL)
-        kind = 6;
-      else if (stmt->type == AST_STRUCT)
-        kind = 22;
-      else if (stmt->type == AST_ENUM)
-        kind = 13;
-      else if (stmt->type == AST_UNION)
-        kind = 22;
-
-      yyjson_mut_obj_add_int(jdoc, item, "kind", kind);
-      yyjson_mut_arr_append(result, item);
+    if (stmt->type == AST_FUNC &&
+        stmt->as.func_def.fn_name.line <= (unsigned int)(line + 1)) {
+      containing_func = stmt;
     }
     stmt = stmt->next;
   }
 
+  int cursor_idx = get_index_from_pos(doc->txt, line, character);
+  int p = cursor_idx - 1;
+
+  // Skip current word being typed
+  while (p >= 0 && (isalnum((unsigned char)doc->txt[p]) || doc->txt[p] == '_'))
+    p--;
+  // Skip whitespace
+  while (p >= 0 && isspace((unsigned char)doc->txt[p]))
+    p--;
+
+  bool is_dot_trigger = (p >= 0 && doc->txt[p] == '.');
+
+  if (is_dot_trigger) {
+    p--;
+    while (p >= 0 && isspace((unsigned char)doc->txt[p]))
+      p--;
+
+    unsigned int ident_end = p;
+    while (p >= 0 &&
+           (isalnum((unsigned char)doc->txt[p]) || doc->txt[p] == '_'))
+      p--;
+    unsigned int ident_start = p + 1;
+    unsigned int ident_len = ident_end - ident_start + 1;
+
+    if (ident_len > 0) {
+      char base_name[256];
+      snprintf(base_name, sizeof(base_name), "%.*s", (int)ident_len,
+               &doc->txt[ident_start]);
+
+      Token type_name = {0};
+      bool found_type = false;
+
+      if (containing_func) {
+        AstNode *param = containing_func->as.func_def.params;
+        while (param) {
+          if (param->as.fn_param.id.len == ident_len &&
+              strncmp(param->as.fn_param.id.start, base_name, ident_len) == 0) {
+            type_name = param->as.fn_param.type.name;
+            found_type = true;
+            break;
+          }
+          param = param->next;
+        }
+
+        if (!found_type && containing_func->as.func_def.block) {
+          size_t cap = 256;
+          AstNode **stack = malloc(sizeof(AstNode *) * cap);
+          size_t top = 0;
+          stack[top++] = containing_func->as.func_def.block;
+
+          while (top > 0) {
+            AstNode *node = stack[--top];
+            if (!node)
+              continue;
+
+            if (node->type == AST_VAR_DECL) {
+              Token vid = node->as.var_decl.id;
+              if (vid.line <= (unsigned int)(line + 1) &&
+                  vid.len == ident_len &&
+                  strncmp(vid.start, base_name, ident_len) == 0) {
+                type_name = node->as.var_decl.type.name;
+                found_type = true;
+                break;
+              }
+            }
+            // Push sibling
+            if (node->next) {
+              if (top >= cap - 1) {
+                cap *= 2;
+                stack = realloc(stack, cap * sizeof(AstNode *));
+              }
+              stack[top++] = node->next;
+            }
+            // Push children
+            if (node->type == AST_BLOCK && node->as.block.first_stmt) {
+              if (top >= cap - 1) {
+                cap *= 2;
+                stack = realloc(stack, cap * sizeof(AstNode *));
+              }
+              stack[top++] = node->as.block.first_stmt;
+            } else if (node->type == AST_IF) {
+              if (node->as.if_check.elseAct) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.if_check.elseAct;
+              }
+              if (node->as.if_check.action) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.if_check.action;
+              }
+            } else if (node->type == AST_WHILE && node->as.while_loop.action) {
+              if (top >= cap - 1) {
+                cap *= 2;
+                stack = realloc(stack, cap * sizeof(AstNode *));
+              }
+              stack[top++] = node->as.while_loop.action;
+            } else if (node->type == AST_FOR && node->as.for_loop.action) {
+              if (top >= cap - 1) {
+                cap *= 2;
+                stack = realloc(stack, cap * sizeof(AstNode *));
+              }
+              stack[top++] = node->as.for_loop.action;
+            }
+          }
+          free(stack);
+        }
+      }
+
+      // Search Global Variables
+      if (!found_type) {
+        AstNode *gst = doc->ast_root->as.block.first_stmt;
+        while (gst) {
+          if (gst->type == AST_VAR_DECL) {
+            if (gst->as.var_decl.id.len == ident_len &&
+                strncmp(gst->as.var_decl.id.start, base_name, ident_len) == 0) {
+              type_name = gst->as.var_decl.type.name;
+              found_type = true;
+              break;
+            }
+          }
+          gst = gst->next;
+        }
+      }
+
+      AstNode *type_decl = NULL;
+      const char *target_struct = found_type ? type_name.start : base_name;
+      size_t target_len = found_type ? type_name.len : ident_len;
+
+      // Search Struct Definition (Cross-File)
+      for (size_t i = 0; i < server_state.open_docs.capacity; i++) {
+        HashEntry *entry = server_state.open_docs.buckets[i];
+        while (entry) {
+          Doc *d = (Doc *)entry->value;
+          if (d->ast_root) {
+            type_decl =
+                find_struct_decl(d->ast_root, target_struct, target_len);
+            if (type_decl)
+              break;
+          }
+          entry = entry->next;
+        }
+        if (type_decl)
+          break;
+      }
+
+      // Populate Completions
+      if (type_decl) {
+        AstNode *member =
+            (type_decl->type == AST_STRUCT)  ? type_decl->as.struct_def.contents
+            : (type_decl->type == AST_UNION) ? type_decl->as.union_def.contents
+            : (type_decl->type == AST_ENUM)  ? type_decl->as.enum_def.contents
+                                             : NULL;
+
+        while (member) {
+          Token mt = get_decl_token(member);
+          if (mt.len == 0) {
+            member = member->next;
+            continue;
+          }
+          char m_name[256] = {0};
+          if (token_to_buf(mt, m_name, sizeof(m_name)) == 0) {
+            member = member->next;
+            continue;
+          }
+
+          int kind = (member->type == AST_FUNC)          ? 2
+                     : (member->type == AST_ENUM_MEMBER) ? 20
+                                                         : 5;
+          const char *detail = (kind == 2)    ? "method"
+                               : (kind == 20) ? "enum member"
+                                              : "field";
+          add_completion_item(jdoc, result, m_name, kind, detail);
+          member = member->next;
+        }
+        yyjson_mut_obj_add_val(jdoc, root, "result", result);
+        lsp_send_doc(jdoc);
+        return;
+      }
+    }
+  } else {
+    for (size_t i = 0; i < kwlistlen; i++)
+      add_completion_item(jdoc, result, kwlist[i], 14, "keyword");
+
+    for (size_t i = 0; i < typelistlen; i++)
+      add_completion_item(jdoc, result, typelist[i], 14, "type");
+
+    AstNode *gst = doc->ast_root->as.block.first_stmt;
+    while (gst) {
+      Token t = get_decl_token(gst);
+      if (t.len > 0) {
+        char name_buf[256];
+        snprintf(name_buf, sizeof(name_buf), "%.*s", t.len, t.start);
+
+        int kind = 1;
+        if (gst->type == AST_FUNC)
+          kind = 3;
+        else if (gst->type == AST_VAR_DECL)
+          kind = 6;
+        else if (gst->type == AST_STRUCT || gst->type == AST_UNION)
+          kind = 22;
+        else if (gst->type == AST_ENUM)
+          kind = 13;
+
+        add_completion_item(jdoc, result, name_buf, kind, "global symbol");
+      }
+      gst = gst->next;
+    }
+
+    if (containing_func) {
+      const char *local_kws[] = {
+          "if",   "else",  "while",    "for",    "ret",  "defer", "switch",
+          "case", "break", "continue", "sizeof", "true", "false", "null"};
+      for (size_t i = 0; i < sizeof(local_kws) / sizeof(local_kws[0]); i++) {
+        add_completion_item(jdoc, result, local_kws[i], 14, "keyword");
+      }
+      add_local_completions(jdoc, result, containing_func, line + 1);
+    }
+  }
+
   yyjson_mut_obj_add_val(jdoc, root, "result", result);
   lsp_send_doc(jdoc);
+  return;
+
+empty_response: {
+  yyjson_mut_val *rt;
+  yyjson_mut_doc *jd = lsp_start_response(id, &rt);
+  yyjson_mut_obj_add_val(jd, rt, "result", yyjson_mut_null(jd));
+  lsp_send_doc(jd);
+}
 }
 
 void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
@@ -810,8 +1197,10 @@ void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
       yyjson_mut_val *symbol = yyjson_mut_obj(jdoc);
 
       char name_buf[256];
-      snprintf(name_buf, sizeof(name_buf), "%.*s", t.len, t.start);
-      yyjson_mut_obj_add_str(jdoc, symbol, "name", name_buf);
+      snprintf(name_buf, sizeof(name_buf), "%.*s", (int)t.len, t.start);
+
+      yyjson_mut_obj_add_val(jdoc, symbol, "name",
+                             yyjson_mut_strcpy(jdoc, name_buf));
 
       // LSP SymbolKinds Function=12, Variable=13, Struct=23, Enum=10
       int kind = 13;
@@ -1158,25 +1547,6 @@ void handle_did_close(yyjson_val *params) {
   }
   DiagList empty = {0};
   publish_diagnostics_from_list(uri, &empty);
-}
-
-int get_index_from_pos(const char *txt, int line, int character) {
-  int cur_l = 0, cur_c = 0, i = 0;
-  while (txt[i] != '\0') {
-    if (cur_l == line && cur_c == character) return i;
-    if (txt[i] == '\n') { cur_l++; cur_c = 0; } 
-    else { cur_c++; }
-    i++;
-  }
-  return i;
-}
-
-void get_pos_from_index(const char *txt, int index, int *line, int *character) {
-  *line = 0; *character = 0;
-  for (int i = 0; i < index && txt[i] != '\0'; i++) {
-    if (txt[i] == '\n') { (*line)++; *character = 0; } 
-    else { (*character)++; }
-  }
 }
 
 void handle_signature_help(yyjson_val *params, yyjson_val *id) {
