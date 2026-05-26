@@ -33,6 +33,83 @@ size_t token_to_buf(Token t, char *buf, size_t buf_size) {
   return copy_len;
 }
 
+size_t format_type_to_buf(DataType type, char *buf, size_t size) {
+  if (!buf || size == 0)
+    return 0;
+  size_t offset = 0;
+
+  // Modifiers
+  if (type.is_static)
+    offset += snprintf(buf + offset, size - offset, "static ");
+  if (type.is_mut)
+    offset += snprintf(buf + offset, size - offset, "mut ");
+  if (type.is_threadlocal)
+    offset += snprintf(buf + offset, size - offset, "threadlocal ");
+  if (type.is_extern)
+    offset += snprintf(buf + offset, size - offset, "extern ");
+  if (type.is_async)
+    offset += snprintf(buf + offset, size - offset, "async ");
+
+  // Pointers & References
+  if (type.ptr_depth != 0) {
+    char symbol = (type.ptr_depth > 0) ? '*' : '&';
+    int count = (type.ptr_depth > 0) ? type.ptr_depth : -type.ptr_depth;
+    for (int i = 0; i < count && offset < size - 1; i++) {
+      buf[offset++] = symbol;
+    }
+  }
+
+  // Base Type Name
+  if (type.name.len > 0) {
+    offset += snprintf(buf + offset, size - offset, "%.*s", (int)type.name.len,
+                       type.name.start);
+  }
+
+  // Array Bounds
+  for (unsigned int i = 0; i < type.array_dimens; i++) {
+    if (type.dim_sizes && type.dim_sizes[i]) {
+      AstNode *dim = type.dim_sizes[i];
+      if (dim->type == AST_NUM_LIT) {
+        offset +=
+            snprintf(buf + offset, size - offset, "[%.*s]",
+                     (int)dim->as.num_lit.val.len, dim->as.num_lit.val.start);
+      } else {
+        offset += snprintf(buf + offset, size - offset, "[expr]");
+      }
+    } else {
+      offset += snprintf(buf + offset, size - offset, "[]");
+    }
+  }
+  return offset;
+}
+
+void format_func_signature(AstNode *func_node, char *buf, size_t size) {
+    if (!func_node || func_node->type != AST_FUNC) return;
+
+    size_t offset = 0;
+    
+    // Return Type
+    offset += format_type_to_buf(func_node->as.func_def.ret_type, buf + offset, size - offset);
+    
+    // Name
+    offset += snprintf(buf + offset, size - offset, " %.*s(", 
+                       (int)func_node->as.func_def.fn_name.len, func_node->as.func_def.fn_name.start);
+
+    // Parameters
+    AstNode *param = func_node->as.func_def.params;
+    while (param && offset < size - 1) {
+        offset += format_type_to_buf(param->as.fn_param.type, buf + offset, size - offset);
+        offset += snprintf(buf + offset, size - offset, " %.*s", 
+                           (int)param->as.fn_param.id.len, param->as.fn_param.id.start);
+        
+        if (param->next) {
+            offset += snprintf(buf + offset, size - offset, ", ");
+        }
+        param = param->next;
+    }
+    snprintf(buf + offset, size - offset, ")");
+}
+
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
   yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
   yyjson_mut_val *root = yyjson_mut_obj(doc);
@@ -756,7 +833,8 @@ empty_response: {
 }
 
 void add_completion_item(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
-                         const char *label, int kind, const char *detail) {
+                         const char *label, int kind, const char *detail,
+                         const char *documentation, const char *insert_text) {
   yyjson_mut_val *item = yyjson_mut_obj(jdoc);
 
   yyjson_mut_obj_add_val(jdoc, item, "label", yyjson_mut_strcpy(jdoc, label));
@@ -766,6 +844,24 @@ void add_completion_item(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
     yyjson_mut_obj_add_val(jdoc, item, "detail",
                            yyjson_mut_strcpy(jdoc, detail));
   }
+
+  // Render attached comments as markdown
+  if (documentation) {
+    yyjson_mut_val *doc_obj = yyjson_mut_obj(jdoc);
+    yyjson_mut_obj_add_str(jdoc, doc_obj, "kind", "markdown");
+    yyjson_mut_obj_add_val(jdoc, doc_obj, "value",
+                           yyjson_mut_strcpy(jdoc, documentation));
+    yyjson_mut_obj_add_val(jdoc, item, "documentation", doc_obj);
+  }
+
+  // Provide smart snippets (e.g., auto-insert parens for functions)
+  if (insert_text) {
+    yyjson_mut_obj_add_val(jdoc, item, "insertText",
+                           yyjson_mut_strcpy(jdoc, insert_text));
+    yyjson_mut_obj_add_int(jdoc, item, "insertTextFormat",
+                           2); // 2 = Snippet format
+  }
+
   yyjson_mut_arr_append(arr, item);
 }
 
@@ -780,7 +876,14 @@ void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
     if (id.len > 0 && id.line <= (unsigned int)target_line) {
       char name_buf[256];
       snprintf(name_buf, sizeof(name_buf), "%.*s", (int)id.len, id.start);
-      add_completion_item(jdoc, arr, name_buf, 6, "parameter");
+
+      char detail_buf[1024] = {0};
+      format_type_to_buf(param->as.fn_param.type, detail_buf,
+                         sizeof(detail_buf));
+
+      add_completion_item(jdoc, arr, name_buf, 6,
+                          detail_buf[0] != '\0' ? detail_buf : "parameter",
+                          NULL, NULL);
     }
     param = param->next;
   }
@@ -805,7 +908,14 @@ void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
         char name_buf[256];
         if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
           continue;
-        add_completion_item(jdoc, arr, name_buf, 6, "local variable");
+
+        char detail_buf[1024] = {0};
+        format_type_to_buf(node->as.var_decl.type, detail_buf,
+                           sizeof(detail_buf));
+
+        add_completion_item(
+            jdoc, arr, name_buf, 6,
+            detail_buf[0] != '\0' ? detail_buf : "local variable", NULL, NULL);
       }
     }
 
@@ -1107,13 +1217,40 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             continue;
           }
 
-          int kind = (member->type == AST_FUNC)          ? 2
-                     : (member->type == AST_ENUM_MEMBER) ? 20
-                                                         : 5;
-          const char *detail = (kind == 2)    ? "method"
-                               : (kind == 20) ? "enum member"
-                                              : "field";
-          add_completion_item(jdoc, result, m_name, kind, detail);
+          char detail_buf[1024] = {0};
+          char insert_buf[256] = {0};
+
+          // Pull comments from the source file
+          char *docs = get_comments_above(doc->txt, mt);
+          int kind = 5; // default to field
+
+          if (member->type == AST_FUNC) {
+            kind = 2; // method
+            format_func_signature(member, detail_buf, sizeof(detail_buf));
+            // Create a snippet that places cursor inside parens
+            snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
+          } else if (member->type == AST_VAR_DECL) {
+            format_type_to_buf(member->as.var_decl.type, detail_buf,
+                               sizeof(detail_buf));
+          } else if (member->type == AST_ENUM_MEMBER) {
+            kind = 20; // enum member
+            snprintf(detail_buf, sizeof(detail_buf), "enum member");
+          } else if (member->type == AST_STRUCT || member->type == AST_UNION ||
+                     member->type == AST_ENUM) {
+            // Display nested definitions
+            kind = (member->type == AST_ENUM) ? 13 : 22;
+            snprintf(detail_buf, sizeof(detail_buf), "nested %s",
+                     member->type == AST_STRUCT
+                         ? "struct"
+                         : (member->type == AST_UNION ? "union" : "enum"));
+          }
+
+          add_completion_item(jdoc, result, m_name, kind,
+                              detail_buf[0] != '\0' ? detail_buf : NULL, docs,
+                              insert_buf[0] != '\0' ? insert_buf : NULL);
+
+          if (docs)
+            free(docs);
           member = member->next;
         }
         yyjson_mut_obj_add_val(jdoc, root, "result", result);
@@ -1123,10 +1260,10 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
     }
   } else {
     for (size_t i = 0; i < kwlistlen; i++)
-      add_completion_item(jdoc, result, kwlist[i], 14, "keyword");
+      add_completion_item(jdoc, result, kwlist[i], 14, "keyword", NULL, NULL);
 
     for (size_t i = 0; i < typelistlen; i++)
-      add_completion_item(jdoc, result, typelist[i], 14, "type");
+      add_completion_item(jdoc, result, typelist[i], 14, "type", NULL, NULL);
 
     AstNode *gst = doc->ast_root->as.block.first_stmt;
     while (gst) {
@@ -1135,17 +1272,39 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         char name_buf[256];
         snprintf(name_buf, sizeof(name_buf), "%.*s", t.len, t.start);
 
-        int kind = 1;
-        if (gst->type == AST_FUNC)
-          kind = 3;
-        else if (gst->type == AST_VAR_DECL)
-          kind = 6;
-        else if (gst->type == AST_STRUCT || gst->type == AST_UNION)
-          kind = 22;
-        else if (gst->type == AST_ENUM)
-          kind = 13;
+        char detail_buf[1024] = {0};
+        char insert_buf[256] = {0};
+        char *docs = get_comments_above(doc->txt, t);
 
-        add_completion_item(jdoc, result, name_buf, kind, "global symbol");
+        int kind = 1;
+        if (gst->type == AST_FUNC) {
+          kind = 3;
+          format_func_signature(gst, detail_buf, sizeof(detail_buf));
+
+          // Smart snippet so if it has parameters, place cursor ($1) inside.
+          if (gst->as.func_def.params) {
+            snprintf(insert_buf, sizeof(insert_buf), "%s($1)", name_buf);
+          } else {
+            snprintf(insert_buf, sizeof(insert_buf), "%s()", name_buf);
+          }
+        } else if (gst->type == AST_VAR_DECL) {
+          kind = 6;
+          format_type_to_buf(gst->as.var_decl.type, detail_buf,
+                             sizeof(detail_buf));
+        } else if (gst->type == AST_STRUCT || gst->type == AST_UNION) {
+          kind = 22;
+          snprintf(detail_buf, sizeof(detail_buf), "%s",
+                   gst->type == AST_STRUCT ? "struct" : "union");
+        } else if (gst->type == AST_ENUM) {
+          kind = 13;
+          snprintf(detail_buf, sizeof(detail_buf), "enum");
+        }
+
+        add_completion_item(jdoc, result, name_buf, kind,
+                            detail_buf[0] != '\0' ? detail_buf : NULL, docs,
+                            insert_buf[0] != '\0' ? insert_buf : NULL);
+        if (docs)
+          free(docs);
       }
       gst = gst->next;
     }
@@ -1155,7 +1314,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
           "if",   "else",  "while",    "for",    "ret",  "defer", "switch",
           "case", "break", "continue", "sizeof", "true", "false", "null"};
       for (size_t i = 0; i < sizeof(local_kws) / sizeof(local_kws[0]); i++) {
-        add_completion_item(jdoc, result, local_kws[i], 14, "keyword");
+        add_completion_item(jdoc, result, local_kws[i], 14, "keyword", NULL, NULL);
       }
       add_local_completions(jdoc, result, containing_func, line + 1);
     }
