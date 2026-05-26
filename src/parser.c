@@ -18,8 +18,8 @@ void report_error(ParseCtx *ctx, Token token, const char *fmt, ...) {
     return;
 
   if (ctx->diags) {
-    unsigned int line = token.line - 2;
-    unsigned int col = token.col - 1;
+    unsigned int line = token.line;
+    unsigned int col = token.col;
     unsigned int len = token.len;
 
     diaglist_add(ctx->diags, DIAG_ERROR, message, ctx->lex->file, line, col,
@@ -466,6 +466,7 @@ void apply_op(ParseCtx *ctx) {
     if (info.op.len == 1 && *info.op.start == '.') {
       if (right->type != AST_IDENTIF && right->type != AST_FUNC_CALL) {
         report_error(ctx, ctx->curr, "Expected identifier after '.'");
+        push_node(ctx, left);
         return;
       }
 
@@ -478,6 +479,7 @@ void apply_op(ParseCtx *ctx) {
           member_name = right->as.func_call.caller->as.identif.val;
         } else {
           report_error(ctx, ctx->curr, "Member call must be an identifier");
+          push_node(ctx, left);
           return;
         }
       }
@@ -532,9 +534,20 @@ bool is_type(ParseCtx *ctx) {
   }
 
   // Might be a custom type
-  if (t.type == TOKEN_IDENTIF && next_token(&tmp_parse).type == TOKEN_IDENTIF &&
-      !is_kw(ctx->lex, t.start, t.len))
-    return true;
+  if (t.type == TOKEN_IDENTIF && !is_kw(ctx->lex, t.start, t.len)) {
+    Token nxt = next_token(&tmp_parse);
+    if (nxt.type == TOKEN_IDENTIF)
+      return true;
+
+    if (nxt.len == 1 && *nxt.start == '.') {
+      Token nxt2 = next_token(&tmp_parse);
+      if (nxt2.type == TOKEN_IDENTIF) {
+        Token nxt3 = next_token(&tmp_parse);
+        if (nxt3.type == TOKEN_IDENTIF)
+          return true;
+      }
+    }
+  }
 
   return false;
 }
@@ -1136,6 +1149,17 @@ bool parse_step(ParseCtx *ctx) {
           is_postfix = true;
         } else {
           ctx->expect_operand = true;
+        }
+      }
+
+      if (!is_unary && ctx->curr.len == 1 && *ctx->curr.start == '.') {
+        Token next = peek_token(ctx);
+        if (next.type != TOKEN_IDENTIF && next.type != TOKEN_KW) {
+          report_error(ctx, ctx->curr, "Expected identifier after '.'");
+          adv(ctx);
+          sync(ctx);
+          recover_state(ctx, current_state);
+          break;
         }
       }
 
@@ -2575,6 +2599,17 @@ DataType parse_type(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_IDENTIF)
       type.is_custom = true;
     adv(ctx);
+
+    if (type.is_custom && ctx->curr.len == 1 && *ctx->curr.start == '.') {
+      adv(ctx);
+
+      if (ctx->curr.type == TOKEN_IDENTIF) {
+        type.name.len = (ctx->curr.start - type.name.start) + ctx->curr.len;
+        adv(ctx);
+      } else {
+        report_error(ctx, ctx->curr, "Expected identifier after '.' in type");
+      }
+    }
   } else {
     report_error(ctx, ctx->curr, "Expected type name at line %u, col %u\n",
                  ctx->lex->line, ctx->lex->col);

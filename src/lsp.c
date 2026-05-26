@@ -15,6 +15,30 @@ extern Module *sem_main_mod;
 
 static LspState server_state = {.state = UNINITIALIZED};
 
+void extract_use_namespace(AstNode *use_stmt, char *out_name,
+                                  size_t max_len) {
+  Token alias = use_stmt->as.use_stmt.alias;
+  if (alias.len > 0) {
+    snprintf(out_name, max_len, "%.*s", (int)alias.len, alias.start);
+    return;
+  }
+
+  Token pt = use_stmt->as.use_stmt.path;
+  if (pt.len >= 2) {
+    char tmp[512] = {0};
+    int copy_len = pt.len - 2 < 511 ? pt.len - 2 : 511;
+    strncpy(tmp, pt.start + 1, copy_len);
+
+    char *base = strrchr(tmp, '/');
+    base = base ? base + 1 : tmp;
+    char *dot = strrchr(base, '.');
+    if (dot)
+      *dot = '\0';
+
+    snprintf(out_name, max_len, "%s", base);
+  }
+}
+
 size_t token_to_buf(Token t, char *buf, size_t buf_size) {
   if (!t.start || t.len == 0 || buf_size == 0) {
     if (buf_size > 0)
@@ -961,30 +985,19 @@ void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
   free(stack);
 }
 
-AstNode *find_struct_decl(AstNode *root, const char *target_name,
-                          size_t target_len) {
+AstNode *find_sue_decl(AstNode *root, const char *target_name,
+                             size_t target_len) {
+  if (!root)
+    return NULL;
   AstNode *stmt = root->as.block.first_stmt;
   while (stmt) {
-    if (stmt->type == AST_STRUCT || stmt->type == AST_UNION) {
+    if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
+        stmt->type == AST_ENUM) {
       Token t = get_decl_token(stmt);
       if (t.len == target_len &&
           strncmp(t.start, target_name, target_len) == 0) {
         return stmt;
       }
-    }
-    stmt = stmt->next;
-  }
-  return NULL;
-}
-
-AstNode *find_enum_decl(AstNode *root, const char *target_name,
-                        size_t target_len) {
-  AstNode *stmt = root->as.block.first_stmt;
-  while (stmt) {
-    if (stmt->type == AST_ENUM) {
-      Token t = get_decl_token(stmt);
-      if (t.len == target_len && strncmp(t.start, target_name, target_len) == 0)
-        return stmt;
     }
     stmt = stmt->next;
   }
@@ -1019,6 +1032,30 @@ void get_pos_from_index(const char *txt, int index, int *line, int *character) {
       (*character)++;
     }
   }
+}
+
+bool split_qualified_type(Token qualified, Token *mod_alias,
+                          Token *simple_name) {
+  if (!qualified.start || qualified.len == 0)
+    return false;
+
+  // Find last dot in the token
+  const char *dot = memchr(qualified.start, '.', qualified.len);
+  if (!dot)
+    return false;
+
+  size_t alias_len = dot - qualified.start;
+  size_t name_len = qualified.len - alias_len - 1;
+
+  mod_alias->start = qualified.start;
+  mod_alias->len = alias_len;
+  mod_alias->type = TOKEN_IDENTIF;
+
+  simple_name->start = dot + 1;
+  simple_name->len = name_len;
+  simple_name->type = TOKEN_IDENTIF;
+
+  return true;
 }
 
 void handle_completion(yyjson_val *params, yyjson_val *id) {
@@ -1076,9 +1113,112 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
       snprintf(base_name, sizeof(base_name), "%.*s", (int)ident_len,
                &doc->txt[ident_start]);
 
+      bool is_module_access = false;
+      AstNode *mod_ast = NULL;
+      Arena tmp_arena = {0};
+
+      AstNode *top_stmt = doc->ast_root->as.block.first_stmt;
+      while (top_stmt) {
+        if (top_stmt->type == AST_USE) {
+          char mod_name[256] = {0};
+          extract_use_namespace(top_stmt, mod_name, sizeof(mod_name));
+
+          if (strlen(mod_name) == ident_len &&
+              strncmp(base_name, mod_name, ident_len) == 0) {
+            is_module_access = true;
+
+            // Resolve the path and grab the AST for this module
+            Token pt = top_stmt->as.use_stmt.path;
+            if (pt.len >= 2) {
+              char rel_path[PATH_MAX];
+              strncpy(rel_path, pt.start + 1, pt.len - 2);
+              rel_path[pt.len - 2] = '\0';
+
+              char *current_abs = absolute_from_uri(uri);
+              if (current_abs) {
+                char *last_slash = strrchr(current_abs, '/');
+                if (last_slash)
+                  *last_slash = '\0';
+
+                char full_path[PATH_MAX];
+                if (rel_path[0] == '/')
+                  snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                else
+                  snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
+                           rel_path);
+
+                char *resolved = realpath(full_path, NULL);
+                if (resolved) {
+                  char target_uri[8192];
+                  snprintf(target_uri, sizeof(target_uri), "file://%s",
+                           resolved);
+                  Doc *imported_doc = (Doc *)map_get(
+                      &server_state.open_docs, target_uri, strlen(target_uri));
+
+                  if (imported_doc && imported_doc->ast_root) {
+                    mod_ast = imported_doc->ast_root;
+                  } else {
+                    mod_ast = file_to_ast(&tmp_arena, resolved, true);
+                  }
+                  free(resolved);
+                }
+                free(current_abs);
+              }
+            }
+            break;
+          }
+        }
+        top_stmt = top_stmt->next;
+      }
+
+      if (is_module_access) {
+        if (mod_ast) {
+          AstNode *ext_stmt = mod_ast->as.block.first_stmt;
+          while (ext_stmt) {
+            Token t = get_decl_token(ext_stmt);
+            if (t.len > 0) {
+              char m_name[256];
+              snprintf(m_name, sizeof(m_name), "%.*s", (int)t.len, t.start);
+
+              char detail_buf[1024] = {0};
+              char insert_buf[256] = {0};
+              int kind = 1; // Default
+
+              if (ext_stmt->type == AST_FUNC) {
+                kind = 3; // Function
+                format_func_signature(ext_stmt, detail_buf, sizeof(detail_buf));
+                snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
+              } else if (ext_stmt->type == AST_VAR_DECL) {
+                kind = 6; // Variable
+                format_type_to_buf(ext_stmt->as.var_decl.type, detail_buf,
+                                   sizeof(detail_buf));
+              } else if (ext_stmt->type == AST_STRUCT ||
+                         ext_stmt->type == AST_UNION) {
+                kind = 22; // Struct
+                snprintf(detail_buf, sizeof(detail_buf), "%s",
+                         ext_stmt->type == AST_STRUCT ? "struct" : "union");
+              } else if (ext_stmt->type == AST_ENUM) {
+                kind = 13; // Enum
+                snprintf(detail_buf, sizeof(detail_buf), "enum");
+              }
+              add_completion_item(jdoc, result, m_name, kind,
+                                  detail_buf[0] != '\0' ? detail_buf : NULL,
+                                  NULL,
+                                  insert_buf[0] != '\0' ? insert_buf : NULL);
+            }
+            ext_stmt = ext_stmt->next;
+          }
+        }
+        arena_free_all(&tmp_arena);
+        yyjson_mut_obj_add_val(jdoc, root, "result", result);
+        lsp_send_doc(jdoc);
+        return;
+      }
+
       Token type_name = {0};
       bool found_type = false;
 
+      // Look for the variable whose type we need
       if (containing_func) {
         AstNode *param = containing_func->as.func_def.params;
         while (param) {
@@ -1176,28 +1316,172 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
       }
 
+      // If we found a type name, resolve the sue declaration
       AstNode *type_decl = NULL;
-      const char *target_struct = found_type ? type_name.start : base_name;
-      size_t target_len = found_type ? type_name.len : ident_len;
+      const char *decl_src_txt = doc->txt;
 
-      // Search Struct Definition (Cross-File)
-      for (size_t i = 0; i < server_state.open_docs.capacity; i++) {
-        HashEntry *entry = server_state.open_docs.buckets[i];
-        while (entry) {
-          Doc *d = (Doc *)entry->value;
-          if (d->ast_root) {
-            type_decl =
-                find_struct_decl(d->ast_root, target_struct, target_len);
-            if (type_decl)
-              break;
+      if (found_type && type_name.len > 0) {
+        Token mod_alias = {0}, simple_name = {0};
+        bool is_qualified =
+            split_qualified_type(type_name, &mod_alias, &simple_name);
+
+        if (is_qualified) {
+          // Qualified type is "ModuleAlias.TypeName"
+          // Find the use statement that matches the module alias
+          AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
+          while (use_stmt && !type_decl) {
+            if (use_stmt->type == AST_USE) {
+              char mod_name[256] = {0};
+              extract_use_namespace(use_stmt, mod_name, sizeof(mod_name));
+              if (strlen(mod_name) == mod_alias.len &&
+                  strncmp(mod_name, mod_alias.start, mod_alias.len) == 0) {
+                Token pt = use_stmt->as.use_stmt.path;
+                if (pt.len >= 2) {
+                  char rel_path[PATH_MAX];
+                  strncpy(rel_path, pt.start + 1, pt.len - 2);
+                  rel_path[pt.len - 2] = '\0';
+                  char *current_abs = absolute_from_uri(uri);
+                  if (current_abs) {
+                    char *last_slash = strrchr(current_abs, '/');
+                    if (last_slash)
+                      *last_slash = '\0';
+                    char full_path[PATH_MAX];
+                    if (rel_path[0] == '/')
+                      snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                    else
+                      snprintf(full_path, sizeof(full_path), "%s/%s",
+                               current_abs, rel_path);
+                    char *resolved = realpath(full_path, NULL);
+                    if (resolved) {
+                      char target_uri[8192];
+                      snprintf(target_uri, sizeof(target_uri), "file://%s",
+                               resolved);
+                      Doc *imported_doc =
+                          (Doc *)map_get(&server_state.open_docs, target_uri,
+                                         strlen(target_uri));
+                      if (imported_doc && imported_doc->ast_root) {
+                        type_decl =
+                            find_sue_decl(imported_doc->ast_root,
+                                          simple_name.start, simple_name.len);
+                        if (type_decl)
+                          decl_src_txt = imported_doc->txt;
+                      } else {
+                        AstNode *mod_ast =
+                            file_to_ast(&tmp_arena, resolved, true);
+                        if (mod_ast) {
+                          type_decl = find_sue_decl(mod_ast, simple_name.start,
+                                                    simple_name.len);
+                          if (type_decl) {
+                            // Load source for doc comments
+                            FILE *f = fopen(resolved, "rb");
+                            if (f) {
+                              fseek(f, 0, SEEK_END);
+                              long flen = ftell(f);
+                              fseek(f, 0, SEEK_SET);
+                              if (flen >= 0) {
+                                char *stxt = arena_alloc(&tmp_arena, flen + 1);
+                                size_t read_bytes = fread(stxt, 1, flen, f);
+                                if (read_bytes == (size_t)flen) {
+                                  stxt[flen] = '\0';
+                                  decl_src_txt = stxt;
+                                } else {
+                                  decl_src_txt = NULL;
+                                }
+                              }
+                              fclose(f);
+                            }
+                          }
+                        }
+                      }
+                      free(resolved);
+                    }
+                    free(current_abs);
+                  }
+                }
+                break;
+              }
+            }
+            use_stmt = use_stmt->next;
           }
-          entry = entry->next;
+        } else {
+					// Current then imported
+          type_decl =
+              find_sue_decl(doc->ast_root, type_name.start, type_name.len);
+          if (!type_decl) {
+            // Search through use statements
+            AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
+            while (use_stmt && !type_decl) {
+              if (use_stmt->type == AST_USE) {
+                Token pt = use_stmt->as.use_stmt.path;
+                if (pt.len >= 2) {
+                  char rel_path[PATH_MAX];
+                  strncpy(rel_path, pt.start + 1, pt.len - 2);
+                  rel_path[pt.len - 2] = '\0';
+                  char *current_abs = absolute_from_uri(uri);
+                  if (current_abs) {
+                    char *last_slash = strrchr(current_abs, '/');
+                    if (last_slash)
+                      *last_slash = '\0';
+                    char full_path[PATH_MAX];
+                    if (rel_path[0] == '/')
+                      snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                    else
+                      snprintf(full_path, sizeof(full_path), "%s/%s",
+                               current_abs, rel_path);
+                    char *resolved = realpath(full_path, NULL);
+                    if (resolved) {
+                      char target_uri[8192];
+                      snprintf(target_uri, sizeof(target_uri), "file://%s",
+                               resolved);
+                      Doc *imported_doc =
+                          (Doc *)map_get(&server_state.open_docs, target_uri,
+                                         strlen(target_uri));
+                      if (imported_doc && imported_doc->ast_root) {
+                        type_decl =
+                            find_sue_decl(imported_doc->ast_root,
+                                          type_name.start, type_name.len);
+                        if (type_decl)
+                          decl_src_txt = imported_doc->txt;
+                      } else {
+                        AstNode *mod_ast =
+                            file_to_ast(&tmp_arena, resolved, true);
+                        if (mod_ast) {
+                          type_decl = find_sue_decl(mod_ast, type_name.start,
+                                                    type_name.len);
+                          if (type_decl) {
+                            FILE *f = fopen(resolved, "rb");
+                            if (f) {
+                              fseek(f, 0, SEEK_END);
+                              long flen = ftell(f);
+                              fseek(f, 0, SEEK_SET);
+                              if (flen >= 0) {
+                                char *stxt = arena_alloc(&tmp_arena, flen + 1);
+                                size_t read_bytes = fread(stxt, 1, flen, f);
+                                if (read_bytes == (size_t)flen) {
+                                  stxt[flen] = '\0';
+                                  decl_src_txt = stxt;
+                                } else {
+                                  decl_src_txt = NULL;
+                                }
+                              }
+                              fclose(f);
+                            }
+                          }
+                        }
+                      }
+                      free(resolved);
+                    }
+                    free(current_abs);
+                  }
+                }
+              }
+              use_stmt = use_stmt->next;
+            }
+          }
         }
-        if (type_decl)
-          break;
       }
 
-      // Populate Completions
+      // Populate completions if we found a sue declaration
       if (type_decl) {
         AstNode *member =
             (type_decl->type == AST_STRUCT)  ? type_decl->as.struct_def.contents
@@ -1220,14 +1504,13 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
           char detail_buf[1024] = {0};
           char insert_buf[256] = {0};
 
-          // Pull comments from the source file
-          char *docs = get_comments_above(doc->txt, mt);
+          char *docs =
+              decl_src_txt ? get_comments_above(decl_src_txt, mt) : NULL;
           int kind = 5; // default to field
 
           if (member->type == AST_FUNC) {
             kind = 2; // method
             format_func_signature(member, detail_buf, sizeof(detail_buf));
-            // Create a snippet that places cursor inside parens
             snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
           } else if (member->type == AST_VAR_DECL) {
             format_type_to_buf(member->as.var_decl.type, detail_buf,
@@ -1237,7 +1520,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             snprintf(detail_buf, sizeof(detail_buf), "enum member");
           } else if (member->type == AST_STRUCT || member->type == AST_UNION ||
                      member->type == AST_ENUM) {
-            // Display nested definitions
             kind = (member->type == AST_ENUM) ? 13 : 22;
             snprintf(detail_buf, sizeof(detail_buf), "nested %s",
                      member->type == AST_STRUCT
@@ -1253,10 +1535,12 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             free(docs);
           member = member->next;
         }
+        arena_free_all(&tmp_arena);
         yyjson_mut_obj_add_val(jdoc, root, "result", result);
         lsp_send_doc(jdoc);
         return;
       }
+      arena_free_all(&tmp_arena);
     }
   } else {
     for (size_t i = 0; i < kwlistlen; i++)
@@ -1280,8 +1564,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         if (gst->type == AST_FUNC) {
           kind = 3;
           format_func_signature(gst, detail_buf, sizeof(detail_buf));
-
-          // Smart snippet so if it has parameters, place cursor ($1) inside.
           if (gst->as.func_def.params) {
             snprintf(insert_buf, sizeof(insert_buf), "%s($1)", name_buf);
           } else {
@@ -1309,12 +1591,24 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
       gst = gst->next;
     }
 
+    AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
+    while (use_stmt) {
+      if (use_stmt->type == AST_USE) {
+        char mod_name[256] = {0};
+        extract_use_namespace(use_stmt, mod_name, sizeof(mod_name));
+        add_completion_item(jdoc, result, mod_name, 9, "module",
+                            "Imported namespace", NULL);
+      }
+      use_stmt = use_stmt->next;
+    }
+
     if (containing_func) {
       const char *local_kws[] = {
           "if",   "else",  "while",    "for",    "ret",  "defer", "switch",
           "case", "break", "continue", "sizeof", "true", "false", "null"};
       for (size_t i = 0; i < sizeof(local_kws) / sizeof(local_kws[0]); i++) {
-        add_completion_item(jdoc, result, local_kws[i], 14, "keyword", NULL, NULL);
+        add_completion_item(jdoc, result, local_kws[i], 14, "keyword", NULL,
+                            NULL);
       }
       add_local_completions(jdoc, result, containing_func, line + 1);
     }
