@@ -2074,25 +2074,122 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
 
   if (!res.decl_node) {
     const char *target_name = &doc->txt[ident_start];
-    for (size_t i = 0; i < server_state.open_docs.capacity; i++) {
-      HashEntry *entry = server_state.open_docs.buckets[i];
-      while (entry) {
-        Doc *d = (Doc *)entry->value;
-        if (d->ast_root) {
-          AstNode *stmt = d->ast_root->as.block.first_stmt;
-          while (stmt) {
-            if (stmt->type == AST_FUNC) {
-              Token t = stmt->as.func_def.fn_name;
-              if (t.len == ident_len &&
-                  strncmp(t.start, target_name, ident_len) == 0) {
-                res.decl_node = stmt;
-                goto fallback_found;
+
+    // Attempt to resolve module access if a dot is before the identifier
+    int temp_p = ident_start - 1;
+    while (temp_p >= 0 && isspace((unsigned char)doc->txt[temp_p]))
+      temp_p--;
+
+    if (temp_p >= 0 && doc->txt[temp_p] == '.') {
+      temp_p--;
+      while (temp_p >= 0 && isspace((unsigned char)doc->txt[temp_p]))
+        temp_p--;
+      unsigned int mod_end = temp_p;
+      while (temp_p >= 0 && (isalnum((unsigned char)doc->txt[temp_p]) ||
+                             doc->txt[temp_p] == '_'))
+        temp_p--;
+      unsigned int mod_start = temp_p + 1;
+      unsigned int mod_len = mod_end - mod_start + 1;
+
+      if (mod_len > 0) {
+        char mod_name[256];
+        snprintf(mod_name, sizeof(mod_name), "%.*s", (int)mod_len,
+                 &doc->txt[mod_start]);
+
+        AstNode *top_stmt = doc->ast_root->as.block.first_stmt;
+        while (top_stmt) {
+          if (top_stmt->type == AST_USE) {
+            char extract_name[256] = {0};
+            extract_use_namespace(top_stmt, extract_name, sizeof(extract_name));
+
+            if (strlen(extract_name) == mod_len &&
+                strncmp(mod_name, extract_name, mod_len) == 0) {
+              Token pt = top_stmt->as.use_stmt.path;
+              if (pt.len >= 2) {
+                char rel_path[PATH_MAX];
+                strncpy(rel_path, pt.start + 1, pt.len - 2);
+                rel_path[pt.len - 2] = '\0';
+
+                char *current_abs = absolute_from_uri(uri);
+                if (current_abs) {
+                  char *last_slash = strrchr(current_abs, '/');
+                  if (last_slash)
+                    *last_slash = '\0';
+
+                  char full_path[PATH_MAX];
+                  if (rel_path[0] == '/')
+                    snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                  else
+                    snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
+                             rel_path);
+
+                  char *resolved = realpath(full_path, NULL);
+                  if (resolved) {
+                    char target_uri[8192];
+                    snprintf(target_uri, sizeof(target_uri), "file://%s",
+                             resolved);
+                    Doc *imported_doc =
+                        (Doc *)map_get(&server_state.open_docs, target_uri,
+                                       strlen(target_uri));
+
+                    AstNode *mod_ast = NULL;
+                    if (imported_doc && imported_doc->ast_root) {
+                      mod_ast = imported_doc->ast_root;
+                    } else {
+                      mod_ast = file_to_ast(&tmp_arena, resolved, true);
+                    }
+
+                    if (mod_ast) {
+                      AstNode *mod_stmt = mod_ast->as.block.first_stmt;
+                      while (mod_stmt) {
+                        if (mod_stmt->type == AST_FUNC) {
+                          Token t = mod_stmt->as.func_def.fn_name;
+                          if (t.len == ident_len &&
+                              strncmp(t.start, target_name, ident_len) == 0) {
+                            res.decl_node = mod_stmt;
+                            free(resolved);
+                            free(current_abs);
+                            goto fallback_found;
+                          }
+                        }
+                        mod_stmt = mod_stmt->next;
+                      }
+                    }
+                    free(resolved);
+                  }
+                  free(current_abs);
+                }
               }
+              break;
             }
-            stmt = stmt->next;
           }
+          top_stmt = top_stmt->next;
         }
-        entry = entry->next;
+      }
+    }
+
+    // Local/non-module functions
+    if (!res.decl_node) {
+      for (size_t i = 0; i < server_state.open_docs.capacity; i++) {
+        HashEntry *entry = server_state.open_docs.buckets[i];
+        while (entry) {
+          Doc *d = (Doc *)entry->value;
+          if (d->ast_root) {
+            AstNode *stmt = d->ast_root->as.block.first_stmt;
+            while (stmt) {
+              if (stmt->type == AST_FUNC) {
+                Token t = stmt->as.func_def.fn_name;
+                if (t.len == ident_len &&
+                    strncmp(t.start, target_name, ident_len) == 0) {
+                  res.decl_node = stmt;
+                  goto fallback_found;
+                }
+              }
+              stmt = stmt->next;
+            }
+          }
+          entry = entry->next;
+        }
       }
     }
   }
