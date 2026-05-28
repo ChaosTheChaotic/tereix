@@ -23,7 +23,7 @@ typedef struct {
     INITIALIZED,
     SHUTDOWN,
   } state;
-  HashMap open_docs;
+  HashMap docs;
   unsigned int doc_count;
   yyjson_doc *capabilities;
   const char *root_uri;

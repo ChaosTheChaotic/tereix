@@ -15,8 +15,35 @@ extern Module *sem_main_mod;
 
 static LspState server_state = {.state = UNINITIALIZED};
 
-void extract_use_namespace(AstNode *use_stmt, char *out_name,
-                                  size_t max_len) {
+Doc *get_or_load_doc(const char *uri, const char *abs_path) {
+  Doc *d = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
+  if (d)
+    return d;
+
+  const char *file_txt = load_file(abs_path);
+  if (!file_txt)
+    return NULL;
+
+  d = malloc(sizeof(Doc));
+  d->uri = strdup(uri);
+  d->txt = strdup(file_txt);
+  free((void *)file_txt);
+  d->version = 0;
+
+  d->ast_arena = malloc(sizeof(Arena));
+  *d->ast_arena = (Arena){0};
+
+  DiagList diags;
+  diaglist_init(&diags, 1024);
+  d->ast_root = str_to_ast(d->ast_arena, d->txt, abs_path, &diags, true);
+  diaglist_free(&diags);
+
+  map_set(&server_state.docs, d->uri, strlen(d->uri), d);
+  server_state.doc_count++;
+  return d;
+}
+
+void extract_use_namespace(AstNode *use_stmt, char *out_name, size_t max_len) {
   Token alias = use_stmt->as.use_stmt.alias;
   if (alias.len > 0) {
     snprintf(out_name, max_len, "%.*s", (int)alias.len, alias.start);
@@ -108,30 +135,35 @@ size_t format_type_to_buf(DataType type, char *buf, size_t size) {
 }
 
 void format_func_signature(AstNode *func_node, char *buf, size_t size) {
-    if (!func_node || func_node->type != AST_FUNC) return;
+  if (!func_node || func_node->type != AST_FUNC)
+    return;
 
-    size_t offset = 0;
-    
-    // Return Type
-    offset += format_type_to_buf(func_node->as.func_def.ret_type, buf + offset, size - offset);
-    
-    // Name
-    offset += snprintf(buf + offset, size - offset, " %.*s(", 
-                       (int)func_node->as.func_def.fn_name.len, func_node->as.func_def.fn_name.start);
+  size_t offset = 0;
 
-    // Parameters
-    AstNode *param = func_node->as.func_def.params;
-    while (param && offset < size - 1) {
-        offset += format_type_to_buf(param->as.fn_param.type, buf + offset, size - offset);
-        offset += snprintf(buf + offset, size - offset, " %.*s", 
-                           (int)param->as.fn_param.id.len, param->as.fn_param.id.start);
-        
-        if (param->next) {
-            offset += snprintf(buf + offset, size - offset, ", ");
-        }
-        param = param->next;
+  // Return Type
+  offset += format_type_to_buf(func_node->as.func_def.ret_type, buf + offset,
+                               size - offset);
+
+  // Name
+  offset += snprintf(buf + offset, size - offset, " %.*s(",
+                     (int)func_node->as.func_def.fn_name.len,
+                     func_node->as.func_def.fn_name.start);
+
+  // Parameters
+  AstNode *param = func_node->as.func_def.params;
+  while (param && offset < size - 1) {
+    offset += format_type_to_buf(param->as.fn_param.type, buf + offset,
+                                 size - offset);
+    offset +=
+        snprintf(buf + offset, size - offset, " %.*s",
+                 (int)param->as.fn_param.id.len, param->as.fn_param.id.start);
+
+    if (param->next) {
+      offset += snprintf(buf + offset, size - offset, ", ");
     }
-    snprintf(buf + offset, size - offset, ")");
+    param = param->next;
+  }
+  snprintf(buf + offset, size - offset, ")");
 }
 
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
@@ -387,8 +419,8 @@ ResolvedNode resolve_node_to_decl(AstNode *ident, Arena *tmp_arena) {
       char target_uri[8192];
       snprintf(target_uri, sizeof(target_uri), "file://%s", mod_fpath);
 
-      Doc *d = (Doc *)map_get(&server_state.open_docs, target_uri,
-                              strlen(target_uri));
+      Doc *d =
+          (Doc *)map_get(&server_state.docs, target_uri, strlen(target_uri));
       AstNode *ast_root = NULL;
 
       if (d && d->ast_root) {
@@ -415,8 +447,8 @@ ResolvedNode resolve_node_to_decl(AstNode *ident, Arena *tmp_arena) {
     } else {
       Token ag_name = base->eval_type.name;
       if (ag_name.len > 0) {
-        for (size_t i = 0; i < server_state.open_docs.capacity; i++) {
-          HashEntry *entry = server_state.open_docs.buckets[i];
+        for (size_t i = 0; i < server_state.docs.capacity; i++) {
+          HashEntry *entry = server_state.docs.buckets[i];
           while (entry) {
             Doc *d = (Doc *)entry->value;
             if (d->ast_root) {
@@ -470,7 +502,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
   int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
   int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
 
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (!doc || !doc->ast_root) {
     goto empty_response;
   }
@@ -728,7 +760,7 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
   int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
   int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
 
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (!doc || !doc->ast_root) {
     goto empty_response;
   }
@@ -749,27 +781,16 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
       if (res.fpath) {
         char target_uri[8192];
         snprintf(target_uri, sizeof(target_uri), "file://%s", res.fpath);
-        Doc *target_doc = (Doc *)map_get(&server_state.open_docs, target_uri,
-                                         strlen(target_uri));
+        Doc *target_doc =
+            (Doc *)map_get(&server_state.docs, target_uri, strlen(target_uri));
         if (target_doc) {
           source_txt = target_doc->txt;
         } else {
           // If the destination file isnt open, load text from disk so hover
           // documentation still works
-          FILE *f = fopen(res.fpath, "rb");
-          if (f) {
-            fseek(f, 0, SEEK_END);
-            long flen = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            if (flen >= 0) {
-              source_txt = malloc(flen + 1);
-              if (source_txt) {
-                size_t read_bytes = fread(source_txt, 1, flen, f);
-                source_txt[read_bytes] = '\0';
-                allocated_source = true;
-              }
-            }
-            fclose(f);
+          Doc *target_doc = get_or_load_doc(target_uri, res.fpath);
+          if (target_doc) {
+            source_txt = target_doc->txt;
           }
         }
       } else {
@@ -986,7 +1007,7 @@ void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
 }
 
 AstNode *find_sue_decl(AstNode *root, const char *target_name,
-                             size_t target_len) {
+                       size_t target_len) {
   if (!root)
     return NULL;
   AstNode *stmt = root->as.block.first_stmt;
@@ -1065,7 +1086,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
   int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
   int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
 
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (!doc || !doc->ast_root) {
     goto empty_response;
   }
@@ -1152,13 +1173,9 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                   char target_uri[8192];
                   snprintf(target_uri, sizeof(target_uri), "file://%s",
                            resolved);
-                  Doc *imported_doc = (Doc *)map_get(
-                      &server_state.open_docs, target_uri, strlen(target_uri));
-
+                  Doc *imported_doc = get_or_load_doc(target_uri, resolved);
                   if (imported_doc && imported_doc->ast_root) {
                     mod_ast = imported_doc->ast_root;
-                  } else {
-                    mod_ast = file_to_ast(&tmp_arena, resolved, true);
                   }
                   free(resolved);
                 }
@@ -1356,9 +1373,8 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                       char target_uri[8192];
                       snprintf(target_uri, sizeof(target_uri), "file://%s",
                                resolved);
-                      Doc *imported_doc =
-                          (Doc *)map_get(&server_state.open_docs, target_uri,
-                                         strlen(target_uri));
+                      Doc *imported_doc = (Doc *)map_get(
+                          &server_state.docs, target_uri, strlen(target_uri));
                       if (imported_doc && imported_doc->ast_root) {
                         type_decl =
                             find_sue_decl(imported_doc->ast_root,
@@ -1404,7 +1420,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             use_stmt = use_stmt->next;
           }
         } else {
-					// Current then imported
+          // Current then imported
           type_decl =
               find_sue_decl(doc->ast_root, type_name.start, type_name.len);
           if (!type_decl) {
@@ -1433,9 +1449,8 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                       char target_uri[8192];
                       snprintf(target_uri, sizeof(target_uri), "file://%s",
                                resolved);
-                      Doc *imported_doc =
-                          (Doc *)map_get(&server_state.open_docs, target_uri,
-                                         strlen(target_uri));
+                      Doc *imported_doc = (Doc *)map_get(
+                          &server_state.docs, target_uri, strlen(target_uri));
                       if (imported_doc && imported_doc->ast_root) {
                         type_decl =
                             find_sue_decl(imported_doc->ast_root,
@@ -1630,7 +1645,7 @@ void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
 
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (!doc || !doc->ast_root) {
     yyjson_mut_val *root;
     yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
@@ -1823,19 +1838,11 @@ void compile_doc(Doc *doc) {
       if (strcmp(curr_abs, abspath) == 0) {
         ast = root;
       } else {
-        // Get deps currently open in editor
         char uri_buf[8192];
         snprintf(uri_buf, sizeof(uri_buf), "file://%s", curr_abs);
-        Doc *open_doc =
-            (Doc *)map_get(&server_state.open_docs, uri_buf, strlen(uri_buf));
-
-        if (open_doc) {
-          // Pass null for diags to avoid displaying external syntax errors in
-          // the current file
-          ast = str_to_ast(doc->ast_arena, open_doc->txt, curr_abs, NULL, true);
-        } else {
-          // Fall back to reading straight off the disk
-          ast = file_to_ast(doc->ast_arena, curr_abs, true);
+        Doc *dep = get_or_load_doc(uri_buf, curr_abs);
+        if (dep) {
+          ast = dep->ast_root;
         }
       }
 
@@ -1878,28 +1885,15 @@ void compile_doc(Doc *doc) {
       }
     }
 
-    ScopeStack ss;
-    scope_stack_init(&ss, doc->ast_arena);
+    if (sem_main_mod) {
+      ScopeStack ss;
+      scope_stack_init(&ss, doc->ast_arena);
 
-    for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
-      HashEntry *entry = sem.mod_cache.buckets[i];
-      while (entry) {
-        Module *mod = (Module *)entry->value;
-        ss.count = 0;
-        sem_current_mod = mod;
-        resolve_scopes(doc->ast_arena, mod, &ss, &sem);
-        entry = entry->next;
-      }
-    }
+      sem_current_mod = sem_main_mod;
+      resolve_scopes(doc->ast_arena, sem_main_mod, &ss, &sem);
 
-    for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
-      HashEntry *entry = sem.mod_cache.buckets[i];
-      while (entry) {
-        Module *mod = (Module *)entry->value;
-        sem_current_mod = mod;
-        type_check_ast(doc->ast_arena, mod->ast_root, &sem);
-        entry = entry->next;
-      }
+      sem_current_mod = sem_main_mod;
+      type_check_ast(doc->ast_arena, sem_main_mod->ast_root, &sem);
     }
 
     doc->ast_root = root; // Cache the primary AST for Hover/Go-To definitions
@@ -1918,7 +1912,7 @@ void compile_doc(Doc *doc) {
 void handle_did_save(yyjson_val *params) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (doc)
     compile_doc(doc);
 }
@@ -1929,22 +1923,16 @@ void handle_did_open(yyjson_val *params) {
   const char *text = yyjson_get_str(yyjson_obj_get(text_doc, "text"));
   int version = yyjson_get_int(yyjson_obj_get(text_doc, "version"));
 
-  Doc *existing = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  Doc *existing = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (existing) {
-    // same cleanup as handle_did_close, but without publishing empty
-    // diagnostics
-    map_remove(&server_state.open_docs, uri, strlen(uri));
-    if (existing->ast_arena) {
-      arena_free_all(existing->ast_arena);
-      free(existing->ast_arena);
-    }
-    free(existing->uri);
+    // If it was already cached as a dependency, just update its text
     free(existing->txt);
-    free(existing);
-    server_state.doc_count--;
+    existing->txt = strdup(text);
+    existing->version = version;
+    compile_doc(existing);
+    return;
   }
 
-  // Allocate and store the document in your LspState hashmap
   Doc *doc = malloc(sizeof(Doc));
   doc->uri = strdup(uri);
   doc->txt = strdup(text);
@@ -1952,8 +1940,7 @@ void handle_did_open(yyjson_val *params) {
   doc->ast_arena = NULL;
   doc->ast_root = NULL;
 
-  // Assuming you initialize server_state.open_docs somewhere
-  map_set(&server_state.open_docs, doc->uri, strlen(doc->uri), doc);
+  map_set(&server_state.docs, doc->uri, strlen(doc->uri), doc);
   server_state.doc_count++;
 
   compile_doc(doc);
@@ -1964,7 +1951,7 @@ void handle_did_change(yyjson_val *params) {
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
   int version = yyjson_get_int(yyjson_obj_get(text_doc, "version"));
 
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (!doc)
     return;
   if (version <= doc->version)
@@ -1986,18 +1973,7 @@ void handle_did_close(yyjson_val *params) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
 
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
-  if (doc) {
-    map_remove(&server_state.open_docs, uri, strlen(uri));
-    if (doc->ast_arena) {
-      arena_free_all(doc->ast_arena);
-      free(doc->ast_arena);
-    }
-    free(doc->uri);
-    free(doc->txt);
-    free(doc);
-    server_state.doc_count--;
-  }
+  // We leave the Doc entirely intact in the map as a dependency cache
   DiagList empty = {0};
   publish_diagnostics_from_list(uri, &empty);
 }
@@ -2009,7 +1985,7 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
   int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
   int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
 
-  Doc *doc = (Doc *)map_get(&server_state.open_docs, uri, strlen(uri));
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (!doc || !doc->txt)
     goto empty_response;
 
@@ -2128,15 +2104,10 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
                     char target_uri[8192];
                     snprintf(target_uri, sizeof(target_uri), "file://%s",
                              resolved);
-                    Doc *imported_doc =
-                        (Doc *)map_get(&server_state.open_docs, target_uri,
-                                       strlen(target_uri));
-
                     AstNode *mod_ast = NULL;
+                    Doc *imported_doc = get_or_load_doc(target_uri, resolved);
                     if (imported_doc && imported_doc->ast_root) {
                       mod_ast = imported_doc->ast_root;
-                    } else {
-                      mod_ast = file_to_ast(&tmp_arena, resolved, true);
                     }
 
                     if (mod_ast) {
@@ -2170,8 +2141,8 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
 
     // Local/non-module functions
     if (!res.decl_node) {
-      for (size_t i = 0; i < server_state.open_docs.capacity; i++) {
-        HashEntry *entry = server_state.open_docs.buckets[i];
+      for (size_t i = 0; i < server_state.docs.capacity; i++) {
+        HashEntry *entry = server_state.docs.buckets[i];
         while (entry) {
           Doc *d = (Doc *)entry->value;
           if (d->ast_root) {
@@ -2277,7 +2248,7 @@ void start_lsp_server() {
   // Disable stdout buffering so messages go straight to the editor
   setvbuf(stdout, NULL, _IONBF, 0);
   Arena lsp_arena = {0};
-  map_init(&server_state.open_docs, &lsp_arena, 64);
+  map_init(&server_state.docs, &lsp_arena, 64);
   server_state.state = UNINITIALIZED;
 
   while (1) {
