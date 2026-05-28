@@ -1710,7 +1710,7 @@ void handle_initialize(yyjson_val *params, yyjson_val *id) {
 
   yyjson_mut_val *result = yyjson_mut_obj(doc);
   yyjson_mut_val *capabilities = yyjson_mut_obj(doc);
-  yyjson_mut_obj_add_int(doc, capabilities, "textDocumentSync", 1);
+  yyjson_mut_obj_add_int(doc, capabilities, "textDocumentSync", 2);
   yyjson_mut_obj_add_bool(doc, capabilities, "definitionProvider", true);
   yyjson_mut_obj_add_bool(doc, capabilities, "hoverProvider", true);
   yyjson_mut_obj_add_bool(doc, capabilities, "documentSymbolProvider", true);
@@ -1957,14 +1957,52 @@ void handle_did_change(yyjson_val *params) {
   if (version <= doc->version)
     return;
 
-  // Because textDocumentSync is 1 (Full), contentChanges is an array
-  // where the first element contains the full updated text.
   yyjson_val *changes = yyjson_obj_get(params, "contentChanges");
-  yyjson_val *first_change = yyjson_arr_get(changes, 0);
-  const char *new_text = yyjson_get_str(yyjson_obj_get(first_change, "text"));
+  yyjson_val *change;
+  size_t idx, max;
 
-  free(doc->txt); // Free the old text buffer
-  doc->txt = strdup(new_text);
+  yyjson_arr_foreach(changes, idx, max, change) {
+    yyjson_val *range = yyjson_obj_get(change, "range");
+    const char *new_text = yyjson_get_str(yyjson_obj_get(change, "text"));
+
+    if (!range) {
+			// Full doc update
+      free(doc->txt);
+      doc->txt = strdup(new_text);
+    } else {
+			// Inc update
+      yyjson_val *start = yyjson_obj_get(range, "start");
+      yyjson_val *end = yyjson_obj_get(range, "end");
+
+      int start_line = yyjson_get_int(yyjson_obj_get(start, "line"));
+      int start_char = yyjson_get_int(yyjson_obj_get(start, "character"));
+      int end_line = yyjson_get_int(yyjson_obj_get(end, "line"));
+      int end_char = yyjson_get_int(yyjson_obj_get(end, "character"));
+
+      // Convert line/char coordinates to absolute string indices
+      int start_idx = get_index_from_pos(doc->txt, start_line, start_char);
+      int end_idx = get_index_from_pos(doc->txt, end_line, end_char);
+
+      size_t old_len = strlen(doc->txt);
+      size_t new_text_len = strlen(new_text);
+
+      // (Prefix length) + (Inserted text length) + (Suffix length)
+      size_t final_len = start_idx + new_text_len + (old_len - end_idx);
+
+      char *updated_txt = malloc(final_len + 1);
+
+      // Splice the string together
+      memcpy(updated_txt, doc->txt, start_idx); // Prefix
+      memcpy(updated_txt + start_idx, new_text, new_text_len); // Insertion
+      memcpy(updated_txt + start_idx + new_text_len, doc->txt + end_idx,
+             old_len - end_idx); // Suffix
+      updated_txt[final_len] = '\0';
+
+      free(doc->txt);
+      doc->txt = updated_txt;
+    }
+  }
+
   doc->version = version;
   compile_doc(doc);
 }
