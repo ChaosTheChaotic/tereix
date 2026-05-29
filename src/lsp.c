@@ -33,10 +33,8 @@ Doc *get_or_load_doc(const char *uri, const char *abs_path) {
   d->ast_arena = malloc(sizeof(Arena));
   *d->ast_arena = (Arena){0};
 
-  DiagList diags;
-  diaglist_init(&diags, 1024);
-  d->ast_root = str_to_ast(d->ast_arena, d->txt, abs_path, &diags, true);
-  diaglist_free(&diags);
+  diaglist_init(&d->diags, 1024);
+  d->ast_root = str_to_ast(d->ast_arena, d->txt, abs_path, &d->diags, true);
 
   map_set(&server_state.docs, d->uri, strlen(d->uri), d);
   server_state.doc_count++;
@@ -1885,23 +1883,202 @@ void compile_doc(Doc *doc) {
       }
     }
 
-    if (sem_main_mod) {
-      ScopeStack ss;
-      scope_stack_init(&ss, doc->ast_arena);
-
-      sem_current_mod = sem_main_mod;
-      resolve_scopes(doc->ast_arena, sem_main_mod, &ss, &sem);
-
-      sem_current_mod = sem_main_mod;
-      type_check_ast(doc->ast_arena, sem_main_mod->ast_root, &sem);
+    for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+      HashEntry *entry = sem.mod_cache.buckets[i];
+      while (entry) {
+        Module *mod = (Module *)entry->value;
+        if (mod && mod->ast_root) {
+          // Each module has its own global scope so we create a fresh ScopeStack.
+          ScopeStack ss;
+          scope_stack_init(&ss, doc->ast_arena);
+          sem_current_mod = mod;
+          resolve_scopes(doc->ast_arena, mod, &ss, &sem);
+          type_check_ast(doc->ast_arena, mod->ast_root, &sem);
+        }
+        entry = entry->next;
+      }
     }
 
     doc->ast_root = root; // Cache the primary AST for Hover/Go-To definitions
+
+    // Propagate errors from dependencies to the main document
+    if (sem_main_mod && doc->ast_arena) {
+      HashMap transitive_origins;
+      map_init(&transitive_origins, doc->ast_arena, 64);
+
+      size_t max_mods = sem.mod_cache.capacity;
+      Module **queue = arena_alloc(doc->ast_arena, sizeof(Module *) * max_mods);
+      size_t head = 0;
+      size_t tail = 0;
+
+      AstNode *stmt = sem_main_mod->ast_root->as.block.first_stmt;
+      while (stmt) {
+        if (stmt->type == AST_USE) {
+          Token path_tok = stmt->as.use_stmt.path;
+          if (path_tok.len >= 2 && path_tok.start[0] == '"' &&
+              path_tok.start[path_tok.len - 1] == '"') {
+            char rel_path[PATH_MAX];
+            strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
+            rel_path[path_tok.len - 2] = '\0';
+
+            char *current_abs = absolute_from_uri(doc->uri);
+            if (current_abs) {
+              char *last_slash = strrchr(current_abs, '/');
+              if (last_slash)
+                *last_slash = '\0';
+
+              char full_path[PATH_MAX];
+              if (rel_path[0] == '/')
+                snprintf(full_path, sizeof(full_path), "%s", rel_path);
+              else
+                snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
+                         rel_path);
+
+              char *resolved = realpath(full_path, NULL);
+              if (resolved) {
+                Module *imported =
+                    map_get(&sem.mod_cache, resolved, strlen(resolved));
+                if (imported && imported != sem_main_mod) {
+                  // If not yet visited, record origin and enqueue
+                  if (!map_get(&transitive_origins, imported->abs_path,
+                               strlen(imported->abs_path))) {
+                    map_set(&transitive_origins, imported->abs_path,
+                            strlen(imported->abs_path), stmt);
+                    queue[tail++] = imported;
+                  }
+                }
+                free(resolved);
+              }
+              free(current_abs);
+            }
+          }
+        }
+        stmt = stmt->next;
+      }
+
+      while (head < tail) {
+        Module *curr_mod = queue[head++];
+        AstNode *origin_use_stmt =
+            map_get(&transitive_origins, curr_mod->abs_path,
+                    strlen(curr_mod->abs_path));
+
+        AstNode *c_stmt = curr_mod->ast_root->as.block.first_stmt;
+        while (c_stmt) {
+          if (c_stmt->type == AST_USE) {
+            Token path_tok = c_stmt->as.use_stmt.path;
+            if (path_tok.len >= 2 && path_tok.start[0] == '"' &&
+                path_tok.start[path_tok.len - 1] == '"') {
+              char rel_path[PATH_MAX];
+              strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
+              rel_path[path_tok.len - 2] = '\0';
+
+              char *last_slash = strrchr(curr_mod->abs_path, '/');
+              if (last_slash) {
+                size_t dir_len = last_slash - curr_mod->abs_path;
+                char dir_path[PATH_MAX];
+                strncpy(dir_path, curr_mod->abs_path, dir_len);
+                dir_path[dir_len] = '\0';
+
+                char full_path[PATH_MAX];
+                if (rel_path[0] == '/')
+                  snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                else
+                  snprintf(full_path, sizeof(full_path), "%s/%s", dir_path,
+                           rel_path);
+
+                char *resolved = realpath(full_path, NULL);
+                if (resolved) {
+                  Module *trans_imported =
+                      map_get(&sem.mod_cache, resolved, strlen(resolved));
+                  if (trans_imported && trans_imported != sem_main_mod) {
+                    // Check if visited to prevent circular dependency loops
+                    if (!map_get(&transitive_origins, trans_imported->abs_path,
+                                 strlen(trans_imported->abs_path))) {
+                      // Inherit the origin_use_stmt of the parent that imported
+                      // it
+                      map_set(&transitive_origins, trans_imported->abs_path,
+                              strlen(trans_imported->abs_path),
+                              origin_use_stmt);
+                      queue[tail++] = trans_imported;
+                    }
+                  }
+                  free(resolved);
+                }
+              }
+            }
+          }
+          c_stmt = c_stmt->next;
+        }
+      }
+
+      // Publish diagnostics mapping back to the top-level use statement
+      for (size_t i = 0; i < transitive_origins.capacity; i++) {
+        HashEntry *entry = transitive_origins.buckets[i];
+        while (entry) {
+          Module *m = map_get(&sem.mod_cache, entry->key, entry->key_len);
+          AstNode *use_stmt = (AstNode *)entry->value;
+
+          char uri[PATH_MAX + 8];
+          snprintf(uri, sizeof(uri), "file://%s", (const char *)entry->key);
+          Doc *mod_doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
+
+          if (mod_doc && mod_doc->diags.count > 0 && m) {
+            Token loc =
+                use_stmt->as.use_stmt
+                    .path; // Location of the string literal in the main file
+
+            for (size_t d = 0; d < mod_doc->diags.count; d++) {
+              Diag *orig = &mod_doc->diags.items[d];
+              char enhanced[1024];
+              // Includes the actual module name where the error originated to
+              // avoid confusion
+              snprintf(enhanced, sizeof(enhanced), "Error in module '%s': %s",
+                       m->mod_name, orig->message);
+
+              diaglist_add(&doc->diags, orig->severity, enhanced, doc->uri + 7,
+                           loc.line, loc.col, loc.line, loc.col + loc.len);
+            }
+          }
+          entry = entry->next;
+        }
+      }
+      map_free_buckets(&transitive_origins);
+    }
 
     if (pending.paths) {
       free((void *)pending.paths);
     }
     sem_deinit(&sem);
+  }
+
+  HashMap diag_groups;
+  map_init(&diag_groups, doc->ast_arena, 32);
+
+  for (size_t i = 0; i < diags.count; i++) {
+    Diag *d = &diags.items[i];
+    if (!d->file)
+      continue;
+    DiagList *group = map_get(&diag_groups, d->file, strlen(d->file));
+    if (!group) {
+      group = arena_alloc(doc->ast_arena, sizeof(DiagList));
+      diaglist_init(group, 8);
+      map_set(&diag_groups, d->file, strlen(d->file), group);
+    }
+    diaglist_add(group, d->severity, d->message, d->file, d->start_line + 1,
+                 d->start_char + 1, d->end_line + 1, d->end_char + 1);
+  }
+
+  // Publish each group
+  for (size_t i = 0; i < diag_groups.capacity; i++) {
+    HashEntry *entry = diag_groups.buckets[i];
+    while (entry) {
+      const char *file_path = entry->key;
+      DiagList *group = (DiagList *)entry->value;
+      char uri[PATH_MAX + 8];
+      snprintf(uri, sizeof(uri), "file://%s", file_path);
+      publish_diagnostics_from_list(uri, group);
+      entry = entry->next;
+    }
   }
 
   publish_diagnostics_from_list(doc->uri, &diags);

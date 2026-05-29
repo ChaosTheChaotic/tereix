@@ -2,6 +2,7 @@
 #define LSP_H
 
 #include "ast_types.h"
+#include "diag.h"
 #include "hashmap.h"
 #include "sem_types.h"
 #include "yyjson.h"
@@ -14,6 +15,7 @@ typedef struct {
 
   Arena *ast_arena;
   AstNode *ast_root;
+	DiagList diags;
 } Doc;
 
 typedef struct {
