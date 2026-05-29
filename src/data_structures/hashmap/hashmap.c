@@ -1,13 +1,5 @@
 #include "hashmap.h"
-
-uint32_t hash_string(const char *key, size_t len) {
-  uint32_t hash = 2166136261u;
-  for (size_t i = 0; i < len; i++) {
-    hash ^= (uint8_t)key[i];
-    hash *= 16777619;
-  }
-  return hash;
-}
+#include "hashutils.h"
 
 void map_init(HashMap *map, Arena *arena, size_t capacity) {
   map->arena = arena;
