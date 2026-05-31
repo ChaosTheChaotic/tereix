@@ -64,3 +64,6 @@ result-*
 .direnv/
 flake.lock
 .cache/
+
+# Tereix
+.tx_cache/

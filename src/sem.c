@@ -18,6 +18,39 @@ typedef struct {
 static ImportRelation import_relations[MAX_IMPORT_RELATIONS];
 static int import_relations_count = 0;
 
+void propagate_dirty_state(SemCtx *ctx) {
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t i = 0; i < ctx->mod_cache.capacity; i++) {
+      HashEntry *entry = ctx->mod_cache.buckets[i];
+      while (entry) {
+        Module *mod = (Module *)entry->value;
+        if (mod->is_dirty) {
+          entry = entry->next;
+          continue;
+        }
+
+        for (size_t j = 0; j < mod->imported_mods.capacity; j++) {
+          HashEntry *imp_entry = mod->imported_mods.buckets[j];
+          while (imp_entry) {
+            Module *imported = (Module *)imp_entry->value;
+            if (imported->interface_changed) {
+              mod->is_dirty = true;
+              changed = true;
+              break;
+            }
+            imp_entry = imp_entry->next;
+          }
+          if (mod->is_dirty)
+            break;
+        }
+        entry = entry->next;
+      }
+    }
+  }
+}
+
 void record_import(Module *mod, Module *parent_mod, AstNode *use_stmt) {
   for (int i = 0; i < import_relations_count; i++) {
     if (import_relations[i].mod == mod) {
@@ -132,6 +165,7 @@ Module *new_mod(Arena *arena, const char *abs_path, const char *mod_name,
   m->abs_path = abs_path;
   m->mod_name = mod_name;
   m->ast_root = ast;
+  m->mod_arena = NULL;
 
   map_init(&m->local_symbols, arena, 128);
   map_init(&m->imported_mods, arena, 32);
@@ -194,6 +228,18 @@ bool is_type_compatible(DataType target, DataType source, bool is_explicit) {
 }
 
 bool resolve_imports(Arena *arena, SemCtx *sem) {
+  import_relations_count = 0;
+
+  for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
+    HashEntry *entry = sem->mod_cache.buckets[i];
+    while (entry) {
+      Module *m = (Module *)entry->value;
+      map_free_buckets(&m->imported_mods);
+      map_init(&m->imported_mods, m->mod_arena ? m->mod_arena : arena, 32);
+      entry = entry->next;
+    }
+  }
+
   for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
     HashEntry *entry = sem->mod_cache.buckets[i];
     while (entry) {
@@ -252,6 +298,8 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
 }
 
 bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
+  Arena *alloc_arena = mod->mod_arena ? mod->mod_arena : arena;
+
   AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
     Token name = {0};
@@ -301,7 +349,7 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
           return false;
         }
       }
-      Sym *sym = new_sym(arena, kind, name, stmt, mod->abs_path);
+      Sym *sym = new_sym(alloc_arena, kind, name, stmt, mod->abs_path);
       map_set(&mod->local_symbols, name.start, name.len, sym);
     }
     stmt = stmt->next;

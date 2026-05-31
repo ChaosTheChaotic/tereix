@@ -171,8 +171,8 @@ typedef struct AstNode {
     struct {
       Token path;
       Token alias; // .len == 0 if no alias
-			Token use_kw;
-			Token semicln;
+      Token use_kw;
+      Token semicln;
     } use_stmt;
     struct {
       Token val;
@@ -194,6 +194,14 @@ typedef struct AstNode {
     } sizeof_expr;
   } as;
 } AstNode;
+
+// When writing the node to disk
+typedef struct SerNode {
+  ASTN_TYPE type;     // ASTN_TYPE enum value
+  uint32_t data_size; // size of the union data that follows
+  // pointer fields stored as uint32_t index of node pos (or 0xFFFFFFFF for
+  // NULL)
+} SerNode;
 
 typedef struct {
   Token op;
@@ -252,8 +260,7 @@ static const char *complist[] = {"==", "!=", "<=", ">=", "<", ">"};
 static const size_t complistlen = sizeof(complist) / sizeof(complist[0]);
 
 static const char *typelist[] = {
-    SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT)
-    "size",
+    SIZES(AS_UNSIGNED) SIZES(AS_SIGNED) SIZES(AS_FLOAT) "size",
     "bool",
     "str", // Technically should be parsed as char[] but oh well
     "void",
@@ -275,6 +282,13 @@ void write_ast(const char *path);
 void append_stmt(AstNode **head, AstNode *new_stmt);
 
 AstNode *file_to_ast(Arena *arena, const char *path, bool partial);
-AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath, DiagList *diag_list, bool partial);
+AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath,
+                    DiagList *diag_list, bool partial);
+
+AstNode *cache_read_ast(Arena *arena, const char *cache_path,
+                        const char *source_base);
+
+void cache_write_ast(const char *cache_path, AstNode *root,
+                     const char *source_base);
 
 #endif // !AST_TYPES_H

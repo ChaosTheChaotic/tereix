@@ -21,6 +21,13 @@ typedef struct Module {
   const char *mod_name;
   AstNode *ast_root;
 
+  Arena *mod_arena;
+
+  uint64_t content_hash;
+  uint64_t interface_hash;
+  bool is_dirty;
+  bool interface_changed;
+
   HashMap local_symbols;
   HashMap imported_mods;
 } Module;
@@ -81,5 +88,7 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx);
 void scope_stack_init(ScopeStack *ss, Arena *arena);
 void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx);
 void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx);
+
+void propagate_dirty_state(SemCtx *ctx);
 
 #endif // !SEM_TYPES_U

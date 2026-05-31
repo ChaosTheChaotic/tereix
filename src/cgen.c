@@ -1213,14 +1213,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
         break;
       case AST_PARAM:
         if (n->as.fn_param.id.len == 4 &&
-            strncmp(n->as.fn_param.id.start, "self", 4) == 0 && sue.len > 0) {
+            (n->as.fn_param.id.start == NULL ||
+             strncmp(n->as.fn_param.id.start, "self", 4) == 0) &&
+            sue.len > 0) {
           n->as.fn_param.id = sue;
           n->as.fn_param.type.name = sue;
         }
         break;
       case AST_VAR_DECL:
-        if (n->as.var_decl.id.len == 4 &&
-            strncmp(n->as.var_decl.id.start, "self", 4) == 0 && sue.len > 0)
+        if (n->as.var_decl.id.len == 4 && (n->as.var_decl.id.start == NULL ||
+            strncmp(n->as.var_decl.id.start, "self", 4) == 0) && sue.len > 0)
           n->as.var_decl.id = sue;
         if (sue.len > 0) {
           DataType *ft = &n->as.var_decl.type;

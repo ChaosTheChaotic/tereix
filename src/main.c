@@ -1,15 +1,9 @@
-#include "ast_types.h"
 #include "c_gen_types.h"
+#include "hashutils.h"
 #include "lsp.h"
-#include "sem_types.h"
 #include "util.h"
 #include "worklist.h"
-#include <limits.h>
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <sys/stat.h>
 
 extern Module *sem_current_mod;
 extern Module *sem_main_mod;
@@ -25,6 +19,17 @@ bool check_exists(const char *path) {
 }
 inline void print_help() {
   printf("Literally just give it a valid file bro smh");
+}
+
+void ensure_cache_dir() {
+  struct stat st = {0};
+  if (stat(".tx_cache", &st) == -1) {
+#if defined(_WIN32)
+    mkdir(".tx_cache");
+#else
+    mkdir(".tx_cache", 0700);
+#endif
+  }
 }
 
 void print_type_info(DataType type) {
@@ -405,6 +410,7 @@ void print_ast(AstNode *root) {
 }
 
 void compile_project(const char *entry_file) {
+  ensure_cache_dir();
   Arena arena = {0};
   SemCtx sem = {0};
   sem_init(&sem, &arena);
@@ -422,15 +428,66 @@ void compile_project(const char *entry_file) {
     if (!abs_path || map_get(&sem.mod_cache, abs_path, strlen(abs_path)))
       continue;
 
-    printf("Compiling %s\n", abs_path);
-    AstNode *ast = file_to_ast(&arena, abs_path, false);
-    if (!ast) {
-      fprintf(stderr, "No ast found after trying to parse %s\n", abs_path);
-      exit(1);
+    const char *content = load_file(abs_path);
+    uint64_t curr_hash = hash_string(content, strlen(content));
+    uint64_t path_hash = hash_string(abs_path, strlen(abs_path));
+
+    char cache_file[512];
+    snprintf(cache_file, sizeof(cache_file), ".tx_cache/%lu.cache", path_hash);
+
+    AstNode *ast = NULL;
+    bool cache_loaded = false;
+
+    // Read the metadata header
+    FILE *fp = fopen(cache_file, "rb");
+    uint64_t cached_content_hash = 0;
+    if (fp) {
+      if (fread(&cached_content_hash, sizeof(uint64_t), 1, fp) != 1) {
+        fclose(fp);
+        cached_content_hash = 0;
+      }
+      fclose(fp);
+    }
+
+    if (cached_content_hash == curr_hash) {
+      printf("Cache hit for %s\n", abs_path);
+      // Pass an offset to skip the header hash (8 bytes)
+      ast = cache_read_ast(&arena, cache_file, content);
+      if (ast)
+        cache_loaded = true;
+    }
+
+    if (!cache_loaded) {
+      printf("Compiling %s\n", abs_path);
+
+      DiagList diags;
+      diaglist_init(&diags, 1024);
+
+      ast = str_to_ast(&arena, content, abs_path, &diags, false);
+
+      if (!ast) {
+        for (size_t i = 0; i < diags.count; i++) {
+          printf("Error on %u:%u in file %s: %s\n", diags.items[i].start_line,
+                 diags.items[i].start_char, diags.items[i].file,
+                 diags.items[i].message);
+        }
+        fprintf(stderr, "No AST found after trying to parse %s\n", abs_path);
+        exit(1);
+      }
+      diaglist_free(&diags);
+
+      // Write the content hash, then the AST blob
+      FILE *out = fopen(cache_file, "wb");
+      if (out) {
+        fwrite(&curr_hash, sizeof(uint64_t), 1, out);
+        fclose(out);
+        cache_write_ast(cache_file, ast, content);
+      }
     }
 
     const char *mod_name = extract_mod_name(&arena, abs_path);
     Module *mod = new_mod(&arena, abs_path, mod_name, ast);
+    mod->content_hash = curr_hash;
 
     // Track the entry main module layer context first
     if (sem_main_mod == NULL) {
@@ -481,7 +538,6 @@ void compile_project(const char *entry_file) {
     HashEntry *entry = sem.mod_cache.buckets[i];
     while (entry) {
       Module *mod = (Module *)entry->value;
-
       ss.count = 0;
       sem_current_mod = mod;
       resolve_scopes(&arena, mod, &ss, &sem);
@@ -496,14 +552,22 @@ void compile_project(const char *entry_file) {
     HashEntry *entry = sem.mod_cache.buckets[i];
     while (entry) {
       Module *mod = (Module *)entry->value;
-
       sem_current_mod = mod;
       type_check_ast(&arena, mod->ast_root, &sem);
 
       entry = entry->next;
     }
   }
+
   printf("Type checking complete.\n");
+
+  for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+    HashEntry *entry = sem.mod_cache.buckets[i];
+    while (entry) {
+      ((Module *)entry->value)->is_dirty = false;
+      entry = entry->next;
+    }
+  }
 
   const char *abs_path = resolve_alloc(&arena, entry_file);
   Module *main_mod = map_get(&sem.mod_cache, abs_path, strlen(abs_path));

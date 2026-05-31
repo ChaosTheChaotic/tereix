@@ -2,6 +2,7 @@
 #include "arena.h"
 #include "ast_types.h"
 #include "diag.h"
+#include "hashutils.h"
 #include "sem_types.h"
 #include "util.h"
 #include "worklist.h"
@@ -14,6 +15,78 @@ extern Module *sem_current_mod;
 extern Module *sem_main_mod;
 
 static LspState server_state = {.state = UNINITIALIZED};
+
+uint64_t hash_module_interface(Module *mod) {
+  uint32_t hash = 2166136261u;
+  if (!mod || !mod->ast_root)
+    return hash;
+
+  AstNode *stmt = mod->ast_root->as.block.first_stmt;
+  while (stmt) {
+    if (stmt->type == AST_FUNC) {
+      Token name = stmt->as.func_def.fn_name;
+      Token ret = stmt->as.func_def.ret_type.name;
+
+      hash = combine_hash(hash, hash_string(name.start, name.len));
+      hash = combine_hash(hash, hash_string(ret.start, ret.len));
+      hash = combine_hash(hash, stmt->as.func_def.ret_type.ptr_depth);
+      hash = combine_hash(hash, stmt->as.func_def.ret_type.array_dimens);
+
+      AstNode *p = stmt->as.func_def.params;
+      while (p) {
+        Token p_type = p->as.fn_param.type.name;
+        hash = combine_hash(hash, hash_string(p_type.start, p_type.len));
+        hash = combine_hash(hash, p->as.fn_param.type.ptr_depth);
+        hash = combine_hash(hash, p->as.fn_param.type.array_dimens);
+        p = p->next;
+      }
+    } else if (stmt->type == AST_VAR_DECL) {
+      Token name = stmt->as.var_decl.id;
+      Token type = stmt->as.var_decl.type.name;
+
+      hash = combine_hash(hash, hash_string(name.start, name.len));
+      hash = combine_hash(hash, hash_string(type.start, type.len));
+      hash = combine_hash(hash, stmt->as.var_decl.type.ptr_depth);
+      hash = combine_hash(hash, stmt->as.var_decl.type.array_dimens);
+    } else if (stmt->type == AST_STRUCT || stmt->type == AST_UNION) {
+      Token name = (stmt->type == AST_STRUCT) ? stmt->as.struct_def.structn
+                                              : stmt->as.union_def.unionn;
+      hash = combine_hash(hash, hash_string(name.start, name.len));
+
+      AstNode *field = (stmt->type == AST_STRUCT) ? stmt->as.struct_def.contents
+                                                  : stmt->as.union_def.contents;
+      while (field) {
+        if (field->type == AST_VAR_DECL) {
+          Token f_name = field->as.var_decl.id;
+          Token f_type = field->as.var_decl.type.name;
+          hash = combine_hash(hash, hash_string(f_name.start, f_name.len));
+          hash = combine_hash(hash, hash_string(f_type.start, f_type.len));
+          hash = combine_hash(hash, field->as.var_decl.type.ptr_depth);
+          hash = combine_hash(hash, field->as.var_decl.type.array_dimens);
+        } else if (field->type == AST_FUNC) {
+          // In case you support methods inside structs
+          Token m_name = field->as.func_def.fn_name;
+          hash = combine_hash(hash, hash_string(m_name.start, m_name.len));
+        }
+        field = field->next;
+      }
+    } else if (stmt->type == AST_ENUM) {
+      Token name = stmt->as.enum_def.enumn;
+      hash = combine_hash(hash, hash_string(name.start, name.len));
+
+      AstNode *member = stmt->as.enum_def.contents;
+      while (member) {
+        Token m_name = member->as.enum_member.name;
+        hash = combine_hash(hash, hash_string(m_name.start, m_name.len));
+        member = member->next;
+      }
+    }
+
+    stmt = stmt->next;
+  }
+
+  return (uint64_t)hash;
+}
 
 Doc *get_or_load_doc(const char *uri, const char *abs_path) {
   Doc *d = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
@@ -432,12 +505,23 @@ ResolvedNode resolve_node_to_decl(AstNode *ident, Arena *tmp_arena) {
       if (ast_root) {
         AstNode *stmt = ast_root->as.block.first_stmt;
         while (stmt) {
-          Token t = get_decl_token(stmt);
-          if (t.len == ident->as.member.name.len &&
-              strncmp(t.start, ident->as.member.name.start, t.len) == 0) {
-            res.decl_node = stmt;
-            res.fpath = mod_fpath;
-            return res;
+          AstNode *target = stmt;
+          bool in_extern = false;
+
+          if (stmt->type == AST_EXTERN && stmt->as.extern_block.contents) {
+            target = stmt->as.extern_block.contents;
+            in_extern = true;
+          }
+
+          while (target) {
+            Token t = get_decl_token(target);
+            if (t.len == ident->as.member.name.len &&
+                strncmp(t.start, ident->as.member.name.start, t.len) == 0) {
+              res.decl_node = target;
+              res.fpath = mod_fpath;
+              return res;
+            }
+            target = in_extern ? target->next : NULL;
           }
           stmt = stmt->next;
         }
@@ -1167,13 +1251,30 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                            rel_path);
 
                 char *resolved = realpath(full_path, NULL);
+                // Fallback to library search path if local realpath fails
+                if (!resolved) {
+                  const char *lib_res = resolve_alloc(&tmp_arena, rel_path);
+                  if (lib_res)
+                    resolved = strdup(lib_res);
+                }
+
                 if (resolved) {
                   char target_uri[8192];
                   snprintf(target_uri, sizeof(target_uri), "file://%s",
                            resolved);
-                  Doc *imported_doc = get_or_load_doc(target_uri, resolved);
-                  if (imported_doc && imported_doc->ast_root) {
-                    mod_ast = imported_doc->ast_root;
+
+                  // Check the semantic module cache first for accuracy
+                  Module *imported_mod =
+                      map_get(&server_state.proj_sem.mod_cache, resolved,
+                              strlen(resolved));
+                  if (imported_mod && imported_mod->ast_root) {
+                    mod_ast = imported_mod->ast_root;
+                  } else {
+                    // Fallback to standard doc loader
+                    Doc *imported_doc = get_or_load_doc(target_uri, resolved);
+                    if (imported_doc && imported_doc->ast_root) {
+                      mod_ast = imported_doc->ast_root;
+                    }
                   }
                   free(resolved);
                 }
@@ -1190,36 +1291,49 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         if (mod_ast) {
           AstNode *ext_stmt = mod_ast->as.block.first_stmt;
           while (ext_stmt) {
-            Token t = get_decl_token(ext_stmt);
-            if (t.len > 0) {
-              char m_name[256];
-              snprintf(m_name, sizeof(m_name), "%.*s", (int)t.len, t.start);
+            AstNode *target_stmt = ext_stmt;
+            bool in_extern = false;
+            if (ext_stmt->type == AST_EXTERN &&
+                ext_stmt->as.extern_block.contents) {
+              target_stmt = ext_stmt->as.extern_block.contents;
+              in_extern = true;
+            }
 
-              char detail_buf[1024] = {0};
-              char insert_buf[256] = {0};
-              int kind = 1; // Default
+            while (target_stmt) {
+              Token t = get_decl_token(target_stmt);
+              if (t.len > 0) {
+                char m_name[256];
+                snprintf(m_name, sizeof(m_name), "%.*s", (int)t.len, t.start);
 
-              if (ext_stmt->type == AST_FUNC) {
-                kind = 3; // Function
-                format_func_signature(ext_stmt, detail_buf, sizeof(detail_buf));
-                snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
-              } else if (ext_stmt->type == AST_VAR_DECL) {
-                kind = 6; // Variable
-                format_type_to_buf(ext_stmt->as.var_decl.type, detail_buf,
-                                   sizeof(detail_buf));
-              } else if (ext_stmt->type == AST_STRUCT ||
-                         ext_stmt->type == AST_UNION) {
-                kind = 22; // Struct
-                snprintf(detail_buf, sizeof(detail_buf), "%s",
-                         ext_stmt->type == AST_STRUCT ? "struct" : "union");
-              } else if (ext_stmt->type == AST_ENUM) {
-                kind = 13; // Enum
-                snprintf(detail_buf, sizeof(detail_buf), "enum");
+                char detail_buf[1024] = {0};
+                char insert_buf[256] = {0};
+                int kind = 1; // Default
+
+                if (target_stmt->type == AST_FUNC) {
+                  kind = 3; // Function
+                  format_func_signature(target_stmt, detail_buf,
+                                        sizeof(detail_buf));
+                  snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
+                } else if (target_stmt->type == AST_VAR_DECL) {
+                  kind = 6; // Variable
+                  format_type_to_buf(target_stmt->as.var_decl.type, detail_buf,
+                                     sizeof(detail_buf));
+                } else if (target_stmt->type == AST_STRUCT ||
+                           target_stmt->type == AST_UNION) {
+                  kind = 22; // Struct
+                  snprintf(detail_buf, sizeof(detail_buf), "%s",
+                           target_stmt->type == AST_STRUCT ? "struct"
+                                                           : "union");
+                } else if (target_stmt->type == AST_ENUM) {
+                  kind = 13; // Enum
+                  snprintf(detail_buf, sizeof(detail_buf), "enum");
+                }
+                add_completion_item(jdoc, result, m_name, kind,
+                                    detail_buf[0] != '\0' ? detail_buf : NULL,
+                                    NULL,
+                                    insert_buf[0] != '\0' ? insert_buf : NULL);
               }
-              add_completion_item(jdoc, result, m_name, kind,
-                                  detail_buf[0] != '\0' ? detail_buf : NULL,
-                                  NULL,
-                                  insert_buf[0] != '\0' ? insert_buf : NULL);
+              target_stmt = in_extern ? target_stmt->next : NULL;
             }
             ext_stmt = ext_stmt->next;
           }
@@ -1562,46 +1676,59 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
     for (size_t i = 0; i < typelistlen; i++)
       add_completion_item(jdoc, result, typelist[i], 14, "type", NULL, NULL);
 
-    AstNode *gst = doc->ast_root->as.block.first_stmt;
-    while (gst) {
-      Token t = get_decl_token(gst);
-      if (t.len > 0) {
-        char name_buf[256];
-        snprintf(name_buf, sizeof(name_buf), "%.*s", t.len, t.start);
+    AstNode *ext_stmt = doc->ast_root->as.block.first_stmt;
+    while (ext_stmt) {
+      AstNode *target_stmt = ext_stmt;
+      bool in_extern = false;
 
-        char detail_buf[1024] = {0};
-        char insert_buf[256] = {0};
-        char *docs = get_comments_above(doc->txt, t);
-
-        int kind = 1;
-        if (gst->type == AST_FUNC) {
-          kind = 3;
-          format_func_signature(gst, detail_buf, sizeof(detail_buf));
-          if (gst->as.func_def.params) {
-            snprintf(insert_buf, sizeof(insert_buf), "%s($1)", name_buf);
-          } else {
-            snprintf(insert_buf, sizeof(insert_buf), "%s()", name_buf);
-          }
-        } else if (gst->type == AST_VAR_DECL) {
-          kind = 6;
-          format_type_to_buf(gst->as.var_decl.type, detail_buf,
-                             sizeof(detail_buf));
-        } else if (gst->type == AST_STRUCT || gst->type == AST_UNION) {
-          kind = 22;
-          snprintf(detail_buf, sizeof(detail_buf), "%s",
-                   gst->type == AST_STRUCT ? "struct" : "union");
-        } else if (gst->type == AST_ENUM) {
-          kind = 13;
-          snprintf(detail_buf, sizeof(detail_buf), "enum");
-        }
-
-        add_completion_item(jdoc, result, name_buf, kind,
-                            detail_buf[0] != '\0' ? detail_buf : NULL, docs,
-                            insert_buf[0] != '\0' ? insert_buf : NULL);
-        if (docs)
-          free(docs);
+      // Unwrap extern blocks
+      if (ext_stmt->type == AST_EXTERN && ext_stmt->as.extern_block.contents) {
+        target_stmt = ext_stmt->as.extern_block.contents;
+        in_extern = true;
       }
-      gst = gst->next;
+
+      while (target_stmt) {
+        Token t = get_decl_token(target_stmt);
+        if (t.len > 0) {
+          char name_buf[256];
+          snprintf(name_buf, sizeof(name_buf), "%.*s", (int)t.len, t.start);
+
+          char detail_buf[1024] = {0};
+          char insert_buf[256] = {0};
+          char *docs = get_comments_above(doc->txt, t);
+
+          int kind = 1;
+          if (target_stmt->type == AST_FUNC) {
+            kind = 3;
+            format_func_signature(target_stmt, detail_buf, sizeof(detail_buf));
+            if (target_stmt->as.func_def.params) {
+              snprintf(insert_buf, sizeof(insert_buf), "%s($1)", name_buf);
+            } else {
+              snprintf(insert_buf, sizeof(insert_buf), "%s()", name_buf);
+            }
+          } else if (target_stmt->type == AST_VAR_DECL) {
+            kind = 6;
+            format_type_to_buf(target_stmt->as.var_decl.type, detail_buf,
+                               sizeof(detail_buf));
+          } else if (target_stmt->type == AST_STRUCT ||
+                     target_stmt->type == AST_UNION) {
+            kind = 22;
+            snprintf(detail_buf, sizeof(detail_buf), "%s",
+                     target_stmt->type == AST_STRUCT ? "struct" : "union");
+          } else if (target_stmt->type == AST_ENUM) {
+            kind = 13;
+            snprintf(detail_buf, sizeof(detail_buf), "enum");
+          }
+
+          add_completion_item(jdoc, result, name_buf, kind,
+                              detail_buf[0] != '\0' ? detail_buf : NULL, docs,
+                              insert_buf[0] != '\0' ? insert_buf : NULL);
+          if (docs)
+            free(docs);
+        }
+        target_stmt = in_extern ? target_stmt->next : NULL;
+      }
+      ext_stmt = ext_stmt->next;
     }
 
     AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
@@ -1797,6 +1924,25 @@ void publish_diagnostics_from_list(const char *uri, DiagList *diags) {
 
 void compile_doc(Doc *doc) {
   if (doc->ast_arena) {
+    char *abspath = absolute_from_uri(doc->uri);
+    if (abspath) {
+      SemCtx *sem = &server_state.proj_sem;
+      Module *mod = map_get(&sem->mod_cache, abspath, strlen(abspath));
+
+      // Check if the modules arena matches the one we are about to destroy
+      if (mod && mod->mod_arena == doc->ast_arena) {
+        map_free_buckets(&mod->local_symbols);
+        map_free_buckets(&mod->imported_mods);
+
+        // Nullify to prevent double freeing later
+        mod->local_symbols.buckets = NULL;
+        mod->local_symbols.capacity = 0;
+        mod->imported_mods.buckets = NULL;
+        mod->imported_mods.capacity = 0;
+      }
+      free(abspath);
+    }
+
     arena_free_all(doc->ast_arena);
     free(doc->ast_arena);
     doc->ast_arena = NULL;
@@ -1818,83 +1964,131 @@ void compile_doc(Doc *doc) {
   AstNode *root = str_to_ast(doc->ast_arena, doc->txt, abspath, &diags, true);
 
   if (root) {
-    SemCtx sem = {0};
-    sem_init(&sem, doc->ast_arena);
-    sem.diags = &diags;
+    SemCtx *sem = &server_state.proj_sem;
+    sem->diags = &diags;
 
     Worklist pending = {0};
     wl_push(&pending, abspath);
 
+    HashMap expanded;
+    map_init(&expanded, doc->ast_arena, 64);
+
     const char *current_path;
     while ((current_path = wl_pop(&pending)) != NULL) {
       const char *curr_abs = resolve_alloc(doc->ast_arena, current_path);
-      if (!curr_abs || map_get(&sem.mod_cache, curr_abs, strlen(curr_abs)))
+      if (!curr_abs || map_get(&expanded, curr_abs, strlen(curr_abs)) != NULL)
         continue;
+      map_set(&expanded, curr_abs, strlen(curr_abs), (void *)1);
 
-      AstNode *ast = NULL;
+      Module *mod = map_get(&sem->mod_cache, curr_abs, strlen(curr_abs));
+      AstNode *ast = (strcmp(curr_abs, abspath) == 0) ? root : NULL;
 
-      if (strcmp(curr_abs, abspath) == 0) {
-        ast = root;
-      } else {
+      if (!ast && !mod) {
+        // Only load off disk if it's not already cached globally
         char uri_buf[8192];
         snprintf(uri_buf, sizeof(uri_buf), "file://%s", curr_abs);
         Doc *dep = get_or_load_doc(uri_buf, curr_abs);
-        if (dep) {
+        if (dep)
           ast = dep->ast_root;
-        }
       }
 
-      if (!ast)
-        continue;
+      if (!mod && ast) {
+        char *perm_abs = arena_alloc(sem->arena, strlen(curr_abs) + 1);
+        strcpy(perm_abs, curr_abs);
+        // Brand new module
+        const char *mod_name = extract_mod_name(sem->arena, perm_abs);
+        mod = new_mod(sem->arena, perm_abs, mod_name, ast);
 
-      const char *mod_name = extract_mod_name(doc->ast_arena, curr_abs);
-      Module *mod = new_mod(doc->ast_arena, curr_abs, mod_name, ast);
+        char uri_buf[8192];
+        snprintf(uri_buf, sizeof(uri_buf), "file://%s", perm_abs);
+        Doc *dep = (Doc *)map_get(&server_state.docs, uri_buf, strlen(uri_buf));
+        mod->mod_arena = dep ? dep->ast_arena : doc->ast_arena;
+
+        map_set(&sem->mod_cache, perm_abs, strlen(perm_abs), mod);
+
+        mod->interface_hash = hash_module_interface(mod);
+        mod->interface_changed = true;
+        mod->is_dirty = true;
+      } else if (mod && strcmp(curr_abs, abspath) == 0) {
+        // Existing module being modified right now
+        mod->ast_root = root;
+        mod->mod_arena = doc->ast_arena;
+
+        // Compute new interface hash
+        uint64_t new_hash = hash_module_interface(mod);
+        if (new_hash != mod->interface_hash) {
+          mod->interface_changed = true;
+          mod->interface_hash = new_hash;
+        } else {
+          mod->interface_changed = false;
+        }
+
+        // Wipe old scopes safely using the modules arena
+        map_init(&mod->local_symbols, mod->mod_arena, 128);
+        map_init(&mod->imported_mods, mod->mod_arena, 32);
+        mod->is_dirty = true;
+      }
 
       if (strcmp(curr_abs, abspath) == 0)
         sem_main_mod = mod;
 
-      map_set(&sem.mod_cache, curr_abs, strlen(curr_abs), mod);
-
-      // Push extracted dependencies back to the worklist
-      AstNode *stmt = ast->as.block.first_stmt;
-      while (stmt) {
-        if (stmt->type == AST_USE) {
-          size_t path_len = stmt->as.use_stmt.path.len;
-          if (path_len > 2) {
-            char *clean_rel = arena_alloc(doc->ast_arena, path_len - 1);
-            strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
-            clean_rel[path_len - 2] = '\0';
-            wl_push(&pending, clean_rel);
+      // Push dependencies (only need to re-evaluate if it's the file being
+      // edited)
+      if (mod && mod->is_dirty && mod->ast_root) {
+        AstNode *stmt = mod->ast_root->as.block.first_stmt;
+        while (stmt) {
+          if (stmt->type == AST_USE) {
+            size_t path_len = stmt->as.use_stmt.path.len;
+            if (path_len > 2) {
+              char *clean_rel = arena_alloc(doc->ast_arena, path_len - 1);
+              strncpy(clean_rel, stmt->as.use_stmt.path.start + 1,
+                      path_len - 2);
+              clean_rel[path_len - 2] = '\0';
+              wl_push(&pending, clean_rel);
+            }
           }
+          stmt = stmt->next;
         }
-        stmt = stmt->next;
       }
     }
 
-    resolve_imports(doc->ast_arena, &sem);
+    resolve_imports(sem->arena, sem);
+    propagate_dirty_state(sem);
 
-    for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
-      HashEntry *entry = sem.mod_cache.buckets[i];
+    for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
+      HashEntry *entry = sem->mod_cache.buckets[i];
       while (entry) {
         Module *mod = (Module *)entry->value;
-        sem_current_mod = mod;
-        collect_mod_symbols(doc->ast_arena, mod, &sem);
+        if (mod->is_dirty) {
+          sem_current_mod = mod;
+          map_free_buckets(&mod->local_symbols);
+          map_init(&mod->local_symbols,
+                   mod->mod_arena ? mod->mod_arena : sem->arena, 128);
+          collect_mod_symbols(sem->arena, mod, sem);
+        }
         entry = entry->next;
       }
     }
 
-    for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
-      HashEntry *entry = sem.mod_cache.buckets[i];
+    for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
+      HashEntry *entry = sem->mod_cache.buckets[i];
       while (entry) {
         Module *mod = (Module *)entry->value;
-        if (mod && mod->ast_root) {
-          // Each module has its own global scope so we create a fresh ScopeStack.
+        if (mod->is_dirty && mod->ast_root) {
           ScopeStack ss;
-          scope_stack_init(&ss, doc->ast_arena);
+          scope_stack_init(&ss, sem->arena);
           sem_current_mod = mod;
-          resolve_scopes(doc->ast_arena, mod, &ss, &sem);
-          type_check_ast(doc->ast_arena, mod->ast_root, &sem);
+          resolve_scopes(sem->arena, mod, &ss, sem);
+          type_check_ast(sem->arena, mod->ast_root, sem);
         }
+        entry = entry->next;
+      }
+    }
+
+    for (size_t i = 0; i < sem->mod_cache.capacity; i++) {
+      HashEntry *entry = sem->mod_cache.buckets[i];
+      while (entry) {
+        ((Module *)entry->value)->is_dirty = false;
         entry = entry->next;
       }
     }
@@ -1906,7 +2100,7 @@ void compile_doc(Doc *doc) {
       HashMap transitive_origins;
       map_init(&transitive_origins, doc->ast_arena, 64);
 
-      size_t max_mods = sem.mod_cache.capacity;
+      size_t max_mods = sem->mod_cache.capacity;
       Module **queue = arena_alloc(doc->ast_arena, sizeof(Module *) * max_mods);
       size_t head = 0;
       size_t tail = 0;
@@ -1937,7 +2131,7 @@ void compile_doc(Doc *doc) {
               char *resolved = realpath(full_path, NULL);
               if (resolved) {
                 Module *imported =
-                    map_get(&sem.mod_cache, resolved, strlen(resolved));
+                    map_get(&sem->mod_cache, resolved, strlen(resolved));
                 if (imported && imported != sem_main_mod) {
                   // If not yet visited, record origin and enqueue
                   if (!map_get(&transitive_origins, imported->abs_path,
@@ -1989,7 +2183,7 @@ void compile_doc(Doc *doc) {
                 char *resolved = realpath(full_path, NULL);
                 if (resolved) {
                   Module *trans_imported =
-                      map_get(&sem.mod_cache, resolved, strlen(resolved));
+                      map_get(&sem->mod_cache, resolved, strlen(resolved));
                   if (trans_imported && trans_imported != sem_main_mod) {
                     // Check if visited to prevent circular dependency loops
                     if (!map_get(&transitive_origins, trans_imported->abs_path,
@@ -2015,7 +2209,7 @@ void compile_doc(Doc *doc) {
       for (size_t i = 0; i < transitive_origins.capacity; i++) {
         HashEntry *entry = transitive_origins.buckets[i];
         while (entry) {
-          Module *m = map_get(&sem.mod_cache, entry->key, entry->key_len);
+          Module *m = map_get(&sem->mod_cache, entry->key, entry->key_len);
           AstNode *use_stmt = (AstNode *)entry->value;
 
           char uri[PATH_MAX + 8];
@@ -2048,7 +2242,6 @@ void compile_doc(Doc *doc) {
     if (pending.paths) {
       free((void *)pending.paths);
     }
-    sem_deinit(&sem);
   }
 
   HashMap diag_groups;
@@ -2143,11 +2336,11 @@ void handle_did_change(yyjson_val *params) {
     const char *new_text = yyjson_get_str(yyjson_obj_get(change, "text"));
 
     if (!range) {
-			// Full doc update
+      // Full doc update
       free(doc->txt);
       doc->txt = strdup(new_text);
     } else {
-			// Inc update
+      // Inc update
       yyjson_val *start = yyjson_obj_get(range, "start");
       yyjson_val *end = yyjson_obj_get(range, "end");
 
@@ -2169,7 +2362,7 @@ void handle_did_change(yyjson_val *params) {
       char *updated_txt = malloc(final_len + 1);
 
       // Splice the string together
-      memcpy(updated_txt, doc->txt, start_idx); // Prefix
+      memcpy(updated_txt, doc->txt, start_idx);                // Prefix
       memcpy(updated_txt + start_idx, new_text, new_text_len); // Insertion
       memcpy(updated_txt + start_idx + new_text_len, doc->txt + end_idx,
              old_len - end_idx); // Suffix
@@ -2465,6 +2658,7 @@ void start_lsp_server() {
   Arena lsp_arena = {0};
   map_init(&server_state.docs, &lsp_arena, 64);
   server_state.state = UNINITIALIZED;
+  sem_init(&server_state.proj_sem, &lsp_arena);
 
   while (1) {
     int content_length = 0;
@@ -2479,6 +2673,9 @@ void start_lsp_server() {
         break;
       }
     }
+
+    if (feof(stdin))
+      break;
 
     if (content_length <= 0)
       continue;

@@ -1,6 +1,7 @@
 #include "hashutils.h"
 
 uint32_t hash_string(const char *key, size_t len) {
+	if (!key) return 0;
   uint32_t hash = 2166136261u;
   for (size_t i = 0; i < len; i++) {
     hash ^= (uint8_t)key[i];

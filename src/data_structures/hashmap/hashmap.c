@@ -17,11 +17,14 @@ void map_resize(HashMap *map) {
     HashEntry *entry = map->buckets[i];
     while (entry) {
       HashEntry *next = entry->next;
-      uint32_t hash = hash_string(entry->key, entry->key_len);
-      size_t index = hash % new_capacity;
+      
+      if (entry->key) {
+          uint32_t hash = hash_string(entry->key, entry->key_len);
+          size_t index = hash % new_capacity;
 
-      entry->next = new_buckets[index];
-      new_buckets[index] = entry;
+          entry->next = new_buckets[index];
+          new_buckets[index] = entry;
+      }
 
       entry = next;
     }
@@ -42,6 +45,8 @@ void map_free_buckets(HashMap *map) {
 }
 
 void map_set(HashMap *map, const char *key, size_t key_len, void *value) {
+  if (!key) return;
+
   // Resize if map exceeds 75% of capacity
   if (map->count >= (map->capacity * 3) / 4) {
     map_resize(map);
@@ -51,7 +56,7 @@ void map_set(HashMap *map, const char *key, size_t key_len, void *value) {
 
   HashEntry *entry = map->buckets[index];
   while (entry) {
-    if (entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
+    if (entry->key && entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
       entry->value = value;
       return;
     }
@@ -69,12 +74,14 @@ void map_set(HashMap *map, const char *key, size_t key_len, void *value) {
 }
 
 void *map_get(HashMap *map, const char *key, size_t key_len) {
+  if (!key) return NULL;
+
   uint32_t hash = hash_string(key, key_len);
   size_t index = hash % map->capacity;
 
   HashEntry *entry = map->buckets[index];
   while (entry) {
-    if (entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
+    if (entry->key && entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
       return entry->value;
     }
     entry = entry->next;
@@ -83,8 +90,7 @@ void *map_get(HashMap *map, const char *key, size_t key_len) {
 }
 
 void map_remove(HashMap *map, const char *key, size_t key_len) {
-  if (map->count == 0)
-    return;
+  if (!key || map->count == 0) return;
 
   uint32_t hash = hash_string(key, key_len);
   size_t index = hash % map->capacity;
@@ -93,7 +99,7 @@ void map_remove(HashMap *map, const char *key, size_t key_len) {
   HashEntry *prev = NULL;
 
   while (entry) {
-    if (entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
+    if (entry->key && entry->key_len == key_len && strncmp(entry->key, key, key_len) == 0) {
       if (prev) {
         prev->next = entry->next;
       } else {
