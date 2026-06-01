@@ -26,6 +26,7 @@
             gdb
             clang-tools
             valgrind
+						zstd
           ];
         };
       });

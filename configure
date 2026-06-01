@@ -27,6 +27,7 @@ CMake Options (can be passed after --):
   -DUSE_LTO=[ON|OFF]    Use linktime optimizations if available (default: ON)
   -DMARCH_NATIVE=[ON|OFF]    Build library optimized for native arch (default: OFF)
   -DDO_INSTALL=[ON|OFF]    Try to install library after it is build (default: OFF)
+	-DUSE_CACHE_COMPRESSION=[ON|OFF|AUTO] Try to use zstd for compressing the AST (default: AUTO)
 EOH
 }
 

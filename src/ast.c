@@ -3,6 +3,9 @@
 #include "parse_types.h"
 #include "util.h"
 #include <string.h>
+#ifdef ENABLE_AST_COMPRESSION
+#include <zstd.h>
+#endif
 
 void init_lex_maps(LexCtx *ctx, Arena *arena) {
   // Capacities padded to powers of 2 for minimal collisions
@@ -175,6 +178,23 @@ static uint32_t ptrmap_get(PtrMap *map, AstNode *ptr) {
   return 0xFFFFFFFF;
 }
 
+typedef struct {
+  uint8_t *data;
+  size_t size;
+  size_t cap;
+} ByteBuffer;
+
+void buf_append(ByteBuffer *buf, const void *data, size_t len) {
+  if (buf->size + len > buf->cap) {
+    buf->cap = (buf->cap == 0) ? 4096 : buf->cap;
+    while (buf->size + len > buf->cap)
+      buf->cap *= 2;
+    buf->data = realloc(buf->data, buf->cap);
+  }
+  memcpy(buf->data + buf->size, data, len);
+  buf->size += len;
+}
+
 void cache_write_ast(const char *cache_path, AstNode *root,
                      const char *source_base) {
   if (!root)
@@ -317,15 +337,10 @@ void cache_write_ast(const char *cache_path, AstNode *root,
     }
   }
 
-  FILE *fp = fopen(cache_path, "ab");
-  if (!fp) {
-    free(queue);
-    free(map.entries);
-    return;
-  }
+  ByteBuffer out_buf = {0};
 
   uint32_t node_count = tail;
-  fwrite(&node_count, sizeof(uint32_t), 1, fp);
+  buf_append(&out_buf, &node_count, sizeof(uint32_t));
 
 // Tokens mapping to file offset
 #define P_TOK(tok)                                                             \
@@ -547,23 +562,55 @@ void cache_write_ast(const char *cache_path, AstNode *root,
       break;
     }
 
-    fwrite(&flat, sizeof(AstNode), 1, fp);
+    buf_append(&out_buf, &flat, sizeof(AstNode));
 
-    if (len1 > 0)
+    if (len1 > 0) {
       for (uint32_t d = 0; d < len1; d++) {
         uint32_t idx =
             (dim1 && dim1[d]) ? ptrmap_get(&map, dim1[d]) : 0xFFFFFFFF;
-        fwrite(&idx, sizeof(uint32_t), 1, fp);
+        buf_append(&out_buf, &idx, sizeof(uint32_t));
       }
-    if (len2 > 0)
+    }
+    if (len2 > 0) {
       for (uint32_t d = 0; d < len2; d++) {
         uint32_t idx =
             (dim2 && dim2[d]) ? ptrmap_get(&map, dim2[d]) : 0xFFFFFFFF;
-        fwrite(&idx, sizeof(uint32_t), 1, fp);
+        buf_append(&out_buf, &idx, sizeof(uint32_t));
       }
+    }
   }
 
+  FILE *fp = fopen(cache_path, "wb");
+  if (!fp) {
+    free(queue);
+    free(map.entries);
+    free(out_buf.data);
+    return;
+  }
+
+#ifdef ENABLE_AST_COMPRESSION
+  size_t cBuffSize = ZSTD_compressBound(out_buf.size);
+  void *cBuff = malloc(cBuffSize);
+  size_t cSize = ZSTD_compress(cBuff, cBuffSize, out_buf.data, out_buf.size, 1);
+
+  if (!ZSTD_isError(cSize)) {
+    uint32_t magic = 0x5A4D4341; // 'ZMCA' - Zstd Compressed Ast
+    uint64_t uncomp_size = out_buf.size;
+    fwrite(&magic, sizeof(uint32_t), 1, fp);
+    fwrite(&uncomp_size, sizeof(uint64_t), 1, fp);
+    fwrite(cBuff, 1, cSize, fp);
+  } else {
+    printf("ZSTD Compression failed!\n");
+  }
+  free(cBuff);
+#else
+  uint32_t magic = 0x554E4341; // 'UNCA' - Uncompressed Ast
+  fwrite(&magic, sizeof(uint32_t), 1, fp);
+  fwrite(out_buf.data, 1, out_buf.size, fp);
+#endif
+
   fclose(fp);
+  free(out_buf.data);
   free(queue);
   free(map.entries);
 }
@@ -574,30 +621,92 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
   if (!fp)
     return NULL;
 
-  fseek(fp, 8, SEEK_SET);
-  uint32_t node_count = 0;
-  if (fread(&node_count, sizeof(uint32_t), 1, fp) != 1 || node_count == 0) {
+  uint32_t magic;
+  if (fread(&magic, sizeof(uint32_t), 1, fp) != 1) {
     fclose(fp);
+    return NULL;
+  }
+
+  void *read_buffer = NULL;
+  size_t read_offset = 0;
+
+  if (magic == 0x5A4D4341) { // Compressed
+#ifdef ENABLE_AST_COMPRESSION
+    uint64_t uncomp_size;
+    if (fread(&uncomp_size, sizeof(uint64_t), 1, fp) != 1) {
+      fclose(fp);
+      return NULL;
+    }
+
+    // Read the remaining compressed data
+    fseek(fp, 0, SEEK_END);
+    long comp_size = ftell(fp) - sizeof(uint32_t) - sizeof(uint64_t);
+    fseek(fp, sizeof(uint32_t) + sizeof(uint64_t), SEEK_SET);
+
+    void *comp_buf = malloc(comp_size);
+    if (fread(comp_buf, 1, comp_size, fp) != 1) {
+      free(comp_buf);
+      fclose(fp);
+      return NULL;
+    }
+    fclose(fp); // Done with the file
+
+    read_buffer = malloc(uncomp_size);
+    size_t dSize =
+        ZSTD_decompress(read_buffer, uncomp_size, comp_buf, comp_size);
+    free(comp_buf);
+
+    if (ZSTD_isError(dSize)) {
+      free(read_buffer);
+      return NULL;
+    }
+#else
+    fprintf(stderr, "Error: Cache is compressed but ENABLE_AST_COMPRESSION is off.\n");
+    fclose(fp);
+    return NULL;
+#endif
+  } else if (magic == 0x554E4341) { // Uncompressed
+    fseek(fp, 0, SEEK_END);
+    long uncomp_size = ftell(fp) - sizeof(uint32_t);
+    fseek(fp, sizeof(uint32_t), SEEK_SET);
+
+    read_buffer = malloc(uncomp_size);
+    if (fread(read_buffer, 1, uncomp_size, fp) != 1) {
+      free(read_buffer);
+      fclose(fp);
+      return NULL;
+    }
+    fclose(fp);
+  } else {
+    fclose(fp);
+    return NULL; // Invalid or old cache format
+  }
+
+// Macro to read from our decompressed memory buffer instead of fread
+#define READ_MEM(dest, size)                                                   \
+  do {                                                                         \
+    memcpy((dest), (char *)read_buffer + read_offset, (size));                 \
+    read_offset += (size);                                                     \
+  } while (0)
+
+  uint32_t node_count = 0;
+  READ_MEM(&node_count, sizeof(uint32_t));
+  if (node_count == 0) {
+    free(read_buffer);
     return NULL;
   }
 
   AstNode *nodes = arena_alloc(arena, node_count * sizeof(AstNode));
 
   for (uint32_t i = 0; i < node_count; i++) {
-    if (fread(&nodes[i], sizeof(AstNode), 1, fp) != 1) {
-      fclose(fp);
-      return NULL;
-    }
+    READ_MEM(&nodes[i], sizeof(AstNode));
 
     if (nodes[i].eval_type.array_dimens > 0) {
       nodes[i].eval_type.dim_sizes = arena_alloc(
           arena, nodes[i].eval_type.array_dimens * sizeof(AstNode *));
       for (uint32_t d = 0; d < nodes[i].eval_type.array_dimens; d++) {
         uint32_t idx;
-        if (fread(&idx, sizeof(uint32_t), 1, fp) != 1) {
-          fclose(fp);
-          return NULL;
-        }
+        READ_MEM(&idx, sizeof(uint32_t));
         nodes[i].eval_type.dim_sizes[d] =
             (idx != 0xFFFFFFFF) ? &nodes[idx] : NULL;
       }
@@ -629,15 +738,14 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
           arena_alloc(arena, dt2->array_dimens * sizeof(AstNode *));
       for (uint32_t d = 0; d < dt2->array_dimens; d++) {
         uint32_t idx;
-        if (fread(&idx, sizeof(uint32_t), 1, fp) != 1) {
-          fclose(fp);
-          return NULL;
-        }
+        READ_MEM(&idx, sizeof(uint32_t));
         dt2->dim_sizes[d] = (idx != 0xFFFFFFFF) ? &nodes[idx] : NULL;
       }
     }
   }
-  fclose(fp);
+
+  // Free the buffer now that we've deserialized everything into the arena
+  free(read_buffer);
 
 #define PATCH_STR(tok)                                                         \
   do {                                                                         \
