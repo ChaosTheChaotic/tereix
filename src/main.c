@@ -3,6 +3,7 @@
 #include "lsp.h"
 #include "util.h"
 #include "worklist.h"
+#include "ast_serde.h"
 #include <sys/stat.h>
 
 extern Module *sem_current_mod;

@@ -285,10 +285,4 @@ AstNode *file_to_ast(Arena *arena, const char *path, bool partial);
 AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath,
                     DiagList *diag_list, bool partial);
 
-AstNode *cache_read_ast(Arena *arena, const char *cache_path,
-                        const char *source_base);
-
-void cache_write_ast(const char *cache_path, AstNode *root,
-                     const char *source_base);
-
 #endif // !AST_TYPES_H
