@@ -47,8 +47,12 @@ typedef enum {
 typedef struct AstNode {
   ASTN_TYPE type;
   struct AstNode *next;
+  const char *src_start;
+  const char *src_end;
+  uint64_t node_hash;
   DataType eval_type;
   bool is_nested_sue;
+  bool is_dirty;
   union {
     struct {
       Token val;
@@ -269,12 +273,6 @@ static const char *typelist[] = {
     "any",
 };
 static const size_t typelistlen = sizeof(typelist) / sizeof(typelist[0]);
-
-typedef struct {
-  AstNode *node;
-  int depth;
-  const char *label;
-} AstPrintItem;
 
 AstNode *new_node(Arena *arena, ASTN_TYPE type);
 void write_ast(const char *path);

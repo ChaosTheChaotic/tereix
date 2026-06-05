@@ -342,7 +342,9 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           DataType clean_ret = n->as.func_def.ret_type;
           clean_ret.is_extern = false;
           clean_ret.is_static = false;
-          clean_ret.is_threadlocal = false;
+          if (clean_ret.ptr_depth == 0 && clean_ret.array_dimens == 0) {
+            clean_ret.is_mut = true;
+          }
           clean_ret.is_mut = true;
 
           gen_type(clean_ret, sb);
@@ -382,7 +384,12 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       }
     } else if (n->type == AST_VAR_DECL) {
       if (f->step == 0) {
-        gen_type(n->as.var_decl.type, sb);
+        DataType decl_type = n->as.var_decl.type;
+        // Do not emit extern if the variable is being initialized
+        if (n->as.var_decl.init)
+          decl_type.is_extern = false;
+
+        gen_type(decl_type, sb);
         sb_append_len(sb, n->as.var_decl.id.start, n->as.var_decl.id.len);
         if (n->as.var_decl.init) {
           sb_append(sb, " = ");

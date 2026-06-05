@@ -1,4 +1,5 @@
 #include "ast_serde.h"
+#include "hashutils.h"
 #include <string.h>
 #ifdef ENABLE_AST_COMPRESSION
 #include <zstd.h>
@@ -237,10 +238,31 @@ void cache_write_ast(const char *cache_path, AstNode *root,
 #define P_TOK(tok)                                                             \
   do {                                                                         \
     if ((tok).start && (tok).start >= source_base &&                           \
-        (tok).start < source_base + strlen(source_base)) {                     \
+        (tok).start <= source_base + strlen(source_base)) {                    \
       (tok).start = (const char *)(size_t)((tok).start - source_base);         \
+    } else if ((tok).start) {                                                  \
+      bool _found = false;                                                     \
+      for (size_t _k = 0; _k < typelistlen; _k++) {                                        \
+        if (strcmp((tok).start, typelist[_k]) == 0) {                 \
+          (tok).start = (const char *)(size_t)(0xFFFFFF00 + _k);               \
+          _found = true;                                                       \
+          break;                                                               \
+        }                                                                      \
+      }                                                                        \
+      if (!_found)                                                             \
+        (tok).start = (const char *)(size_t)(-1);                              \
     } else {                                                                   \
       (tok).start = (const char *)(size_t)(-1);                                \
+    }                                                                          \
+  } while (0)
+
+#define P_RAW_PTR(ptr)                                                         \
+  do {                                                                         \
+    if ((ptr) && (ptr) >= source_base &&                                       \
+        (ptr) < source_base + strlen(source_base)) {                           \
+      (ptr) = (const char *)(size_t)((ptr) - source_base);                     \
+    } else {                                                                   \
+      (ptr) = (const char *)(size_t)(-1);                                      \
     }                                                                          \
   } while (0)
 
@@ -249,6 +271,9 @@ void cache_write_ast(const char *cache_path, AstNode *root,
 
     flat.next = (AstNode *)(size_t)ptrmap_get(&map, flat.next);
     P_TOK(flat.eval_type.name);
+
+    P_RAW_PTR(flat.src_start);
+    P_RAW_PTR(flat.src_end);
 
     AstNode **dim1 = flat.eval_type.dim_sizes;
     uint32_t len1 = flat.eval_type.array_dimens;
@@ -552,7 +577,8 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       return NULL;
     }
 #else
-    fprintf(stderr, "Error: Cache is compressed but ENABLE_AST_COMPRESSION is off.\n");
+    fprintf(stderr,
+            "Error: Cache is compressed but ENABLE_AST_COMPRESSION is off.\n");
     fclose(fp);
     return NULL;
 #endif
@@ -640,10 +666,14 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
 
 #define PATCH_STR(tok)                                                         \
   do {                                                                         \
-    if ((size_t)(tok).start == (size_t)-1)                                     \
+    if ((size_t)(tok).start >= 0xFFFFFF00 &&                                   \
+        (size_t)(tok).start < 0xFFFFFF11) {                                    \
+      (tok).start = typelist[(size_t)(tok).start - 0xFFFFFF00];       \
+    } else if ((size_t)(tok).start == (size_t)-1) {                            \
       (tok).start = NULL;                                                      \
-    else                                                                       \
+    } else {                                                                   \
       (tok).start = source_base + (size_t)(tok).start;                         \
+    }                                                                          \
   } while (0)
 
 #define PATCH_PTR(ptr)                                                         \
@@ -654,10 +684,21 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       (ptr) = &nodes[(uintptr_t)(ptr)];                                        \
   } while (0)
 
+#define PATCH_RAW_PTR(ptr)                                                     \
+  do {                                                                         \
+    if ((size_t)(ptr) == (size_t)-1)                                           \
+      (ptr) = NULL;                                                            \
+    else                                                                       \
+      (ptr) = source_base + (size_t)(ptr);                                     \
+  } while (0)
+
   for (uint32_t i = 0; i < node_count; i++) {
     AstNode *n = &nodes[i];
     PATCH_PTR(n->next);
     PATCH_STR(n->eval_type.name);
+
+    PATCH_RAW_PTR(n->src_start);
+    PATCH_RAW_PTR(n->src_end);
 
     switch (n->type) {
     case AST_NUM_LIT:
@@ -740,8 +781,11 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       break;
     case AST_PARAM:
       PATCH_STR(n->as.fn_param.id);
-      if (n->as.fn_param.id.start == NULL && n->as.fn_param.id.len == 4) {
+      if (((size_t)n->as.fn_param.id.start == (size_t)-1 ||
+           n->as.fn_param.id.start == NULL) &&
+          n->as.fn_param.id.len == 4) {
         n->as.fn_param.id.start = "self";
+        n->as.fn_param.id.type = TOKEN_IDENTIF;
       }
       PATCH_STR(n->as.fn_param.type.name);
       break;
@@ -808,4 +852,764 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
     }
   }
   return &nodes[0];
+}
+
+inline uint32_t hash_token(uint32_t hash, Token tok) {
+  hash = combine_hash(hash, tok.type);
+  if (tok.start && tok.len > 0 && (size_t)tok.start != (size_t)-1) {
+    uint32_t str_hash = hash_string(tok.start, tok.len);
+    hash = combine_hash(hash, str_hash);
+  }
+  return hash;
+}
+
+inline uint32_t hash_datatype(uint32_t hash, DataType dt) {
+  hash = hash_token(hash, dt.name);
+  hash = combine_hash(hash, dt.ptr_depth);
+  hash = combine_hash(hash, dt.array_dimens);
+  hash = combine_hash(hash, dt.is_static);
+  hash = combine_hash(hash, dt.is_mut);
+  hash = combine_hash(hash, dt.is_threadlocal);
+  hash = combine_hash(hash, dt.is_extern);
+  return hash;
+}
+
+uint32_t compute_node_hash(AstNode *root) {
+  if (!root)
+    return 0;
+
+  typedef struct {
+    AstNode *node;
+    int state; // 0 = enter, 1 = exit
+  } HashFrame;
+
+  size_t cap = 1024;
+  HashFrame *stack = malloc(cap * sizeof(HashFrame));
+  size_t top = 0;
+  stack[top++] = (HashFrame){root, 0};
+
+  while (top > 0) {
+    HashFrame frame = stack[--top];
+    AstNode *n = frame.node;
+
+    if (n->node_hash)
+      continue; // already computed
+
+    if (frame.state == 0) {
+      // push exit frame, then children
+      if (top + 32 >= cap) {
+        cap *= 2;
+        stack = realloc(stack, cap * sizeof(HashFrame));
+      }
+      stack[top++] = (HashFrame){n, 1};
+
+#define PUSH_CHILD(c)                                                          \
+  if (c && !c->node_hash)                                                      \
+  stack[top++] = (HashFrame){c, 0}
+
+      switch (n->type) {
+      case AST_BINOP:
+        PUSH_CHILD(n->as.binop.left);
+        PUSH_CHILD(n->as.binop.right);
+        break;
+      case AST_UOP:
+      case AST_ADDR_OF:
+      case AST_DEREF:
+        PUSH_CHILD(n->as.unop.operand);
+        break;
+      case AST_ARRAY_LIT:
+        for (AstNode *e = n->as.array_lit.elements; e; e = e->next)
+          PUSH_CHILD(e);
+        break;
+      case AST_VAR_DECL:
+        PUSH_CHILD(n->as.var_decl.init);
+        break;
+      case AST_IF:
+        PUSH_CHILD(n->as.if_check.check);
+        PUSH_CHILD(n->as.if_check.action);
+        PUSH_CHILD(n->as.if_check.elseAct);
+        break;
+      case AST_STRUCT:
+      case AST_UNION:
+        for (AstNode *c = (n->type == AST_STRUCT) ? n->as.struct_def.contents
+                                                  : n->as.union_def.contents;
+             c; c = c->next)
+          PUSH_CHILD(c);
+        break;
+      case AST_ENUM:
+        for (AstNode *c = n->as.enum_def.contents; c; c = c->next)
+          PUSH_CHILD(c);
+        break;
+      case AST_ENUM_MEMBER:
+        PUSH_CHILD(n->as.enum_member.val);
+        break;
+      case AST_DEFER:
+        PUSH_CHILD(n->as.defer_stmt.contents);
+        break;
+      case AST_FOR:
+        PUSH_CHILD(n->as.for_loop.init);
+        PUSH_CHILD(n->as.for_loop.check);
+        PUSH_CHILD(n->as.for_loop.inc);
+        PUSH_CHILD(n->as.for_loop.action);
+        break;
+      case AST_WHILE:
+        PUSH_CHILD(n->as.while_loop.check);
+        PUSH_CHILD(n->as.while_loop.action);
+        break;
+      case AST_FUNC:
+        for (AstNode *p = n->as.func_def.params; p; p = p->next)
+          PUSH_CHILD(p);
+        PUSH_CHILD(n->as.func_def.block);
+        break;
+      case AST_PARAM: // no children
+        break;
+      case AST_RET:
+        PUSH_CHILD(n->as.ret_stmt.expr);
+        break;
+      case AST_BLOCK:
+      case AST_PROGRAM:
+        for (AstNode *s = n->as.block.first_stmt; s; s = s->next)
+          PUSH_CHILD(s);
+        break;
+      case AST_FUNC_CALL:
+        PUSH_CHILD(n->as.func_call.caller);
+        for (AstNode *a = n->as.func_call.args; a; a = a->next)
+          PUSH_CHILD(a);
+        break;
+      case AST_INDEX:
+        PUSH_CHILD(n->as.index.base);
+        PUSH_CHILD(n->as.index.index);
+        break;
+      case AST_MEMBER:
+        PUSH_CHILD(n->as.member.base);
+        break;
+      case AST_SWITCH:
+        PUSH_CHILD(n->as.switch_stmt.check);
+        for (AstNode *c = n->as.switch_stmt.cases; c; c = c->next)
+          PUSH_CHILD(c);
+        PUSH_CHILD(n->as.switch_stmt.default_case);
+        break;
+      case AST_CASE:
+        PUSH_CHILD(n->as.case_stmt.val);
+        PUSH_CHILD(n->as.case_stmt.action);
+        break;
+      case AST_EXTERN:
+        for (AstNode *c = n->as.extern_block.contents; c; c = c->next)
+          PUSH_CHILD(c);
+        break;
+      case AST_CAST:
+        PUSH_CHILD(n->as.cast.op);
+        break;
+      case AST_SIZEOF:
+        if (!n->as.sizeof_expr.is_type)
+          PUSH_CHILD(n->as.sizeof_expr.target_expr);
+        break;
+      default: // literals, identifiers, use, break, continue, null
+        break;
+      }
+#undef PUSH_CHILD
+    } else {
+      // Compute hash from children
+      uint32_t hash = combine_hash(2166136261u, n->type);
+
+      switch (n->type) {
+      case AST_BINOP:
+        hash = hash_token(hash, n->as.binop.op);
+        hash = combine_hash(hash, n->as.binop.left->node_hash);
+        hash = combine_hash(hash, n->as.binop.right->node_hash);
+        break;
+      case AST_UOP:
+      case AST_ADDR_OF:
+      case AST_DEREF:
+        hash = hash_token(hash, n->as.unop.op);
+        hash = combine_hash(hash, n->as.unop.is_postfix);
+        hash = combine_hash(hash, n->as.unop.operand->node_hash);
+        break;
+      case AST_ARRAY_LIT:
+        for (AstNode *e = n->as.array_lit.elements; e; e = e->next)
+          hash = combine_hash(hash, e->node_hash);
+        break;
+      case AST_VAR_DECL:
+        hash = hash_token(hash, n->as.var_decl.id);
+        hash = hash_datatype(hash, n->as.var_decl.type);
+        if (n->as.var_decl.init)
+          hash = combine_hash(hash, n->as.var_decl.init->node_hash);
+        break;
+      case AST_IF:
+        hash = combine_hash(hash, n->as.if_check.check->node_hash);
+        hash = combine_hash(hash, n->as.if_check.action->node_hash);
+        if (n->as.if_check.elseAct)
+          hash = combine_hash(hash, n->as.if_check.elseAct->node_hash);
+        break;
+      case AST_STRUCT:
+        hash = hash_token(hash, n->as.struct_def.structn);
+        for (AstNode *c = n->as.struct_def.contents; c; c = c->next)
+          hash = combine_hash(hash, c->node_hash);
+        break;
+      case AST_UNION:
+        hash = hash_token(hash, n->as.union_def.unionn);
+        for (AstNode *c = n->as.union_def.contents; c; c = c->next)
+          hash = combine_hash(hash, c->node_hash);
+        break;
+      case AST_ENUM:
+        hash = hash_token(hash, n->as.enum_def.enumn);
+        for (AstNode *c = n->as.enum_def.contents; c; c = c->next)
+          hash = combine_hash(hash, c->node_hash);
+        break;
+      case AST_ENUM_MEMBER:
+        hash = hash_token(hash, n->as.enum_member.name);
+        if (n->as.enum_member.val)
+          hash = combine_hash(hash, n->as.enum_member.val->node_hash);
+        break;
+      case AST_DEFER:
+        hash = combine_hash(hash, n->as.defer_stmt.contents->node_hash);
+        break;
+      case AST_FOR:
+        if (n->as.for_loop.init)
+          hash = combine_hash(hash, n->as.for_loop.init->node_hash);
+        if (n->as.for_loop.check)
+          hash = combine_hash(hash, n->as.for_loop.check->node_hash);
+        if (n->as.for_loop.inc)
+          hash = combine_hash(hash, n->as.for_loop.inc->node_hash);
+        if (n->as.for_loop.action)
+          hash = combine_hash(hash, n->as.for_loop.action->node_hash);
+        break;
+      case AST_WHILE:
+        if (n->as.while_loop.check)
+          hash = combine_hash(hash, n->as.while_loop.check->node_hash);
+        if (n->as.while_loop.action)
+          hash = combine_hash(hash, n->as.while_loop.action->node_hash);
+        break;
+      case AST_FUNC:
+        hash = hash_token(hash, n->as.func_def.fn_name);
+        hash = hash_datatype(hash, n->as.func_def.ret_type);
+        hash = combine_hash(hash, n->as.func_def.is_extern);
+        hash = combine_hash(hash, n->as.func_def.is_async);
+        hash = combine_hash(hash, n->as.func_def.is_inline);
+        for (AstNode *p = n->as.func_def.params; p; p = p->next)
+          hash = combine_hash(hash, p->node_hash);
+        if (n->as.func_def.block)
+          hash = combine_hash(hash, n->as.func_def.block->node_hash);
+        break;
+      case AST_PARAM:
+        hash = hash_token(hash, n->as.fn_param.id);
+        hash = hash_datatype(hash, n->as.fn_param.type);
+        break;
+      case AST_RET:
+        if (n->as.ret_stmt.expr)
+          hash = combine_hash(hash, n->as.ret_stmt.expr->node_hash);
+        break;
+      case AST_BLOCK:
+      case AST_PROGRAM:
+        for (AstNode *s = n->as.block.first_stmt; s; s = s->next)
+          hash = combine_hash(hash, s->node_hash);
+        break;
+      case AST_FUNC_CALL:
+        if (n->as.func_call.caller)
+          hash = combine_hash(hash, n->as.func_call.caller->node_hash);
+        for (AstNode *a = n->as.func_call.args; a; a = a->next)
+          hash = combine_hash(hash, a->node_hash);
+        break;
+      case AST_INDEX:
+        hash = combine_hash(hash, n->as.index.base->node_hash);
+        hash = combine_hash(hash, n->as.index.index->node_hash);
+        break;
+      case AST_MEMBER:
+        hash = hash_token(hash, n->as.member.name);
+        hash = combine_hash(hash, n->as.member.base->node_hash);
+        break;
+      case AST_SWITCH:
+        hash = combine_hash(hash, n->as.switch_stmt.check->node_hash);
+        for (AstNode *c = n->as.switch_stmt.cases; c; c = c->next)
+          hash = combine_hash(hash, c->node_hash);
+        if (n->as.switch_stmt.default_case)
+          hash = combine_hash(hash, n->as.switch_stmt.default_case->node_hash);
+        break;
+      case AST_CASE:
+        if (n->as.case_stmt.val)
+          hash = combine_hash(hash, n->as.case_stmt.val->node_hash);
+        if (n->as.case_stmt.action)
+          hash = combine_hash(hash, n->as.case_stmt.action->node_hash);
+        break;
+      case AST_EXTERN:
+        for (AstNode *c = n->as.extern_block.contents; c; c = c->next)
+          hash = combine_hash(hash, c->node_hash);
+        break;
+      case AST_USE:
+        hash = hash_token(hash, n->as.use_stmt.path);
+        if (n->as.use_stmt.alias.start)
+          hash = hash_token(hash, n->as.use_stmt.alias);
+        break;
+      case AST_CAST:
+        hash = hash_datatype(hash, n->as.cast.target);
+        if (n->as.cast.op)
+          hash = combine_hash(hash, n->as.cast.op->node_hash);
+        break;
+      case AST_SIZEOF:
+        if (n->as.sizeof_expr.is_type)
+          hash = hash_datatype(hash, n->as.sizeof_expr.target_type);
+        else if (n->as.sizeof_expr.target_expr)
+          hash = combine_hash(hash, n->as.sizeof_expr.target_expr->node_hash);
+        break;
+      case AST_IDENTIF:
+      case AST_NUM_LIT:
+      case AST_STR_LIT:
+      case AST_CHAR_LIT:
+      case AST_BOOL_LIT:
+      case AST_NULL_LIT:
+      case AST_BREAK:
+      case AST_CONTINUE:
+        hash = hash_token(hash, n->as.identif.val);
+        break;
+      default:
+        break;
+      }
+      n->node_hash = hash;
+    }
+  }
+  free(stack);
+  return root->node_hash;
+}
+
+void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
+                               DeclMetadata *meta) {
+  if (!decl_root)
+    return;
+
+  size_t stack_cap = 1024;
+  AstNode **stack = malloc(sizeof(AstNode *) * stack_cap);
+  size_t top = 0;
+
+  stack[top++] = decl_root;
+
+  while (top > 0) {
+    AstNode *node = stack[--top];
+    if (!node)
+      continue;
+
+    // Extract Function/Method Calls
+    if (node->type == AST_FUNC_CALL && node->as.func_call.caller) {
+      Token dep_tok = {0};
+
+      if (node->as.func_call.caller->type == AST_IDENTIF) {
+        dep_tok = node->as.func_call.caller->as.identif.val;
+      } else if (node->as.func_call.caller->type == AST_MEMBER) {
+        AstNode *base = node->as.func_call.caller->as.member.base;
+        Token mem_name = node->as.func_call.caller->as.member.name;
+
+        // If the base is an identifier, format it as Base_Member (e.g.,
+        // Math_init)
+        if (base->type == AST_IDENTIF) {
+          Token base_name = base->as.identif.val;
+          size_t combined_len = base_name.len + 1 + mem_name.len;
+          char *combined = arena_alloc(arena, combined_len + 1);
+          sprintf(combined, "%.*s_%.*s", (int)base_name.len, base_name.start,
+                  (int)mem_name.len, mem_name.start);
+
+          dep_tok.start = combined;
+          dep_tok.len = combined_len;
+        } else {
+          dep_tok = mem_name; // Fallback for complex member access
+        }
+      }
+
+      if (dep_tok.start) {
+        DepNode *dep = arena_alloc(arena, sizeof(DepNode));
+        dep->name = dep_tok;
+        dep->next = meta->calls_to;
+        meta->calls_to = dep;
+      }
+    }
+
+    // Extract Type Dependencies
+    if (node->type == AST_VAR_DECL || node->type == AST_PARAM ||
+        node->type == AST_FUNC || node->type == AST_CAST ||
+        node->type == AST_SIZEOF) {
+      DataType *dt = NULL;
+      if (node->type == AST_VAR_DECL)
+        dt = &node->as.var_decl.type;
+      else if (node->type == AST_PARAM)
+        dt = &node->as.fn_param.type;
+      else if (node->type == AST_FUNC)
+        dt = &node->as.func_def.ret_type;
+      else if (node->type == AST_CAST)
+        dt = &node->as.cast.target;
+      else if (node->type == AST_SIZEOF && node->as.sizeof_expr.is_type)
+        dt = &node->as.sizeof_expr.target_type;
+
+      if (dt && dt->is_custom && dt->name.start) {
+        DepNode *dep = arena_alloc(arena, sizeof(DepNode));
+        dep->name = dt->name;
+        dep->next = meta->uses_types;
+        meta->uses_types = dep;
+      }
+    }
+
+    if (node != decl_root && node->next) {
+      if (top >= stack_cap - 2) {
+        stack_cap *= 2;
+        stack = realloc(stack, sizeof(AstNode *) * stack_cap);
+      }
+      stack[top++] = node->next;
+    }
+
+#define PUSH_CHILD(n)                                                          \
+  do {                                                                         \
+    if (n) {                                                                   \
+      if (top >= stack_cap - 2) {                                              \
+        stack_cap *= 2;                                                        \
+        stack = realloc(stack, sizeof(AstNode *) * stack_cap);                 \
+      }                                                                        \
+      stack[top++] = (n);                                                      \
+    }                                                                          \
+  } while (0)
+
+    switch (node->type) {
+    case AST_BINOP:
+      PUSH_CHILD(node->as.binop.left);
+      PUSH_CHILD(node->as.binop.right);
+      break;
+    case AST_UOP:
+    case AST_ADDR_OF:
+    case AST_DEREF:
+      PUSH_CHILD(node->as.unop.operand);
+      break;
+    case AST_IF:
+      PUSH_CHILD(node->as.if_check.check);
+      PUSH_CHILD(node->as.if_check.action);
+      PUSH_CHILD(node->as.if_check.elseAct);
+      break;
+    case AST_BLOCK:
+    case AST_PROGRAM:
+      PUSH_CHILD(node->as.block.first_stmt);
+      break;
+    case AST_FUNC:
+      PUSH_CHILD(node->as.func_def.block);
+      break;
+    case AST_RET:
+      PUSH_CHILD(node->as.ret_stmt.expr);
+      break;
+    case AST_VAR_DECL:
+      PUSH_CHILD(node->as.var_decl.init);
+      break;
+    case AST_ARRAY_LIT:
+      PUSH_CHILD(node->as.array_lit.elements);
+      break;
+    case AST_STRUCT:
+      PUSH_CHILD(node->as.struct_def.contents);
+      break;
+    case AST_UNION:
+      PUSH_CHILD(node->as.union_def.contents);
+      break;
+    case AST_ENUM:
+      PUSH_CHILD(node->as.enum_def.contents);
+      break;
+    case AST_ENUM_MEMBER:
+      PUSH_CHILD(node->as.enum_member.val);
+      break;
+    case AST_DEFER:
+      PUSH_CHILD(node->as.defer_stmt.contents);
+      break;
+    case AST_FOR:
+      PUSH_CHILD(node->as.for_loop.init);
+      PUSH_CHILD(node->as.for_loop.check);
+      PUSH_CHILD(node->as.for_loop.inc);
+      PUSH_CHILD(node->as.for_loop.action);
+      break;
+    case AST_WHILE:
+      PUSH_CHILD(node->as.while_loop.check);
+      PUSH_CHILD(node->as.while_loop.action);
+      break;
+    case AST_FUNC_CALL:
+      PUSH_CHILD(node->as.func_call.caller);
+      PUSH_CHILD(node->as.func_call.args);
+      break;
+    case AST_INDEX:
+      PUSH_CHILD(node->as.index.base);
+      PUSH_CHILD(node->as.index.index);
+      break;
+    case AST_MEMBER:
+      PUSH_CHILD(node->as.member.base);
+      break;
+    case AST_SWITCH:
+      PUSH_CHILD(node->as.switch_stmt.check);
+      PUSH_CHILD(node->as.switch_stmt.cases);
+      PUSH_CHILD(node->as.switch_stmt.default_case);
+      break;
+    case AST_CASE:
+      PUSH_CHILD(node->as.case_stmt.val);
+      PUSH_CHILD(node->as.case_stmt.action);
+      break;
+    case AST_EXTERN:
+      PUSH_CHILD(node->as.extern_block.contents);
+      break;
+    case AST_CAST:
+      PUSH_CHILD(node->as.cast.op);
+      break;
+    case AST_SIZEOF:
+      PUSH_CHILD(node->as.sizeof_expr.target_expr);
+      break;
+    default:
+      break;
+    }
+#undef PUSH_CHILD
+  }
+  free(stack);
+}
+
+// Generates the Declaration metadata for an entire module
+DeclMetadata *analyze_module_declarations(Arena *arena, AstNode *module_root) {
+  if (!module_root || module_root->type != AST_PROGRAM)
+    return NULL;
+
+  DeclMetadata *head = NULL;
+  DeclMetadata *tail = NULL;
+
+  AstNode *stmt = module_root->as.block.first_stmt;
+  while (stmt) {
+    Token name = {0};
+
+    // Extract identifiers for top-level constructs
+    if (stmt->type == AST_FUNC)
+      name = stmt->as.func_def.fn_name;
+    else if (stmt->type == AST_STRUCT)
+      name = stmt->as.struct_def.structn;
+    else if (stmt->type == AST_UNION)
+      name = stmt->as.union_def.unionn;
+    else if (stmt->type == AST_ENUM)
+      name = stmt->as.enum_def.enumn;
+    else if (stmt->type == AST_VAR_DECL)
+      name = stmt->as.var_decl.id;
+
+    if (name.start) {
+      DeclMetadata *meta = arena_alloc(arena, sizeof(DeclMetadata));
+      meta->name = name;
+      meta->type = stmt->type;
+      meta->src_start = stmt->src_start;
+      meta->src_end = stmt->src_end;
+
+      meta->node_hash = compute_node_hash(stmt);
+
+      meta->calls_to = NULL;
+      meta->uses_types = NULL;
+      meta->is_dirty = false;
+      meta->next = NULL;
+
+      extract_decl_dependencies(arena, stmt, meta);
+
+      if (!head)
+        head = tail = meta;
+      else {
+        tail->next = meta;
+        tail = meta;
+      }
+    }
+    stmt = stmt->next;
+  }
+
+  return head;
+}
+
+bool token_match(Token a, Token b) {
+    if (a.len != b.len) return false;
+    if (a.start == b.start) return true;
+    if (!a.start || !b.start) return false;
+    return memcmp(a.start, b.start, a.len) == 0;
+}
+
+DeclMetadata *find_decl_by_name(DeclMetadata *list, Token name) {
+    for (DeclMetadata *curr = list; curr != NULL; curr = curr->next) {
+        if (token_match(curr->name, name)) {
+            return curr;
+        }
+    }
+    return NULL;
+}
+
+void propagate_declaration_invalidation(DeclMetadata *old_cached_decls, DeclMetadata *new_parsed_decls) {
+    if (!new_parsed_decls) return;
+
+    size_t total_decls = 0;
+    
+    for (DeclMetadata *n = new_parsed_decls; n != NULL; n = n->next) {
+        total_decls++;
+        
+        DeclMetadata *old = find_decl_by_name(old_cached_decls, n->name);
+        if (!old) {
+            // Its a completely new function/struct declaration
+            n->is_dirty = true;
+        } else if (old->node_hash != n->node_hash) {
+            // The signature or internal body expression changed
+            n->is_dirty = true;
+        } else {
+            // Unchanged on its own merits, but pending dependency checks
+            n->is_dirty = false;
+        }
+    }
+
+    DeclMetadata **worklist = malloc(sizeof(DeclMetadata *) * total_decls);
+    size_t wl_top = 0;
+
+    for (DeclMetadata *n = new_parsed_decls; n != NULL; n = n->next) {
+        if (n->is_dirty) {
+            worklist[wl_top++] = n;
+        }
+    }
+
+    while (wl_top > 0) {
+        DeclMetadata *dirty_item = worklist[--wl_top];
+
+        // Scan all other declarations to see if they depend on this newly dirtied item
+        for (DeclMetadata *n = new_parsed_decls; n != NULL; n = n->next) {
+            if (n->is_dirty) continue;
+
+            bool structural_dependency_found = false;
+
+            // Check if n calls the dirty function/method
+            for (DepNode *dep = n->calls_to; dep != NULL; dep = dep->next) {
+                if (token_match(dep->name, dirty_item->name)) {
+                    structural_dependency_found = true;
+                    break;
+                }
+            }
+
+            // Check if n relies on the dirty type (struct, union, enum, etc.)
+            if (!structural_dependency_found) {
+                for (DepNode *dep = n->uses_types; dep != NULL; dep = dep->next) {
+                    if (token_match(dep->name, dirty_item->name)) {
+                        structural_dependency_found = true;
+                        break;
+                    }
+                }
+            }
+
+            // If a dependency is spotted, mark it dirty and push to track its downstream callers
+            if (structural_dependency_found) {
+                n->is_dirty = true;
+                worklist[wl_top++] = n;
+            }
+        }
+    }
+
+    free(worklist);
+}
+
+void cache_write_decl_meta(const char *path, DeclMetadata *meta, const char *src_base) {
+    FILE *fp = fopen(path, "wb");
+    if (!fp) return;
+
+    uint32_t count = 0;
+    for (DeclMetadata *m = meta; m; m = m->next) count++;
+    fwrite(&count, sizeof(uint32_t), 1, fp);
+
+    for (DeclMetadata *m = meta; m; m = m->next) {
+        // Write Name & Hash
+        fwrite(&m->name.len, sizeof(uint32_t), 1, fp);
+        fwrite(m->name.start, 1, m->name.len, fp);
+        fwrite(&m->node_hash, sizeof(uint32_t), 1, fp);
+
+        uint32_t start_off = (m->src_start && m->src_start >= src_base)
+                                 ? (uint32_t)(m->src_start - src_base)
+                                 : 0xFFFFFFFF;
+        uint32_t end_off = (m->src_end && m->src_end >= src_base)
+                               ? (uint32_t)(m->src_end - src_base)
+                               : 0xFFFFFFFF;
+        fwrite(&start_off, sizeof(uint32_t), 1, fp);
+        fwrite(&end_off, sizeof(uint32_t), 1, fp);
+
+        // Write Calls Dependencies
+        uint32_t dep_count = 0;
+        for (DepNode *d = m->calls_to; d; d = d->next) dep_count++;
+        fwrite(&dep_count, sizeof(uint32_t), 1, fp);
+        for (DepNode *d = m->calls_to; d; d = d->next) {
+            fwrite(&d->name.len, sizeof(uint32_t), 1, fp);
+            fwrite(d->name.start, 1, d->name.len, fp);
+        }
+
+        // Write Type Dependencies
+        dep_count = 0;
+        for (DepNode *d = m->uses_types; d; d = d->next) dep_count++;
+        fwrite(&dep_count, sizeof(uint32_t), 1, fp);
+        for (DepNode *d = m->uses_types; d; d = d->next) {
+            fwrite(&d->name.len, sizeof(uint32_t), 1, fp);
+            fwrite(d->name.start, 1, d->name.len, fp);
+        }
+    }
+    fclose(fp);
+}
+
+DeclMetadata *cache_read_decl_meta(Arena *arena, const char *path,
+                                   const char *src_base) {
+#define SAFE_FREAD(ptr, size, nmemb, fp)                                       \
+  do {                                                                         \
+    if (fread((ptr), (size), (nmemb), (fp)) != (nmemb)) {                      \
+      fclose(fp);                                                              \
+      return NULL;                                                             \
+    }                                                                          \
+  } while (0)
+  FILE *fp = fopen(path, "rb");
+  if (!fp)
+    return NULL;
+
+  uint32_t count = 0;
+  if (fread(&count, sizeof(uint32_t), 1, fp) != 1) {
+    fclose(fp);
+    return NULL;
+  }
+
+  DeclMetadata *head = NULL, *tail = NULL;
+  for (uint32_t i = 0; i < count; i++) {
+    DeclMetadata *m = arena_alloc(arena, sizeof(DeclMetadata));
+    memset(m, 0, sizeof(DeclMetadata));
+
+    // Read Name inline to survive source file modifications
+    SAFE_FREAD(&m->name.len, sizeof(uint32_t), 1, fp);
+    char *name_str = arena_alloc(arena, m->name.len);
+    SAFE_FREAD(name_str, 1, m->name.len, fp);
+    m->name.start = name_str;
+    m->name.type = TOKEN_IDENTIF;
+
+    SAFE_FREAD(&m->node_hash, sizeof(uint32_t), 1, fp);
+
+    uint32_t start_off, end_off;
+    SAFE_FREAD(&start_off, sizeof(uint32_t), 1, fp);
+    SAFE_FREAD(&end_off, sizeof(uint32_t), 1, fp);
+    m->src_start = (start_off == 0xFFFFFFFF) ? NULL : (src_base + start_off);
+    m->src_end = (end_off == 0xFFFFFFFF) ? NULL : (src_base + end_off);
+
+    uint32_t dep_count;
+
+    // Read Calls
+    SAFE_FREAD(&dep_count, sizeof(uint32_t), 1, fp);
+    for (uint32_t j = 0; j < dep_count; j++) {
+      DepNode *d = arena_alloc(arena, sizeof(DepNode));
+      SAFE_FREAD(&d->name.len, sizeof(uint32_t), 1, fp);
+      char *d_name = arena_alloc(arena, d->name.len);
+      SAFE_FREAD(d_name, 1, d->name.len, fp);
+      d->name.start = d_name;
+      d->next = m->calls_to;
+      m->calls_to = d;
+    }
+
+    // Read Types
+    SAFE_FREAD(&dep_count, sizeof(uint32_t), 1, fp);
+    for (uint32_t j = 0; j < dep_count; j++) {
+      DepNode *d = arena_alloc(arena, sizeof(DepNode));
+      SAFE_FREAD(&d->name.len, sizeof(uint32_t), 1, fp);
+      char *d_name = arena_alloc(arena, d->name.len);
+      SAFE_FREAD(d_name, 1, d->name.len, fp);
+      d->name.start = d_name;
+      d->next = m->uses_types;
+      m->uses_types = d;
+    }
+
+    if (!head)
+      head = tail = m;
+    else {
+      tail->next = m;
+      tail = m;
+    }
+  }
+  fclose(fp);
+  return head;
 }

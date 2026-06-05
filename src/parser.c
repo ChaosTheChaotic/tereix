@@ -4,6 +4,17 @@
 #include <stdarg.h>
 #include <stdio.h>
 
+inline AstNode *new_node_with_src(Arena *arena, ASTN_TYPE type, ParseCtx *ctx) {
+    AstNode *n = new_node(arena, type);
+    if (n) {
+        n->src_start = ctx->curr.start;
+    }
+    return n;
+}
+
+#undef new_node
+#define new_node(arena, type) new_node_with_src(arena, type, ctx)
+
 void report_error(ParseCtx *ctx, Token token, const char *fmt, ...) {
   if (ctx->panic_mode)
     return;
@@ -404,7 +415,11 @@ AstNode *pop_node(ParseCtx *ctx) {
     fprintf(stderr, "Parser Error: Node stack underflow\n");
     exit(1);
   }
-  return ctx->node_stack[--ctx->node_count];
+  AstNode *node = ctx->node_stack[--ctx->node_count];
+  if (node && !node->src_end) {
+    node->src_end = ctx->prev.start + ctx->prev.len;
+  }
+  return node;
 }
 
 void push_op(ParseCtx *ctx, Token op, bool is_unary, bool is_postfix) {
@@ -621,6 +636,7 @@ bool parse_step(ParseCtx *ctx) {
                    *ctx->curr.start == ';') {
           adv(ctx);
           snode->as.struct_def.contents = NULL;
+          snode->src_end = ctx->prev.start + ctx->prev.len;
           append_stmt(target_list, snode);
           push_state(ctx, current_state);
           break;
@@ -648,6 +664,7 @@ bool parse_step(ParseCtx *ctx) {
                    *ctx->curr.start == ';') {
           adv(ctx);
           unode->as.struct_def.contents = NULL;
+          unode->src_end = ctx->prev.start + ctx->prev.len;
           append_stmt(target_list, unode);
           push_state(ctx, current_state);
           break;
@@ -846,6 +863,7 @@ bool parse_step(ParseCtx *ctx) {
           }
           adv(ctx);
           fnode->as.func_def.block = NULL;
+          fnode->src_end = ctx->prev.start + ctx->prev.len;
           append_stmt(target_list, fnode);
           push_state(ctx, current_state);
           break;
@@ -879,8 +897,10 @@ bool parse_step(ParseCtx *ctx) {
           push_state(ctx, STATE_IN_EXPR);
           break;
         }
-        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';')
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
           adv(ctx);
+          vnode->src_end = ctx->prev.start + ctx->prev.len;
+        }
         break;
       }
     }
@@ -2124,6 +2144,7 @@ bool parse_step(ParseCtx *ctx) {
         }
         adv(ctx);
         fnode->as.func_def.block = NULL;
+        fnode->src_end = ctx->prev.start + ctx->prev.len;
         AstNode **target_list = (parent->type == AST_STRUCT)
                                     ? &parent->as.struct_def.contents
                                     : &parent->as.union_def.contents;

@@ -3,6 +3,7 @@
 
 #include "arena.h"
 #include "ast_types.h"
+#include "ast_serde.h"
 #include "diag.h"
 #include "hashmap.h"
 
@@ -19,14 +20,17 @@ typedef struct {
 typedef struct Module {
   const char *abs_path;
   const char *mod_name;
+	const char *content;
   AstNode *ast_root;
 
   Arena *mod_arena;
 
   uint64_t content_hash;
   uint64_t interface_hash;
+  DeclMetadata *meta;
   bool is_dirty;
   bool interface_changed;
+	bool needs_cache_write;
 
   HashMap local_symbols;
   HashMap imported_mods;
@@ -66,6 +70,7 @@ typedef struct {
   TCState state;
   DataType *expected;
   AstNode *curr_func;
+  bool is_top_level;
 } TCItem;
 
 typedef enum { ACTION_VISIT_NODE, ACTION_POP_SCOPE } TravAction;
@@ -73,6 +78,7 @@ typedef enum { ACTION_VISIT_NODE, ACTION_POP_SCOPE } TravAction;
 typedef struct {
   AstNode *node;
   TravAction action;
+	bool is_top_level;
 } TravItem;
 
 void sem_init(SemCtx *ctx, Arena *arena);

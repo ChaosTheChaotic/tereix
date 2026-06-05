@@ -414,7 +414,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
   TravItem *stack = malloc(sizeof(TravItem) * stack_cap);
   size_t top = 0;
 
-  stack[top++] = (TravItem){root, ACTION_VISIT_NODE};
+  stack[top++] = (TravItem){root, ACTION_VISIT_NODE, false};
 
   push_scope(ss);
 
@@ -434,16 +434,16 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
   }
 
-#define PUSH_TRAV(n, act)                                                      \
+#define PUSH_TRAV(n, act, top_level)                                           \
   do {                                                                         \
     if (top >= stack_cap) {                                                    \
       stack_cap *= 2;                                                          \
       stack = realloc(stack, sizeof(TravItem) * stack_cap);                    \
     }                                                                          \
-    stack[top++] = (TravItem){n, act};                                         \
+    stack[top++] = (TravItem){n, act, top_level};                              \
   } while (0)
 
-#define PUSH_LL_REVERSE(head, act)                                             \
+#define PUSH_LL_REVERSE(head, act, top_level)                                  \
   do {                                                                         \
     AstNode *_curr = (head);                                                   \
     size_t _cnt = 0;                                                           \
@@ -459,7 +459,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
         _curr = _curr->next;                                                   \
       }                                                                        \
       for (int _i = (int)_cnt - 1; _i >= 0; _i--) {                            \
-        PUSH_TRAV(_arr[_i], act);                                              \
+        PUSH_TRAV(_arr[_i], act, top_level);                                   \
       }                                                                        \
       free(_arr);                                                              \
     }                                                                          \
@@ -478,11 +478,18 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
       continue;
 
     switch (node->type) {
-    case AST_PROGRAM:
+    case AST_PROGRAM: {
+      push_scope(ss);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
+      // Flag all root statements as top level
+      PUSH_LL_REVERSE(node->as.block.first_stmt, ACTION_VISIT_NODE, true);
+      break;
+    }
+
     case AST_BLOCK: {
       push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
-      PUSH_LL_REVERSE(node->as.block.first_stmt, ACTION_VISIT_NODE);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
+      PUSH_LL_REVERSE(node->as.block.first_stmt, ACTION_VISIT_NODE, false);
       break;
     }
 
@@ -496,14 +503,15 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
                    node->as.func_def.fn_name.start);
       }
 
+      // Only traverse body if dirty or if it's nested
       push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
 
       if (node->as.func_def.block) {
-        PUSH_TRAV(node->as.func_def.block, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.func_def.block, ACTION_VISIT_NODE, false);
       }
 
-      PUSH_LL_REVERSE(node->as.func_def.params, ACTION_VISIT_NODE);
+      PUSH_LL_REVERSE(node->as.func_def.params, ACTION_VISIT_NODE, false);
       break;
     }
 
@@ -520,7 +528,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
 
     case AST_VAR_DECL: {
       if (node->as.var_decl.init) {
-        PUSH_TRAV(node->as.var_decl.init, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.var_decl.init, ACTION_VISIT_NODE, false);
       }
 
       Sym *var_sym =
@@ -546,8 +554,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
 
     case AST_BINOP: {
-      PUSH_TRAV(node->as.binop.right, ACTION_VISIT_NODE);
-      PUSH_TRAV(node->as.binop.left, ACTION_VISIT_NODE);
+      PUSH_TRAV(node->as.binop.right, ACTION_VISIT_NODE, false);
+      PUSH_TRAV(node->as.binop.left, ACTION_VISIT_NODE, false);
       break;
     }
 
@@ -555,96 +563,96 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     case AST_ADDR_OF:
     case AST_DEREF: {
       if (node->as.unop.operand) {
-        PUSH_TRAV(node->as.unop.operand, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.unop.operand, ACTION_VISIT_NODE, false);
       }
       break;
     }
 
     case AST_IF: {
       if (node->as.if_check.elseAct)
-        PUSH_TRAV(node->as.if_check.elseAct, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.if_check.elseAct, ACTION_VISIT_NODE, false);
       if (node->as.if_check.action)
-        PUSH_TRAV(node->as.if_check.action, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.if_check.action, ACTION_VISIT_NODE, false);
       if (node->as.if_check.check)
-        PUSH_TRAV(node->as.if_check.check, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.if_check.check, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_WHILE: {
       if (node->as.while_loop.action)
-        PUSH_TRAV(node->as.while_loop.action, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.while_loop.action, ACTION_VISIT_NODE, false);
       if (node->as.while_loop.check)
-        PUSH_TRAV(node->as.while_loop.check, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.while_loop.check, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_FOR: {
       push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
 
       if (node->as.for_loop.action)
-        PUSH_TRAV(node->as.for_loop.action, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.for_loop.action, ACTION_VISIT_NODE, false);
       if (node->as.for_loop.inc)
-        PUSH_TRAV(node->as.for_loop.inc, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.for_loop.inc, ACTION_VISIT_NODE, false);
       if (node->as.for_loop.check)
-        PUSH_TRAV(node->as.for_loop.check, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.for_loop.check, ACTION_VISIT_NODE, false);
       if (node->as.for_loop.init)
-        PUSH_TRAV(node->as.for_loop.init, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.for_loop.init, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_FUNC_CALL: {
-      PUSH_LL_REVERSE(node->as.func_call.args, ACTION_VISIT_NODE);
+      PUSH_LL_REVERSE(node->as.func_call.args, ACTION_VISIT_NODE, false);
       if (node->as.func_call.caller)
-        PUSH_TRAV(node->as.func_call.caller, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.func_call.caller, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_ARRAY_LIT: {
-      PUSH_LL_REVERSE(node->as.array_lit.elements, ACTION_VISIT_NODE);
+      PUSH_LL_REVERSE(node->as.array_lit.elements, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_INDEX: {
       if (node->as.index.index)
-        PUSH_TRAV(node->as.index.index, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.index.index, ACTION_VISIT_NODE, false);
       if (node->as.index.base)
-        PUSH_TRAV(node->as.index.base, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.index.base, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_MEMBER: {
       if (node->as.member.base)
-        PUSH_TRAV(node->as.member.base, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.member.base, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_RET: {
       if (node->as.ret_stmt.expr)
-        PUSH_TRAV(node->as.ret_stmt.expr, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.ret_stmt.expr, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_DEFER: {
       if (node->as.defer_stmt.contents)
-        PUSH_TRAV(node->as.defer_stmt.contents, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.defer_stmt.contents, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_SWITCH: {
       if (node->as.switch_stmt.default_case)
-        PUSH_TRAV(node->as.switch_stmt.default_case, ACTION_VISIT_NODE);
-      PUSH_LL_REVERSE(node->as.switch_stmt.cases, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.switch_stmt.default_case, ACTION_VISIT_NODE, false);
+      PUSH_LL_REVERSE(node->as.switch_stmt.cases, ACTION_VISIT_NODE, false);
       if (node->as.switch_stmt.check)
-        PUSH_TRAV(node->as.switch_stmt.check, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.switch_stmt.check, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_CASE: {
       if (node->as.case_stmt.action)
-        PUSH_TRAV(node->as.case_stmt.action, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.case_stmt.action, ACTION_VISIT_NODE, false);
       if (node->as.case_stmt.val)
-        PUSH_TRAV(node->as.case_stmt.val, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.case_stmt.val, ACTION_VISIT_NODE, false);
       break;
     }
 
@@ -654,12 +662,12 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
       scope_declare(ss, node->as.struct_def.structn, struct_sym);
 
       push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
 
       Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
       scope_declare(ss, self_tok, struct_sym);
 
-      PUSH_LL_REVERSE(node->as.struct_def.contents, ACTION_VISIT_NODE);
+      PUSH_LL_REVERSE(node->as.struct_def.contents, ACTION_VISIT_NODE, false);
       break;
     }
 
@@ -669,12 +677,12 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
       scope_declare(ss, node->as.union_def.unionn, union_sym);
 
       push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
 
       Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
       scope_declare(ss, self_tok, union_sym);
 
-      PUSH_LL_REVERSE(node->as.union_def.contents, ACTION_VISIT_NODE);
+      PUSH_LL_REVERSE(node->as.struct_def.contents, ACTION_VISIT_NODE, false);
       break;
     }
 
@@ -684,30 +692,30 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
       scope_declare(ss, node->as.enum_def.enumn, enum_sym);
 
       push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE);
+      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
 
       Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
       scope_declare(ss, self_tok, enum_sym);
 
-      PUSH_LL_REVERSE(node->as.enum_def.contents, ACTION_VISIT_NODE);
+      PUSH_LL_REVERSE(node->as.struct_def.contents, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_EXTERN: {
-      PUSH_LL_REVERSE(node->as.extern_block.contents, ACTION_VISIT_NODE);
+      PUSH_LL_REVERSE(node->as.extern_block.contents, ACTION_VISIT_NODE, false);
       break;
     }
 
     case AST_CAST: {
       if (node->as.cast.op) {
-        PUSH_TRAV(node->as.cast.op, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.cast.op, ACTION_VISIT_NODE, false);
       }
       break;
     }
 
     case AST_SIZEOF: {
       if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr) {
-        PUSH_TRAV(node->as.sizeof_expr.target_expr, ACTION_VISIT_NODE);
+        PUSH_TRAV(node->as.sizeof_expr.target_expr, ACTION_VISIT_NODE, false);
       }
       break;
     }
@@ -780,7 +788,7 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
   TCItem *stack = malloc(sizeof(TCItem) * cap);
   size_t top = 0;
 
-  stack[top++] = (TCItem){root, TC_VISIT_CHILDREN, NULL, NULL};
+  stack[top++] = (TCItem){root, TC_VISIT_CHILDREN, NULL, NULL, false};
 
   while (top > 0) {
     TCItem item = stack[--top];
@@ -790,16 +798,28 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
     DataType *expected = item.expected;
 
     if (item.state == TC_VISIT_CHILDREN) {
+
+      if (item.is_top_level && !node->is_dirty &&
+          (node->type == AST_FUNC || node->type == AST_VAR_DECL ||
+           node->type == AST_STRUCT || node->type == AST_UNION ||
+           node->type == AST_ENUM)) {
+
+        // Still push EVAL_NODE so the parent registers it, but skip children
+        stack[top++] =
+            (TCItem){node, TC_EVAL_NODE, expected, item.curr_func, false};
+        continue;
+      }
+
       if (top >= cap - 32) {
         cap *= 2;
         stack = realloc(stack, sizeof(TCItem) * cap);
       }
 
-      stack[top++] = (TCItem){node, TC_EVAL_NODE, expected, item.curr_func};
+      stack[top++] =
+          (TCItem){node, TC_EVAL_NODE, expected, item.curr_func, false};
 
       switch (node->type) {
-      case AST_PROGRAM:
-      case AST_BLOCK: {
+      case AST_PROGRAM: {
         AstNode *curr = node->as.block.first_stmt;
         size_t count = 0;
         while (curr) {
@@ -815,7 +835,29 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           }
           for (int i = count - 1; i >= 0; i--) {
             stack[top++] =
-                (TCItem){arr[i], TC_VISIT_CHILDREN, NULL, item.curr_func};
+                (TCItem){arr[i], TC_VISIT_CHILDREN, NULL, item.curr_func, true};
+          }
+          free(arr);
+        }
+        break;
+      }
+      case AST_BLOCK: {
+        AstNode *curr = node->as.block.first_stmt;
+        size_t count = 0;
+        while (curr) {
+          count++;
+          curr = curr->next;
+        }
+        if (count > 0) {
+          AstNode **arr = malloc(sizeof(AstNode *) * count);
+          curr = node->as.block.first_stmt;
+          for (size_t i = 0; i < count; i++) {
+            arr[i] = curr;
+            curr = curr->next;
+          }
+          for (int i = count - 1; i >= 0; i--) {
+            stack[top++] = (TCItem){arr[i], TC_VISIT_CHILDREN, NULL,
+                                    item.curr_func, false};
           }
           free(arr);
         }
@@ -823,13 +865,13 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       }
       case AST_FUNC:
         if (node->as.func_def.block) {
-          stack[top++] =
-              (TCItem){node->as.func_def.block, TC_VISIT_CHILDREN, NULL, node};
+          stack[top++] = (TCItem){node->as.func_def.block, TC_VISIT_CHILDREN,
+                                  NULL, node, false};
         }
         break;
       case AST_VAR_DECL:
         stack[top++] = (TCItem){node->as.var_decl.init, TC_VISIT_CHILDREN,
-                                &node->as.var_decl.type, item.curr_func};
+                                &node->as.var_decl.type, item.curr_func, false};
         break;
       case AST_BINOP: {
         DataType *operand_expected = item.expected;
@@ -839,9 +881,9 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         }
 
         stack[top++] = (TCItem){node->as.binop.right, TC_VISIT_CHILDREN,
-                                operand_expected, item.curr_func};
+                                operand_expected, item.curr_func, false};
         stack[top++] = (TCItem){node->as.binop.left, TC_VISIT_CHILDREN,
-                                operand_expected, item.curr_func};
+                                operand_expected, item.curr_func, false};
         break;
       }
       case AST_UOP:
@@ -854,38 +896,38 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           inner->ptr_depth++;
         }
         stack[top++] = (TCItem){node->as.unop.operand, TC_VISIT_CHILDREN, inner,
-                                item.curr_func};
+                                item.curr_func, false};
         break;
       }
       case AST_IF:
         if (node->as.if_check.elseAct)
           stack[top++] = (TCItem){node->as.if_check.elseAct, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         if (node->as.if_check.action)
           stack[top++] = (TCItem){node->as.if_check.action, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         stack[top++] = (TCItem){node->as.if_check.check, TC_VISIT_CHILDREN,
-                                &EXPECT_BOOL, item.curr_func};
+                                &EXPECT_BOOL, item.curr_func, false};
         break;
       case AST_WHILE:
         if (node->as.while_loop.action)
           stack[top++] = (TCItem){node->as.while_loop.action, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         stack[top++] = (TCItem){node->as.while_loop.check, TC_VISIT_CHILDREN,
-                                &EXPECT_BOOL, item.curr_func};
+                                &EXPECT_BOOL, item.curr_func, false};
         break;
       case AST_FOR:
         if (node->as.for_loop.action)
           stack[top++] = (TCItem){node->as.for_loop.action, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         if (node->as.for_loop.inc)
           stack[top++] = (TCItem){node->as.for_loop.inc, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         stack[top++] = (TCItem){node->as.for_loop.check, TC_VISIT_CHILDREN,
-                                &EXPECT_BOOL, item.curr_func};
+                                &EXPECT_BOOL, item.curr_func, false};
         if (node->as.for_loop.init)
           stack[top++] = (TCItem){node->as.for_loop.init, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         break;
       case AST_FUNC_CALL: {
         AstNode *fn_decl = NULL;
@@ -922,48 +964,48 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
 
           for (int i = arg_count - 1; i >= 0; i--) {
             DataType *p_type = params[i] ? &params[i]->as.fn_param.type : NULL;
-            stack[top++] =
-                (TCItem){args[i], TC_VISIT_CHILDREN, p_type, item.curr_func};
+            stack[top++] = (TCItem){args[i], TC_VISIT_CHILDREN, p_type,
+                                    item.curr_func, false};
           }
           free(args);
           free(params);
         }
         stack[top++] = (TCItem){node->as.func_call.caller, TC_VISIT_CHILDREN,
-                                NULL, item.curr_func};
+                                NULL, item.curr_func, false};
         break;
       }
       case AST_CAST:
         if (node->as.cast.op)
           stack[top++] = (TCItem){node->as.cast.op, TC_VISIT_CHILDREN,
-                                  &node->as.cast.target, item.curr_func};
+                                  &node->as.cast.target, item.curr_func, false};
         break;
       case AST_RET:
         if (item.curr_func && node->as.ret_stmt.expr) {
-          stack[top++] =
-              (TCItem){node->as.ret_stmt.expr, TC_VISIT_CHILDREN,
-                       &item.curr_func->as.func_def.ret_type, item.curr_func};
+          stack[top++] = (TCItem){node->as.ret_stmt.expr, TC_VISIT_CHILDREN,
+                                  &item.curr_func->as.func_def.ret_type,
+                                  item.curr_func, false};
         }
         break;
       case AST_INDEX:
         if (node->as.index.index)
           stack[top++] = (TCItem){node->as.index.index, TC_VISIT_CHILDREN, NULL,
-                                  item.curr_func};
+                                  item.curr_func, false};
         if (node->as.index.base)
           stack[top++] = (TCItem){node->as.index.base, TC_VISIT_CHILDREN, NULL,
-                                  item.curr_func};
+                                  item.curr_func, false};
         break;
 
       case AST_MEMBER:
         if (node->as.member.base)
           stack[top++] = (TCItem){node->as.member.base, TC_VISIT_CHILDREN, NULL,
-                                  item.curr_func};
+                                  item.curr_func, false};
         break;
 
       case AST_ARRAY_LIT: {
         AstNode *curr = node->as.array_lit.elements;
         while (curr) {
-          stack[top++] =
-              (TCItem){curr, TC_VISIT_CHILDREN, item.expected, item.curr_func};
+          stack[top++] = (TCItem){curr, TC_VISIT_CHILDREN, item.expected,
+                                  item.curr_func, false};
           curr = curr->next;
         }
         break;
@@ -971,40 +1013,43 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
 
       case AST_SWITCH:
         if (node->as.switch_stmt.default_case)
-          stack[top++] = (TCItem){node->as.switch_stmt.default_case,
-                                  TC_VISIT_CHILDREN, NULL, item.curr_func};
+          stack[top++] =
+              (TCItem){node->as.switch_stmt.default_case, TC_VISIT_CHILDREN,
+                       NULL, item.curr_func, false};
         if (node->as.switch_stmt.cases) {
           AstNode *c = node->as.switch_stmt.cases;
           while (c) {
-            stack[top++] = (TCItem){c, TC_VISIT_CHILDREN, NULL, item.curr_func};
+            stack[top++] =
+                (TCItem){c, TC_VISIT_CHILDREN, NULL, item.curr_func, false};
             c = c->next;
           }
         }
         if (node->as.switch_stmt.check)
           stack[top++] = (TCItem){node->as.switch_stmt.check, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         break;
 
       case AST_CASE:
         if (node->as.case_stmt.action)
           stack[top++] = (TCItem){node->as.case_stmt.action, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         if (node->as.case_stmt.val)
           stack[top++] = (TCItem){node->as.case_stmt.val, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func};
+                                  NULL, item.curr_func, false};
         break;
 
       case AST_DEFER:
         if (node->as.defer_stmt.contents)
-          stack[top++] = (TCItem){node->as.defer_stmt.contents,
-                                  TC_VISIT_CHILDREN, NULL, item.curr_func};
+          stack[top++] =
+              (TCItem){node->as.defer_stmt.contents, TC_VISIT_CHILDREN, NULL,
+                       item.curr_func, false};
         break;
 
       case AST_EXTERN: {
         AstNode *curr = node->as.extern_block.contents;
         while (curr) {
           stack[top++] =
-              (TCItem){curr, TC_VISIT_CHILDREN, NULL, item.curr_func};
+              (TCItem){curr, TC_VISIT_CHILDREN, NULL, item.curr_func, false};
           curr = curr->next;
         }
         break;
@@ -1018,15 +1063,16 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
                                         : node->as.enum_def.contents;
         while (curr) {
           stack[top++] =
-              (TCItem){curr, TC_VISIT_CHILDREN, NULL, item.curr_func};
+              (TCItem){curr, TC_VISIT_CHILDREN, NULL, item.curr_func, false};
           curr = curr->next;
         }
         break;
       }
       case AST_SIZEOF:
         if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr) {
-          stack[top++] = (TCItem){node->as.sizeof_expr.target_expr,
-                                  TC_VISIT_CHILDREN, NULL, item.curr_func};
+          stack[top++] =
+              (TCItem){node->as.sizeof_expr.target_expr, TC_VISIT_CHILDREN,
+                       NULL, item.curr_func, false};
         }
         break;
       default:
