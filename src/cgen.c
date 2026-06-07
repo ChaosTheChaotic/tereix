@@ -198,7 +198,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
   stack[top++] = (IterFrame){root, 0, NULL, NULL, 0};
 
-	uint64_t yield_blk_ctr = 0;
+  uint64_t yield_blk_ctr = 0;
   while (top > 0) {
     IterFrame *f = &stack[top - 1];
     AstNode *n = f->node;
@@ -879,8 +879,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           bool is_void = (bool)(uintptr_t)f->aux2;
           if (!is_void) {
             char var_name[64];
-            sprintf(var_name, "_tx_blk_%zu",
-                    yield_blk_ctr);
+            sprintf(var_name, "_tx_blk_%zu", yield_blk_ctr);
             sb_append(sb, "return ");
             sb_append(sb, var_name);
             sb_append(sb, ";\n");
@@ -1629,7 +1628,7 @@ void lower_defers(AstNode *root, Arena *arena) {
 
   stack[top++] = (LowerFrame){root, 0, 0, 0, 0};
 
-	uint64_t rid_c = 0;
+  uint64_t rid_c = 0;
   while (top > 0) {
     LowerFrame *f = &stack[top - 1];
     AstNode *n = f->node;
@@ -1932,8 +1931,8 @@ void lower_defers(AstNode *root, Arena *arena) {
 }
 
 bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
-                             const char **flags, int flag_count, Arena *arena,
-                             Module *main_mod) {
+                             const char *compiler, const char **flags,
+                             int flag_count, Arena *arena, Module *main_mod) {
   if (!sem)
     return false;
 
@@ -2043,7 +2042,8 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
   StringBuilder cmd;
   sb_init(&cmd);
 
-  sb_append(&cmd, "gcc -o ");
+  sb_append(&cmd, compiler);
+  sb_append(&cmd, " -o ");
   sb_append(&cmd, out_binary_name);
   sb_append(&cmd, " ");
   sb_append(&cmd, tmp_c_file);

@@ -1,5 +1,6 @@
 #include "ast_serde.h"
 #include "c_gen_types.h"
+#include "cli.h"
 #include "hashutils.h"
 #include "lsp.h"
 #include "util.h"
@@ -17,9 +18,6 @@ bool check_exists(const char *path) {
   } else {
     return false;
   }
-}
-inline void print_help() {
-  printf("Literally just give it a valid file bro smh");
 }
 
 void ensure_cache_dir() {
@@ -664,7 +662,7 @@ void propagate_global_invalidation(SemCtx *sem) {
   arena_free_all(&temp_arena);
 }
 
-void compile_project(const char *entry_file) {
+void compile_project(const CompileOptions *opts) {
   ensure_cache_dir();
   Arena arena = {0};
   SemCtx sem = {0};
@@ -675,7 +673,7 @@ void compile_project(const char *entry_file) {
   sem_main_mod = NULL;
 
   Worklist pending = {0};
-  wl_push(&pending, entry_file);
+  wl_push(&pending, opts->input_file);
 
   const char *current_path;
   while ((current_path = wl_pop(&pending)) != NULL) {
@@ -774,7 +772,7 @@ void compile_project(const char *entry_file) {
         stmt = stmt->next;
       }
 
-// Swap fully typed cached nodes into the fresh AST
+      // Swap fully typed cached nodes into the fresh AST
       AstNode *old_ast = cache_read_ast(&arena, cache_file, content);
       AstNode **ptr = &ast->as.block.first_stmt;
 
@@ -854,8 +852,10 @@ void compile_project(const char *entry_file) {
       sem_main_mod = mod;
     }
 
-    printf("Module: %s\n", mod_name);
-    print_ast(ast);
+    if (opts->print_ast) {
+      printf("Module: %s\n", mod_name);
+      print_ast(ast);
+    }
 
     map_set(&sem.mod_cache, abs_path, strlen(abs_path), mod);
 
@@ -976,7 +976,7 @@ void compile_project(const char *entry_file) {
     }
   }
 
-  const char *abs_path = resolve_alloc(&arena, entry_file);
+  const char *abs_path = resolve_alloc(&arena, opts->input_file);
   Module *main_mod = map_get(&sem.mod_cache, abs_path, strlen(abs_path));
 
   for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
@@ -985,30 +985,54 @@ void compile_project(const char *entry_file) {
       Module *mod = entry->value;
 
       if (strncmp(mod->abs_path, abs_path, strlen(abs_path)) == 0) {
-        printf("Transpiling main module: %s\n", entry_file);
+        printf("Transpiling main module: %s\n", opts->input_file);
 
-        const char *flags[] = {"-O3", "-flto", "-Wno-strict-prototypes",
-                               "-Wextra", "-Wpedantic"};
-
-        const char *base = strrchr(entry_file, '/');
+        const char *base = strrchr(opts->input_file, '/');
         if (base) {
           base++;
         } else {
-          base = entry_file;
+          base = opts->input_file;
         }
 
-        char *bin_name = arena_alloc(&arena, strlen(base) + 1);
-        strcpy(bin_name, base);
-        char *dot = strrchr(bin_name, '.');
-        if (dot && strcmp(dot, ".tx") == 0)
-          *dot = '\0';
+        const char *bin_name;
+        char derived_name[256];
+        if (opts->output_file) {
+          bin_name = opts->output_file;
+        } else {
+          const char *base = strrchr(opts->input_file, '/');
+          if (base)
+            base++;
+          else
+            base = opts->input_file;
+          strncpy(derived_name, base, sizeof(derived_name) - 1);
+          derived_name[sizeof(derived_name) - 1] = '\0';
+          char *dot = strrchr(derived_name, '.');
+          if (dot && strcmp(dot, ".tx") == 0)
+            *dot = '\0';
+          bin_name = derived_name;
+        }
+
+        // Build compiler flags array: start with standard flags, then user
+        // extra flags
+        const char *std_flags[] = {"-O3", "-flto", "-Wno-strict-prototypes",
+                                   "-Wextra", "-Wpedantic"};
+        int total_flags = 5 + opts->extra_cflag_count;
+        const char **all_flags =
+            arena_alloc(&arena, (total_flags + 1) * sizeof(const char *));
+        int idx = 0;
+        for (int i = 0; i < 5; i++)
+          all_flags[idx++] = std_flags[i];
+        for (unsigned int i = 0; i < opts->extra_cflag_count; i++)
+          all_flags[idx++] = opts->extra_cflags[i];
+        all_flags[idx] = NULL;
 
         bool suc =
-            output_to_c_and_compile(&sem, bin_name, flags, 5, &arena, main_mod);
+            output_to_c_and_compile(&sem, bin_name, opts->compiler, all_flags,
+                                    total_flags, &arena, main_mod);
         if (suc)
           printf("Compiled successfully\n");
         else
-          fprintf(stderr, "Failed to compile %s\n", entry_file);
+          fprintf(stderr, "Failed to compile %s\n", opts->input_file);
       }
       break;
     }
@@ -1027,17 +1051,16 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  if (argc <= 1) {
-    print_help();
-    exit(1);
-  }
-
-  if (check_exists(argv[1])) {
-    compile_project(argv[1]);
-  } else {
-    printf("Entry file does not exist: %s\n", argv[1]);
+  CompileOptions opts;
+  if (parse_options(argc, argv, &opts) != 0) {
+    print_usage(argv[0]);
     return 1;
   }
+  if (opts.help) {
+    print_usage(argv[0]);
+    return 0;
+  }
 
+  compile_project(&opts);
   return 0;
 }

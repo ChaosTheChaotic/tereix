@@ -18,9 +18,9 @@ typedef struct {
   Token sue;
 } FlattenFrame;
 
-typedef struct { 
-    AstNode *src; 
-    AstNode *dst; 
+typedef struct {
+  AstNode *src;
+  AstNode *dst;
 } ClonePair;
 
 typedef struct {
@@ -33,8 +33,8 @@ typedef struct {
 
 HashMap *build_func_map(Arena *arena, AstNode *root);
 bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
-                             const char **flags, int flag_count, Arena *arena,
-                             Module *main_mod);
+                             const char *compiler, const char **flags,
+                             int flag_count, Arena *arena, Module *main_mod);
 void mangle_mod_symbols(Arena *arena, Module *mod);
 
 #endif // !C_GEN_TYPES_H
