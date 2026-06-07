@@ -2075,6 +2075,13 @@ void compile_doc(Doc *doc) {
       while (entry) {
         Module *mod = (Module *)entry->value;
         if (mod->is_dirty && mod->ast_root) {
+
+          AstNode *stmt = mod->ast_root->as.block.first_stmt;
+          while (stmt) {
+            stmt->is_dirty = true;
+            stmt = stmt->next;
+          }
+
           ScopeStack ss;
           scope_stack_init(&ss, sem->arena);
           sem_current_mod = mod;
