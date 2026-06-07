@@ -3,6 +3,8 @@
 #include "hashmap.h"
 #include "sem_types.h"
 #include "string_builder.h"
+#include <sys/wait.h>
+#include <unistd.h>
 
 void gen_type(DataType type, StringBuilder *sb) {
   if (type.is_static)
@@ -2053,10 +2055,57 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
 
   printf("Executing: %s\n", cmd.buf);
 
-  // TODO: Change to fork and exec later?
-  int res = system(cmd.buf);
-  sb_free(&cmd);
+  char **argv = NULL;
+  size_t argc = 0;
+  char *cmd_copy = strdup(cmd.buf);
+  if (!cmd_copy) {
+    fprintf(stderr, "Failed to duplicate command string\n");
+    sb_free(&cmd);
+    map_free_buckets(global_func_map);
+    return false;
+  }
 
+  char *token = strtok(cmd_copy, " ");
+  while (token) {
+    argv = realloc(argv, (argc + 2) * sizeof(char *));
+    argv[argc++] = token;
+    token = strtok(NULL, " ");
+  }
+  argv[argc] = NULL;
+
+  pid_t pid = fork();
+  int res = -1;
+
+  if (pid == -1) {
+    perror("fork");
+    free(cmd_copy);
+    free(argv);
+    sb_free(&cmd);
+    map_free_buckets(global_func_map);
+    return false;
+  } else if (pid == 0) {
+    // Child process execute the compiler
+    execvp(argv[0], argv);
+    // If we get here exec failed
+    perror("execvp");
+    _exit(127);
+  } else {
+    // Parent process wait for child
+    int status;
+    if (waitpid(pid, &status, 0) == -1) {
+      perror("waitpid");
+      res = -1;
+    } else if (WIFEXITED(status)) {
+      res = WEXITSTATUS(status);
+    } else {
+      res = -1;
+    }
+  }
+
+  free(cmd_copy);
+  free(argv);
+
+  sb_free(&cmd);
   map_free_buckets(global_func_map);
 
   return res == 0;
