@@ -196,6 +196,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
   stack[top++] = (IterFrame){root, 0, NULL, NULL, 0};
 
+	uint64_t yield_blk_ctr = 0;
   while (top > 0) {
     IterFrame *f = &stack[top - 1];
     AstNode *n = f->node;
@@ -816,14 +817,14 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                 (block->eval_type.name.len == 0);
 
             char var_name[64];
-            sprintf(var_name, "_tx_blk_%zu", (size_t)(uintptr_t)block);
+            sprintf(var_name, "_tx_blk_%zu", ++yield_blk_ctr);
 
             if (!is_void) {
               DataType mut_type = block->eval_type;
               mut_type.is_mut = true;
-							mut_type.is_threadlocal = false;
-							mut_type.is_static = false;
-							mut_type.is_extern = false;
+              mut_type.is_threadlocal = false;
+              mut_type.is_static = false;
+              mut_type.is_extern = false;
               gen_type(mut_type, sb);
               sb_append(sb, var_name);
               sb_append(sb, ";\n");
@@ -877,7 +878,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           if (!is_void) {
             char var_name[64];
             sprintf(var_name, "_tx_blk_%zu",
-                    (size_t)(uintptr_t)n->as.ret_stmt.expr);
+                    yield_blk_ctr);
             sb_append(sb, "return ");
             sb_append(sb, var_name);
             sb_append(sb, ";\n");
@@ -973,8 +974,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             sb_append(sb, " ");
             sb_append_len(sb, tag.start, tag.len);
             sb_append(sb, ";\n");
-						top--;
-						continue;
+            top--;
+            continue;
           }
 
           if (is_enum) {
@@ -1228,8 +1229,10 @@ void flatten_sues(AstNode *root, Arena *arena) {
         }
         break;
       case AST_VAR_DECL:
-        if (n->as.var_decl.id.len == 4 && (n->as.var_decl.id.start == NULL ||
-            strncmp(n->as.var_decl.id.start, "self", 4) == 0) && sue.len > 0)
+        if (n->as.var_decl.id.len == 4 &&
+            (n->as.var_decl.id.start == NULL ||
+             strncmp(n->as.var_decl.id.start, "self", 4) == 0) &&
+            sue.len > 0)
           n->as.var_decl.id = sue;
         if (sue.len > 0) {
           DataType *ft = &n->as.var_decl.type;
@@ -1624,6 +1627,7 @@ void lower_defers(AstNode *root, Arena *arena) {
 
   stack[top++] = (LowerFrame){root, 0, 0, 0, 0};
 
+	uint64_t rid_c = 0;
   while (top > 0) {
     LowerFrame *f = &stack[top - 1];
     AstNode *n = f->node;
@@ -1740,7 +1744,7 @@ void lower_defers(AstNode *root, Arena *arena) {
           ret_val_decl->as.var_decl.type.is_extern = false;
 
           char *tmp_name = arena_alloc(arena, 64);
-          sprintf(tmp_name, "_tx_ret_%zu", (size_t)(uintptr_t)n);
+          sprintf(tmp_name, "_tx_ret_%zu", ++rid_c);
           ret_val_decl->as.var_decl.id = (Token){
               tmp_name, (unsigned int)strlen(tmp_name), TOKEN_IDENTIF, 0, 0};
           ret_val_decl->as.var_decl.init = n->as.ret_stmt.expr;
@@ -1987,6 +1991,43 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
   }
 
   const char *tmp_c_file = "output_gen.c";
+  bool requires_compilation = true;
+
+  // Verify the compiled binary hasn't been deleted
+  FILE *bin_test = fopen(out_binary_name, "rb");
+  if (bin_test) {
+    fclose(bin_test);
+
+    // Read the existing generated C file
+    FILE *old_c = fopen(tmp_c_file, "rb");
+    if (old_c) {
+      fseek(old_c, 0, SEEK_END);
+      long old_size = ftell(old_c);
+      fseek(old_c, 0, SEEK_SET);
+
+      // Compare sizes, then contents
+      if (old_size == (long)code.len) {
+        char *old_buf = malloc(old_size);
+        if (fread(old_buf, 1, old_size, old_c) == (size_t)old_size) {
+          if (memcmp(old_buf, code.buf, old_size) == 0) {
+            requires_compilation = false;
+          }
+        }
+        free(old_buf);
+      }
+      fclose(old_c);
+    }
+  }
+
+  // Early exit if the C output is identical and binary exists
+  if (!requires_compilation) {
+    printf("Generated C code unchanged. Skipping GCC compilation.\n");
+    sb_free(&code);
+    map_free_buckets(global_func_map);
+    return true;
+  }
+
+  // Proceed to overwrite and invoke GCC
   FILE *f = fopen(tmp_c_file, "w");
   if (!f) {
     fprintf(stderr, "Failed to create C output file.\n");
