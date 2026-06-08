@@ -1990,6 +1990,18 @@ void compile_doc(Doc *doc) {
         Doc *dep = get_or_load_doc(uri_buf, curr_abs);
         if (dep)
           ast = dep->ast_root;
+      } else if (mod && strcmp(curr_abs, abspath) == 0) {
+        mod->ast_root = root;
+        mod->mod_arena = doc->ast_arena;
+
+        uint64_t new_hash = hash_module_interface(mod);
+
+        mod->interface_changed = true;
+        mod->interface_hash = new_hash;
+
+        map_init(&mod->local_symbols, mod->mod_arena, 128);
+        map_init(&mod->imported_mods, mod->mod_arena, 32);
+        mod->is_dirty = true;
       }
 
       if (!mod && ast) {

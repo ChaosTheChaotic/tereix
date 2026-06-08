@@ -77,6 +77,7 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
 void print_usage(const char *progname) {
   printf("Usage: %s [options] <input.tx>\n", progname);
   printf("Options:\n");
+	printf("  --lsp			   Run as an lsp\n");
   printf("  -p, --print-ast          Print the AST after parsing\n");
   printf(
       "  -c, --compiler <cc>      Specify C compiler (default: $CC or 'cc')\n");
