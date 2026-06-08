@@ -1952,8 +1952,8 @@ void compile_doc(Doc *doc) {
   doc->ast_arena = malloc(sizeof(Arena));
   *doc->ast_arena = (Arena){0};
 
-  DiagList diags;
-  diaglist_init(&diags, 1024);
+  diaglist_free(&doc->diags);
+  diaglist_init(&doc->diags, 1024);
   char *abspath = absolute_from_uri(doc->uri);
   if (!abspath) {
     DiagList empty = {0};
@@ -1961,11 +1961,11 @@ void compile_doc(Doc *doc) {
     return;
   }
 
-  AstNode *root = str_to_ast(doc->ast_arena, doc->txt, abspath, &diags, true);
+  AstNode *root = str_to_ast(doc->ast_arena, doc->txt, abspath, &doc->diags, true);
 
   if (root) {
     SemCtx *sem = &server_state.proj_sem;
-    sem->diags = &diags;
+    sem->diags = &doc->diags;
 
     Worklist pending = {0};
     wl_push(&pending, abspath);
@@ -2266,8 +2266,8 @@ void compile_doc(Doc *doc) {
   HashMap diag_groups;
   map_init(&diag_groups, doc->ast_arena, 32);
 
-  for (size_t i = 0; i < diags.count; i++) {
-    Diag *d = &diags.items[i];
+  for (size_t i = 0; i < doc->diags.count; i++) {
+    Diag *d = &doc->diags.items[i];
     if (!d->file)
       continue;
     DiagList *group = map_get(&diag_groups, d->file, strlen(d->file));
@@ -2293,8 +2293,10 @@ void compile_doc(Doc *doc) {
     }
   }
 
-  publish_diagnostics_from_list(doc->uri, &diags);
-  diaglist_free(&diags);
+  if (!map_get(&diag_groups, abspath, strlen(abspath))) {
+    DiagList empty = {0};
+    publish_diagnostics_from_list(doc->uri, &empty);
+  }
   free(abspath);
 }
 
