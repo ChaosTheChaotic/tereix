@@ -2322,10 +2322,11 @@ void handle_did_open(yyjson_val *params) {
     return;
   }
 
-  Doc *doc = malloc(sizeof(Doc));
+  Doc *doc = calloc(1, sizeof(Doc));
   doc->uri = strdup(uri);
   doc->txt = strdup(text);
   doc->version = version;
+  diaglist_init(&doc->diags, 1024);
   doc->ast_arena = NULL;
   doc->ast_root = NULL;
 
