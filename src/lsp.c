@@ -1984,30 +1984,16 @@ void compile_doc(Doc *doc) {
       AstNode *ast = (strcmp(curr_abs, abspath) == 0) ? root : NULL;
 
       if (!ast && !mod) {
-        // Only load off disk if it's not already cached globally
         char uri_buf[8192];
         snprintf(uri_buf, sizeof(uri_buf), "file://%s", curr_abs);
         Doc *dep = get_or_load_doc(uri_buf, curr_abs);
         if (dep)
           ast = dep->ast_root;
-      } else if (mod && strcmp(curr_abs, abspath) == 0) {
-        mod->ast_root = root;
-        mod->mod_arena = doc->ast_arena;
-
-        uint64_t new_hash = hash_module_interface(mod);
-
-        mod->interface_changed = true;
-        mod->interface_hash = new_hash;
-
-        map_init(&mod->local_symbols, mod->mod_arena, 128);
-        map_init(&mod->imported_mods, mod->mod_arena, 32);
-        mod->is_dirty = true;
       }
 
       if (!mod && ast) {
         char *perm_abs = arena_alloc(sem->arena, strlen(curr_abs) + 1);
         strcpy(perm_abs, curr_abs);
-        // Brand new module
         const char *mod_name = extract_mod_name(sem->arena, perm_abs);
         mod = new_mod(sem->arena, perm_abs, mod_name, ast);
 
@@ -2114,150 +2100,6 @@ void compile_doc(Doc *doc) {
 
     doc->ast_root = root; // Cache the primary AST for Hover/Go-To definitions
 
-    // Propagate errors from dependencies to the main document
-    if (sem_main_mod && doc->ast_arena) {
-      HashMap transitive_origins;
-      map_init(&transitive_origins, doc->ast_arena, 64);
-
-      size_t max_mods = sem->mod_cache.capacity;
-      Module **queue = arena_alloc(doc->ast_arena, sizeof(Module *) * max_mods);
-      size_t head = 0;
-      size_t tail = 0;
-
-      AstNode *stmt = sem_main_mod->ast_root->as.block.first_stmt;
-      while (stmt) {
-        if (stmt->type == AST_USE) {
-          Token path_tok = stmt->as.use_stmt.path;
-          if (path_tok.len >= 2 && path_tok.start[0] == '"' &&
-              path_tok.start[path_tok.len - 1] == '"') {
-            char rel_path[PATH_MAX];
-            strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
-            rel_path[path_tok.len - 2] = '\0';
-
-            char *current_abs = absolute_from_uri(doc->uri);
-            if (current_abs) {
-              char *last_slash = strrchr(current_abs, '/');
-              if (last_slash)
-                *last_slash = '\0';
-
-              char full_path[PATH_MAX];
-              if (rel_path[0] == '/')
-                snprintf(full_path, sizeof(full_path), "%s", rel_path);
-              else
-                snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
-                         rel_path);
-
-              char *resolved = realpath(full_path, NULL);
-              if (resolved) {
-                Module *imported =
-                    map_get(&sem->mod_cache, resolved, strlen(resolved));
-                if (imported && imported != sem_main_mod) {
-                  // If not yet visited, record origin and enqueue
-                  if (!map_get(&transitive_origins, imported->abs_path,
-                               strlen(imported->abs_path))) {
-                    map_set(&transitive_origins, imported->abs_path,
-                            strlen(imported->abs_path), stmt);
-                    queue[tail++] = imported;
-                  }
-                }
-                free(resolved);
-              }
-              free(current_abs);
-            }
-          }
-        }
-        stmt = stmt->next;
-      }
-
-      while (head < tail) {
-        Module *curr_mod = queue[head++];
-        AstNode *origin_use_stmt =
-            map_get(&transitive_origins, curr_mod->abs_path,
-                    strlen(curr_mod->abs_path));
-
-        AstNode *c_stmt = curr_mod->ast_root->as.block.first_stmt;
-        while (c_stmt) {
-          if (c_stmt->type == AST_USE) {
-            Token path_tok = c_stmt->as.use_stmt.path;
-            if (path_tok.len >= 2 && path_tok.start[0] == '"' &&
-                path_tok.start[path_tok.len - 1] == '"') {
-              char rel_path[PATH_MAX];
-              strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
-              rel_path[path_tok.len - 2] = '\0';
-
-              char *last_slash = strrchr(curr_mod->abs_path, '/');
-              if (last_slash) {
-                size_t dir_len = last_slash - curr_mod->abs_path;
-                char dir_path[PATH_MAX];
-                strncpy(dir_path, curr_mod->abs_path, dir_len);
-                dir_path[dir_len] = '\0';
-
-                char full_path[PATH_MAX];
-                if (rel_path[0] == '/')
-                  snprintf(full_path, sizeof(full_path), "%s", rel_path);
-                else
-                  snprintf(full_path, sizeof(full_path), "%s/%s", dir_path,
-                           rel_path);
-
-                char *resolved = realpath(full_path, NULL);
-                if (resolved) {
-                  Module *trans_imported =
-                      map_get(&sem->mod_cache, resolved, strlen(resolved));
-                  if (trans_imported && trans_imported != sem_main_mod) {
-                    // Check if visited to prevent circular dependency loops
-                    if (!map_get(&transitive_origins, trans_imported->abs_path,
-                                 strlen(trans_imported->abs_path))) {
-                      // Inherit the origin_use_stmt of the parent that imported
-                      // it
-                      map_set(&transitive_origins, trans_imported->abs_path,
-                              strlen(trans_imported->abs_path),
-                              origin_use_stmt);
-                      queue[tail++] = trans_imported;
-                    }
-                  }
-                  free(resolved);
-                }
-              }
-            }
-          }
-          c_stmt = c_stmt->next;
-        }
-      }
-
-      // Publish diagnostics mapping back to the top-level use statement
-      for (size_t i = 0; i < transitive_origins.capacity; i++) {
-        HashEntry *entry = transitive_origins.buckets[i];
-        while (entry) {
-          Module *m = map_get(&sem->mod_cache, entry->key, entry->key_len);
-          AstNode *use_stmt = (AstNode *)entry->value;
-
-          char uri[PATH_MAX + 8];
-          snprintf(uri, sizeof(uri), "file://%s", (const char *)entry->key);
-          Doc *mod_doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
-
-          if (mod_doc && mod_doc->diags.count > 0 && m) {
-            Token loc =
-                use_stmt->as.use_stmt
-                    .path; // Location of the string literal in the main file
-
-            for (size_t d = 0; d < mod_doc->diags.count; d++) {
-              Diag *orig = &mod_doc->diags.items[d];
-              char enhanced[1024];
-              // Includes the actual module name where the error originated to
-              // avoid confusion
-              snprintf(enhanced, sizeof(enhanced), "Error in module '%s': %s",
-                       m->mod_name, orig->message);
-
-              diaglist_add(&doc->diags, orig->severity, enhanced, doc->uri + 7,
-                           loc.line, loc.col, loc.line, loc.col + loc.len);
-            }
-          }
-          entry = entry->next;
-        }
-      }
-      map_free_buckets(&transitive_origins);
-    }
-
     if (pending.paths) {
       free((void *)pending.paths);
     }
@@ -2280,7 +2122,9 @@ void compile_doc(Doc *doc) {
                  d->start_char + 1, d->end_line + 1, d->end_char + 1);
   }
 
-  // Publish each group
+  const char *current_uri = doc->uri;
+  bool has_current = false;
+
   for (size_t i = 0; i < diag_groups.capacity; i++) {
     HashEntry *entry = diag_groups.buckets[i];
     while (entry) {
@@ -2288,12 +2132,15 @@ void compile_doc(Doc *doc) {
       DiagList *group = (DiagList *)entry->value;
       char uri[PATH_MAX + 8];
       snprintf(uri, sizeof(uri), "file://%s", file_path);
-      publish_diagnostics_from_list(uri, group);
+      if (strcmp(uri, current_uri) == 0) {
+        publish_diagnostics_from_list(uri, group);
+        has_current = true;
+      }
       entry = entry->next;
     }
   }
 
-  if (!map_get(&diag_groups, abspath, strlen(abspath))) {
+  if (!has_current) {
     DiagList empty = {0};
     publish_diagnostics_from_list(doc->uri, &empty);
   }

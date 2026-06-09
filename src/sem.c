@@ -83,43 +83,57 @@ void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
 
   if (len < 0)
     return;
-
   if (!msg)
     return;
 
-  const char *report_file = NULL;
+  // Always use the true origin of the error
+  const char *report_file = sem_current_mod ? sem_current_mod->abs_path : NULL;
   int report_line = token.line;
   int report_col = token.col;
   int report_len = (int)token.len;
 
-  // Determine the file/line context based on inclusion depth
-  if (sem_current_mod != NULL) {
-    if (sem_current_mod == sem_main_mod) {
-      report_file = sem_current_mod->abs_path;
-    } else {
-      // Its a dependency module so report error at its corresponding 'use'
-      // statement context
-      ImportRelation *rel = get_import_relation(sem_current_mod);
-      if (rel && rel->parent_mod && rel->use_stmt) {
-        report_file = rel->parent_mod->abs_path;
-        report_line = rel->use_stmt->as.use_stmt.path.line;
-        report_col = rel->use_stmt->as.use_stmt.path.col;
-        report_len = (int)rel->use_stmt->as.use_stmt.path.len;
-      } else {
-        report_file = sem_current_mod->abs_path;
-      }
-    }
-  }
-
   if (ctx && ctx->diags) {
+    // Report the exact error location in the module it actually occurred in
     diaglist_add(ctx->diags, sev, msg, report_file, report_line, report_col,
                  report_line, report_col + report_len);
+
+    // Transitevely bubble the error up to the main modules use statement
+    if (sem_current_mod != NULL && sem_current_mod != sem_main_mod) {
+      Module *curr = sem_current_mod;
+      while (curr && curr != sem_main_mod) {
+        ImportRelation *rel = get_import_relation(curr);
+
+        if (rel && rel->parent_mod && rel->use_stmt) {
+          // Once reached the main module, attach the enhanced diagnostic
+          if (rel->parent_mod == sem_main_mod) {
+            char *enhanced_msg =
+                malloc(strlen(msg) + strlen(sem_current_mod->mod_name) + 32);
+            sprintf(enhanced_msg, "Error in module '%s': %s",
+                    sem_current_mod->mod_name, msg);
+
+            Token use_tok = rel->use_stmt->as.use_stmt.path;
+            diaglist_add(ctx->diags, sev, enhanced_msg,
+                         rel->parent_mod->abs_path, use_tok.line, use_tok.col,
+                         use_tok.line, use_tok.col + use_tok.len);
+
+            free(enhanced_msg);
+            break;
+          }
+          curr = rel->parent_mod;
+        } else {
+          break;
+        }
+      }
+    }
     free(msg);
   } else {
+    // CLI Fallback
     if (report_file) {
-      fprintf(stderr, "%s:%d:%d: ", report_file, report_line, report_col);
+      fprintf(stderr, "%s:%d:%d: %s\n", report_file, report_line, report_col,
+              msg);
+    } else {
+      fprintf(stderr, "%s\n", msg);
     }
-    fprintf(stderr, "%s\n", msg);
     free(msg);
   }
 }
@@ -809,6 +823,9 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
             (TCItem){node, TC_EVAL_NODE, expected, item.curr_func, false};
         continue;
       }
+
+      if (item.is_top_level && node->is_dirty)
+        node->is_dirty = false;
 
       if (top >= cap - 32) {
         cap *= 2;
