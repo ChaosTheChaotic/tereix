@@ -2014,12 +2014,13 @@ void compile_doc(Doc *doc) {
 
         // Compute new interface hash
         uint64_t new_hash = hash_module_interface(mod);
-        if (new_hash != mod->interface_hash) {
+        if (new_hash != mod->interface_hash || mod->ast_root != root) {
           mod->interface_changed = true;
           mod->interface_hash = new_hash;
         } else {
           mod->interface_changed = false;
         }
+        mod->is_dirty = true;
 
         // Wipe old scopes safely using the modules arena
         map_init(&mod->local_symbols, mod->mod_arena, 128);

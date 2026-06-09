@@ -35,7 +35,7 @@ void propagate_dirty_state(SemCtx *ctx) {
           HashEntry *imp_entry = mod->imported_mods.buckets[j];
           while (imp_entry) {
             Module *imported = (Module *)imp_entry->value;
-            if (imported->interface_changed) {
+            if (imported->is_dirty || imported->interface_changed) {
               mod->is_dirty = true;
               changed = true;
               break;
