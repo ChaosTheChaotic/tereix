@@ -705,10 +705,10 @@ void compile_project(const CompileOptions *opts) {
     }
 
     if (cached_content_hash == curr_hash) {
-      printf("Cache hit for %s\n", abs_path);
       // Pass an offset to skip the header hash (8 bytes)
-      ast = cache_read_ast(&arena, cache_file, content);
+      ast = cache_read_ast(&arena, cache_file, content, sizeof(uint64_t));
       if (ast) {
+        printf("Cache hit for %s\n", abs_path);
         cache_loaded = true;
         // Load clean metadata since the file didn't change
         meta = cache_read_decl_meta(&arena, meta_file, content);
@@ -773,7 +773,8 @@ void compile_project(const CompileOptions *opts) {
       }
 
       // Swap fully typed cached nodes into the fresh AST
-      AstNode *old_ast = cache_read_ast(&arena, cache_file, content);
+      AstNode *old_ast =
+          cache_read_ast(&arena, cache_file, content, sizeof(uint64_t));
       AstNode **ptr = &ast->as.block.first_stmt;
 
       while (*ptr) {
@@ -826,15 +827,6 @@ void compile_project(const CompileOptions *opts) {
           }
         }
         ptr = &(*ptr)->next;
-      }
-
-      // Write only hash marker for now
-      // Final, fully typed AST is saved
-      // automatically at the bottom
-      FILE *out = fopen(cache_file, "wb");
-      if (out) {
-        fwrite(&curr_hash, sizeof(uint64_t), 1, out);
-        fclose(out);
       }
 
       cache_write_decl_meta(meta_file, meta, content);
@@ -969,7 +961,8 @@ void compile_project(const CompileOptions *opts) {
         if (out) {
           fwrite(&mod->content_hash, sizeof(uint64_t), 1, out);
           fclose(out);
-          cache_write_ast(cache_file, mod->ast_root, mod->content);
+          cache_write_ast(cache_file, mod->ast_root, mod->content,
+                          mod->content_hash);
         }
       }
       entry = entry->next;

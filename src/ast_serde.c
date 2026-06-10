@@ -88,7 +88,7 @@ void buf_append(ByteBuffer *buf, const void *data, size_t len) {
 }
 
 void cache_write_ast(const char *cache_path, AstNode *root,
-                     const char *source_base) {
+                     const char *source_base, uint64_t content_hash) {
   if (!root)
     return;
 
@@ -504,6 +504,8 @@ void cache_write_ast(const char *cache_path, AstNode *root,
     return;
   }
 
+  fwrite(&content_hash, sizeof(uint64_t), 1, fp);
+
 #ifdef ENABLE_AST_COMPRESSION
   size_t cBuffSize = ZSTD_compressBound(out_buf.size);
   void *cBuff = malloc(cBuffSize);
@@ -532,13 +534,24 @@ void cache_write_ast(const char *cache_path, AstNode *root,
 }
 
 AstNode *cache_read_ast(Arena *arena, const char *cache_path,
-                        const char *source_base) {
+                        const char *source_base, size_t skip_bytes) {
   FILE *fp = fopen(cache_path, "rb");
   if (!fp)
     return NULL;
 
+  if (skip_bytes > 0 && fseek(fp, skip_bytes, SEEK_SET) != 0) {
+    fclose(fp);
+    return NULL;
+  }
+
   uint32_t magic;
   if (fread(&magic, sizeof(uint32_t), 1, fp) != 1) {
+    fclose(fp);
+    return NULL;
+  }
+
+  if (magic != 0x5A4D4341 && magic != 0x554E4341) {
+    fprintf(stderr, "Error reading ast: invalid magic 0x%08X\n", magic);
     fclose(fp);
     return NULL;
   }
@@ -554,13 +567,15 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       return NULL;
     }
 
-    // Read the remaining compressed data
+    // Current position = start of compressed data
+    long data_start = ftell(fp);
     fseek(fp, 0, SEEK_END);
-    long comp_size = ftell(fp) - sizeof(uint32_t) - sizeof(uint64_t);
-    fseek(fp, sizeof(uint32_t) + sizeof(uint64_t), SEEK_SET);
+    long file_size = ftell(fp);
+    long comp_size = file_size - data_start;
+    fseek(fp, data_start, SEEK_SET);
 
     void *comp_buf = malloc(comp_size);
-    if (fread(comp_buf, 1, comp_size, fp) != 1) {
+    if (fread(comp_buf, 1, comp_size, fp) != (unsigned long)comp_size) {
       free(comp_buf);
       fclose(fp);
       return NULL;
@@ -583,12 +598,14 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
     return NULL;
 #endif
   } else if (magic == 0x554E4341) { // Uncompressed
+    long data_start = ftell(fp);    // after magic
     fseek(fp, 0, SEEK_END);
-    long uncomp_size = ftell(fp) - sizeof(uint32_t);
-    fseek(fp, sizeof(uint32_t), SEEK_SET);
+    long file_size = ftell(fp);
+    long data_size = file_size - data_start;
+    fseek(fp, data_start, SEEK_SET);
 
-    read_buffer = malloc(uncomp_size);
-    if (fread(read_buffer, 1, uncomp_size, fp) != 1) {
+    read_buffer = malloc(data_size);
+    if (fread(read_buffer, 1, data_size, fp) != (size_t)data_size) {
       free(read_buffer);
       fclose(fp);
       return NULL;
@@ -609,6 +626,12 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
   uint32_t node_count = 0;
   READ_MEM(&node_count, sizeof(uint32_t));
   if (node_count == 0) {
+    free(read_buffer);
+    return NULL;
+  }
+
+  if (node_count == 0) {
+    fprintf(stderr, "Error reading ast: node_count is 0\n");
     free(read_buffer);
     return NULL;
   }
@@ -661,27 +684,30 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
     }
   }
 
-  // Free the buffer now that we've deserialized everything into the arena
-  free(read_buffer);
 
 #define PATCH_STR(tok)                                                         \
   do {                                                                         \
-    if ((size_t)(tok).start >= 0xFFFFFF00 &&                                   \
-        (size_t)(tok).start < 0xFFFFFF11) {                                    \
-      (tok).start = typelist[(size_t)(tok).start - 0xFFFFFF00];       \
-    } else if ((size_t)(tok).start == (size_t)-1) {                            \
+    size_t _val = (size_t)(tok).start;                                         \
+    if (_val >= 0xFFFFFF00 && _val < 0xFFFFFF00 + typelistlen) {               \
+      (tok).start = typelist[_val - 0xFFFFFF00];                               \
+    } else if (_val == (size_t)-1) {                                           \
       (tok).start = NULL;                                                      \
     } else {                                                                   \
-      (tok).start = source_base + (size_t)(tok).start;                         \
+      (tok).start = source_base + _val;                                        \
     }                                                                          \
   } while (0)
 
 #define PATCH_PTR(ptr)                                                         \
   do {                                                                         \
-    if ((uintptr_t)(ptr) == 0xFFFFFFFF)                                        \
+    uintptr_t _idx = (uintptr_t)(ptr);                                         \
+    if (_idx == 0xFFFFFFFF)                                                    \
       (ptr) = NULL;                                                            \
-    else                                                                       \
-      (ptr) = &nodes[(uintptr_t)(ptr)];                                        \
+    else if (_idx >= node_count) {                                             \
+      fprintf(stderr, "Error: PATCH_PTR index %zu out of range\n", _idx);      \
+      free(read_buffer);                                                       \
+      return NULL;                                                             \
+    } else                                                                     \
+      (ptr) = &nodes[_idx];                                                    \
   } while (0)
 
 #define PATCH_RAW_PTR(ptr)                                                     \
@@ -851,6 +877,8 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       break;
     }
   }
+  // Free the buffer now that weve deserialized everything into the arena
+  free(read_buffer);
   return &nodes[0];
 }
 
