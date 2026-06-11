@@ -104,6 +104,49 @@ if(DO_INSTALL)
 endif()
 
 add_executable(tereix_bin ${SOURCES})
+
+target_include_directories(settings INTERFACE 
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/private>
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}> # <-- ADD THIS
+)
+
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/compute_hash.cmake" "
+# Glob all sources and sort them to guarantee a deterministic hash order
+file(GLOB_RECURSE SRC_FILES LIST_DIRECTORIES false \"\${SRC_DIR}/src/*.c\" \"\${SRC_DIR}/src/*.h\")
+list(SORT SRC_FILES)
+
+set(HASH_STR \"\")
+foreach(F IN LISTS SRC_FILES)
+    file(SHA256 \"\${F}\" OUT)
+    string(APPEND HASH_STR \"\${OUT}\")
+endforeach()
+
+# Create one final hash representing the compiler's code state
+string(SHA256 FINAL_HASH \"\${HASH_STR}\")
+set(HEADER_CONTENT \"#pragma once\\n#define TEREIX_BUILD_HASH \\\"\${FINAL_HASH}\\\"\\n\")
+
+# Only overwrite the header if the hash actually changed (prevents false positive rebuilds)
+if(EXISTS \"\${BIN_DIR}/tereix_version.h\")
+    file(READ \"\${BIN_DIR}/tereix_version.h\" OLD_CONTENT)
+    if(NOT OLD_CONTENT STREQUAL HEADER_CONTENT)
+        file(WRITE \"\${BIN_DIR}/tereix_version.h\" \"\${HEADER_CONTENT}\")
+    endif()
+else()
+    file(WRITE \"\${BIN_DIR}/tereix_version.h\" \"\${HEADER_CONTENT}\")
+endif()
+")
+
+add_custom_target(generate_version_header ALL
+    COMMAND ${CMAKE_COMMAND} 
+        -D SRC_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\" 
+        -D BIN_DIR=\"${CMAKE_CURRENT_BINARY_DIR}\" 
+        -P \"${CMAKE_CURRENT_BINARY_DIR}/compute_hash.cmake\"
+    BYPRODUCTS \"${CMAKE_CURRENT_BINARY_DIR}/tereix_version.h\"
+    COMMENT \"Evaluating compiler source state for caching...\"
+)
+
+add_dependencies(tereix_bin generate_version_header)
+
 set_target_properties(tereix_bin PROPERTIES OUTPUT_NAME "tereix")
 target_link_libraries(tereix_bin 
 	PUBLIC deps_public 

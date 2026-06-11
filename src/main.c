@@ -3,6 +3,7 @@
 #include "cli.h"
 #include "hashutils.h"
 #include "lsp.h"
+#include "tereix_version.h"
 #include "util.h"
 #include "worklist.h"
 #include <sys/stat.h>
@@ -668,6 +669,11 @@ void compile_project(const CompileOptions *opts) {
   SemCtx sem = {0};
   sem_init(&sem, &arena);
 
+  char env_sig[2048] = {0};
+  int sig_len = snprintf(env_sig, sizeof(env_sig), "%s", TEREIX_BUILD_HASH);
+  // Hash the environment signature
+  uint64_t env_hash = hash_string(env_sig, sig_len);
+
   // Initialize module mapping tracking configurations
   sem_current_mod = NULL;
   sem_main_mod = NULL;
@@ -682,7 +688,8 @@ void compile_project(const CompileOptions *opts) {
       continue;
 
     const char *content = load_file(abs_path);
-    uint64_t curr_hash = hash_string(content, strlen(content));
+    uint64_t file_hash = hash_string(content, strlen(content));
+		uint64_t curr_hash = combine_hash(file_hash, env_hash);
     uint64_t path_hash = hash_string(abs_path, strlen(abs_path));
 
     char cache_file[512];
