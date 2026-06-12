@@ -1,6 +1,6 @@
 #include "arena.h"
 #include "c_gen_types.h"
-#include "hashmap.h"
+#include "hashutils.h"
 #include "sem_types.h"
 #include "string_builder.h"
 #include "util.h"
@@ -2057,6 +2057,31 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
     }
   }
 
+  uint64_t code_hash = hash_string(code.buf, code.len);
+  char hash_file[512];
+  snprintf(hash_file, sizeof(hash_file), ".tx_cache/%s.hash", out_binary_name);
+
+  bool up_to_date = false;
+  if (check_exists(out_binary_name)) {
+    FILE *hf = fopen(hash_file, "rb");
+    if (hf) {
+      uint64_t stored_hash;
+      if (fread(&stored_hash, sizeof(uint64_t), 1, hf) == 1 &&
+          stored_hash == code_hash) {
+        up_to_date = true;
+      }
+      fclose(hf);
+    }
+  }
+
+  if (up_to_date) {
+    printf("Generated C code unchanged and binary exists. Skipping "
+           "compilation.\n");
+    sb_free(&code);
+    map_free_buckets(global_func_map);
+    return true;
+  }
+
   bool compile_success = false;
 
   if (!keep_c_files) {
@@ -2064,87 +2089,76 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
                                           out_binary_name, &code);
   } else {
     char c_file_path[512] = ".tx_cache/output_gen.c";
-    bool requires_compilation = true;
+    FILE *f = fopen(c_file_path, "w");
+    if (!f) {
+      fprintf(stderr, "Failed to create C output file at %s.\n", c_file_path);
+      sb_free(&code);
+      map_free_buckets(global_func_map);
+      return false;
+    }
+    fwrite(code.buf, 1, code.len, f);
+    fclose(f);
 
-    if (check_exists(out_binary_name) && file_is_identical(c_file_path, &code)) {
-      requires_compilation = false;
+    StringBuilder cmd;
+    sb_init(&cmd);
+    sb_append(&cmd, compiler);
+    sb_append(&cmd, " -o ");
+    sb_append(&cmd, out_binary_name);
+    sb_append(&cmd, " ");
+    sb_append(&cmd, c_file_path);
+
+    for (int i = 0; i < flag_count; i++) {
+      sb_append(&cmd, " ");
+      sb_append(&cmd, flags[i]);
     }
 
-    if (!requires_compilation) {
-      printf("Generated C code unchanged and binary exists. Skipping GCC "
-             "compilation.\n");
-      compile_success = true;
-    } else {
-      // Overwrite the outdated cache file
-      FILE *f = fopen(c_file_path, "w");
-      if (!f) {
-        fprintf(stderr, "Failed to create C output file at %s.\n", c_file_path);
-        sb_free(&code);
-        map_free_buckets(global_func_map);
-        return false;
-      }
-      fwrite(code.buf, 1, code.len, f);
-      fclose(f);
+    printf("Executing: %s\n", cmd.buf);
 
-      // Execute standard fork/exec using the file on disk
-      StringBuilder cmd;
-      sb_init(&cmd);
-
-      sb_append(&cmd, compiler);
-      sb_append(&cmd, " -o ");
-      sb_append(&cmd, out_binary_name);
-      sb_append(&cmd, " ");
-      sb_append(&cmd, c_file_path);
-                                   
-
-      for (int i = 0; i < flag_count; i++) {
-        sb_append(&cmd, " ");
-        sb_append(&cmd, flags[i]);
-      }
-
-      printf("Executing: %s\n", cmd.buf);
-
-      char **argv = NULL;
-      size_t argc = 0;
-      char *cmd_copy = strdup(cmd.buf);
-
-      if (!cmd_copy) {
-        fprintf(stderr, "Failed to duplicate command string\n");
-        sb_free(&cmd);
-        sb_free(&code);
-        map_free_buckets(global_func_map);
-        return false;
-      }
-
-      char *token = strtok(cmd_copy, " ");
-      while (token) {
-        argv = realloc(argv, (argc + 2) * sizeof(char *));
-        argv[argc++] = token;
-        token = strtok(NULL, " ");
-      }
-      argv[argc] = NULL;
-
-      pid_t pid = fork();
-      int res = -1;
-
-      if (pid == -1) {
-        perror("fork");
-      } else if (pid == 0) {
-        execvp(argv[0], argv);
-        perror("execvp"); // Only triggers if exec fails
-        _exit(127);
-      } else {
-        int status;
-        if (waitpid(pid, &status, 0) != -1 && WIFEXITED(status)) {
-          res = WEXITSTATUS(status);
-        }
-      }
-
-      free(cmd_copy);
-      free(argv);
+    char **argv = NULL;
+    size_t argc = 0;
+    char *cmd_copy = strdup(cmd.buf);
+    if (!cmd_copy) {
+      fprintf(stderr, "Failed to duplicate command string\n");
       sb_free(&cmd);
+      sb_free(&code);
+      map_free_buckets(global_func_map);
+      return false;
+    }
 
-      compile_success = (res == 0);
+    char *token = strtok(cmd_copy, " ");
+    while (token) {
+      argv = realloc(argv, (argc + 2) * sizeof(char *));
+      argv[argc++] = token;
+      token = strtok(NULL, " ");
+    }
+    argv[argc] = NULL;
+
+    pid_t pid = fork();
+    int res = -1;
+    if (pid == -1) {
+      perror("fork");
+    } else if (pid == 0) {
+      execvp(argv[0], argv);
+      perror("execvp");
+      _exit(127);
+    } else {
+      int status;
+      if (waitpid(pid, &status, 0) != -1 && WIFEXITED(status)) {
+        res = WEXITSTATUS(status);
+      }
+    }
+
+    free(cmd_copy);
+    free(argv);
+    sb_free(&cmd);
+    compile_success = (res == 0);
+  }
+
+  if (compile_success) {
+    FILE *hf = fopen(hash_file, "wb");
+    if (hf) {
+      fwrite(&code_hash, sizeof(uint64_t), 1, hf);
+      fclose(hf);
     }
   }
 
