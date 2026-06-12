@@ -1,5 +1,6 @@
 #include "ast_serde.h"
 #include "hashutils.h"
+#include "hashmap.h"
 #include <string.h>
 #ifdef ENABLE_AST_COMPRESSION
 #include <zstd.h>
@@ -1200,7 +1201,7 @@ uint32_t compute_node_hash(AstNode *root) {
 }
 
 void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
-                               DeclMetadata *meta) {
+                               DeclMetadata *meta, HashMap *alias_map) {
   if (!decl_root)
     return;
 
@@ -1215,7 +1216,7 @@ void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
     if (!node)
       continue;
 
-    // Extract Function/Method Calls
+    // Extract function/method calls
     if (node->type == AST_FUNC_CALL && node->as.func_call.caller) {
       Token dep_tok = {0};
 
@@ -1225,10 +1226,18 @@ void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
         AstNode *base = node->as.func_call.caller->as.member.base;
         Token mem_name = node->as.func_call.caller->as.member.name;
 
-        // If the base is an identifier, format it as Base_Member (e.g.,
-        // Math_init)
+				// Format identifs
         if (base->type == AST_IDENTIF) {
           Token base_name = base->as.identif.val;
+
+          // Attempt to resolve against local aliases
+          if (alias_map) {
+            Token *real_mod =
+                map_get(alias_map, base_name.start, base_name.len);
+            if (real_mod)
+              base_name = *real_mod;
+          }
+
           size_t combined_len = base_name.len + 1 + mem_name.len;
           char *combined = arena_alloc(arena, combined_len + 1);
           sprintf(combined, "%.*s_%.*s", (int)base_name.len, base_name.start,
@@ -1266,8 +1275,36 @@ void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
         dt = &node->as.sizeof_expr.target_type;
 
       if (dt && dt->is_custom && dt->name.start) {
+        Token dt_name = dt->name;
+        int dot_idx = -1;
+        for (unsigned int i = 0; i < dt_name.len; i++) {
+          if (dt_name.start[i] == '.') {
+            dot_idx = i;
+            break;
+          }
+        }
+
+        if (dot_idx != -1) {
+          Token prefix = {dt_name.start, dot_idx, TOKEN_IDENTIF, 0, 0};
+          Token suffix = {dt_name.start + dot_idx + 1,
+                          dt_name.len - dot_idx - 1, TOKEN_IDENTIF, 0, 0};
+
+          if (alias_map) {
+            Token *real_mod = map_get(alias_map, prefix.start, prefix.len);
+            if (real_mod)
+              prefix = *real_mod;
+          }
+
+          size_t combined_len = prefix.len + 1 + suffix.len;
+          char *combined = arena_alloc(arena, combined_len + 1);
+          sprintf(combined, "%.*s_%.*s", (int)prefix.len, prefix.start,
+                  (int)suffix.len, suffix.start);
+          dt_name.start = combined;
+          dt_name.len = combined_len;
+        }
+
         DepNode *dep = arena_alloc(arena, sizeof(DepNode));
-        dep->name = dt->name;
+        dep->name = dt_name;
         dep->next = meta->uses_types;
         meta->uses_types = dep;
       }
@@ -1390,10 +1427,46 @@ DeclMetadata *analyze_module_declarations(Arena *arena, AstNode *module_root) {
   if (!module_root || module_root->type != AST_PROGRAM)
     return NULL;
 
+  HashMap alias_map;
+  map_init(&alias_map, arena, 32);
+
+  // Extract aliased module paths
+  AstNode *stmt = module_root->as.block.first_stmt;
+  while (stmt) {
+    if (stmt->type == AST_USE) {
+      Token path = stmt->as.use_stmt.path;
+      if (path.len > 2) {
+        const char *raw = path.start + 1;
+        int raw_len = path.len - 2;
+        const char *mod_name = raw;
+        int mod_name_len = raw_len;
+        for (int i = raw_len - 1; i >= 0; i--) {
+          if (raw[i] == '/') {
+            mod_name = raw + i + 1;
+            mod_name_len = raw_len - (i + 1);
+            break;
+          }
+        }
+        Token alias = stmt->as.use_stmt.alias;
+        Token *mod_tok = arena_alloc(arena, sizeof(Token));
+        mod_tok->start = mod_name;
+        mod_tok->len = mod_name_len;
+        mod_tok->type = TOKEN_IDENTIF;
+
+        if (alias.len > 0) {
+          map_set(&alias_map, alias.start, alias.len, mod_tok);
+        } else {
+          map_set(&alias_map, mod_name, mod_name_len, mod_tok);
+        }
+      }
+    }
+    stmt = stmt->next;
+  }
+
   DeclMetadata *head = NULL;
   DeclMetadata *tail = NULL;
 
-  AstNode *stmt = module_root->as.block.first_stmt;
+  stmt = module_root->as.block.first_stmt;
   while (stmt) {
     Token name = {0};
 
@@ -1423,7 +1496,7 @@ DeclMetadata *analyze_module_declarations(Arena *arena, AstNode *module_root) {
       meta->is_dirty = false;
       meta->next = NULL;
 
-      extract_decl_dependencies(arena, stmt, meta);
+      extract_decl_dependencies(arena, stmt, meta, &alias_map);
 
       if (!head)
         head = tail = meta;
@@ -1435,6 +1508,7 @@ DeclMetadata *analyze_module_declarations(Arena *arena, AstNode *module_root) {
     stmt = stmt->next;
   }
 
+  map_free_buckets(&alias_map);
   return head;
 }
 

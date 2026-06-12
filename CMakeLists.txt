@@ -107,7 +107,7 @@ add_executable(tereix_bin ${SOURCES})
 
 target_include_directories(settings INTERFACE 
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/private>
-	$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}> # <-- ADD THIS
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
 )
 
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/compute_hash.cmake" "
