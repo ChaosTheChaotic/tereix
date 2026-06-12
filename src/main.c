@@ -11,16 +11,6 @@
 extern Module *sem_current_mod;
 extern Module *sem_main_mod;
 
-bool check_exists(const char *path) {
-  FILE *fp = NULL;
-  if ((fp = fopen(path, "r")) != NULL) {
-    fclose(fp);
-    return true;
-  } else {
-    return false;
-  }
-}
-
 void ensure_cache_dir() {
   struct stat st = {0};
   if (stat(".tx_cache", &st) == -1) {
@@ -1028,7 +1018,7 @@ void compile_project(const CompileOptions *opts) {
 
         bool suc =
             output_to_c_and_compile(&sem, bin_name, opts->compiler, all_flags,
-                                    total_flags, &arena, main_mod);
+                                    total_flags, &arena, main_mod, opts->keep_c_files);
         if (suc)
           printf("Compiled successfully\n");
         else

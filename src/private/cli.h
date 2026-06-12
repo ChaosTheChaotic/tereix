@@ -11,6 +11,7 @@ typedef struct {
   const char *input_file;
   bool print_ast;
   bool help;
+	bool keep_c_files;
 } CompileOptions;
 
 int parse_options(int argc, char **argv, CompileOptions *opts);

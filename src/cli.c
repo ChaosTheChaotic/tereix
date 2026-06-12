@@ -18,11 +18,12 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
       {"help", no_argument, 0, 'h'},
       {"compiler", required_argument, 0, 'c'},
       {"output", required_argument, 0, 'o'},
+      {"keep-c", no_argument, 0, 'k'},
       {0, 0, 0, 0}};
 
   int opt;
   int option_index = 0;
-  while ((opt = getopt_long(argc, argv, "phc:o:", long_options,
+  while ((opt = getopt_long(argc, argv, "phc:o:k", long_options,
                             &option_index)) != -1) {
     switch (opt) {
     case 'p':
@@ -36,6 +37,9 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
       break;
     case 'o':
       opts->output_file = optarg;
+      break;
+    case 'k':
+      opts->keep_c_files = true;
       break;
     default:
       return -1;
@@ -77,7 +81,8 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
 void print_usage(const char *progname) {
   printf("Usage: %s [options] <input.tx>\n", progname);
   printf("Options:\n");
-	printf("  --lsp			   Run as an lsp\n");
+  printf("  --lsp			   Run as an lsp\n");
+  printf("  -k, --keep-c            Keep generated .c files in .tx_cache/ to speed up compilation\n");
   printf("  -p, --print-ast          Print the AST after parsing\n");
   printf(
       "  -c, --compiler <cc>      Specify C compiler (default: $CC or 'cc')\n");

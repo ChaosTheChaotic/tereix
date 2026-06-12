@@ -34,7 +34,7 @@ typedef struct {
 HashMap *build_func_map(Arena *arena, AstNode *root);
 bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
                              const char *compiler, const char **flags,
-                             int flag_count, Arena *arena, Module *main_mod);
+                             int flag_count, Arena *arena, Module *main_mod, bool keep_c_files);
 void mangle_mod_symbols(Arena *arena, Module *mod);
 
 #endif // !C_GEN_TYPES_H

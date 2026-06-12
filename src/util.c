@@ -100,3 +100,38 @@ const char *extract_mod_name(Arena *arena, const char *abs_path) {
 
   return mod_name;
 }
+
+bool check_exists(const char *path) {
+  FILE *fp = NULL;
+  if ((fp = fopen(path, "r")) != NULL) {
+    fclose(fp);
+    return true;
+  } else {
+    return false;
+  }
+}
+
+bool file_is_identical(const char *path, StringBuilder *code) {
+  FILE *f = fopen(path, "rb");
+  if (!f)
+    return false;
+
+  fseek(f, 0, SEEK_END);
+  long size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  if (size != (long)code->len) {
+    fclose(f);
+    return false;
+  }
+
+  char *buf = malloc(size);
+  bool same = false;
+  if (fread(buf, 1, size, f) == (size_t)size) {
+    same = (memcmp(buf, code->buf, size) == 0);
+  }
+  free(buf);
+  fclose(f);
+  return same;
+}
+

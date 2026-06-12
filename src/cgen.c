@@ -3,7 +3,9 @@
 #include "hashmap.h"
 #include "sem_types.h"
 #include "string_builder.h"
+#include "util.h"
 #include <sys/wait.h>
+#include <errno.h>
 #include <unistd.h>
 
 void gen_type(DataType type, StringBuilder *sb) {
@@ -1930,9 +1932,73 @@ void lower_defers(AstNode *root, Arena *arena) {
   free(defers);
 }
 
+bool compile_from_memory(const char *compiler, const char **flags,
+                         int flag_count, const char *out_binary_name,
+                         StringBuilder *code) {
+  int pipefd[2];
+  if (pipe(pipefd) == -1) {
+    perror("pipe");
+    return false;
+  }
+
+  pid_t pid = fork();
+  if (pid == -1) {
+    perror("fork");
+    return false;
+  }
+
+  if (pid == 0) {
+    close(pipefd[1]); // Close write end
+    dup2(pipefd[0], STDIN_FILENO); // Bind read end to stdin
+    close(pipefd[0]);
+
+    // Construct command
+    size_t args_alloc = 6 + flag_count;
+    char **argv = malloc(args_alloc * sizeof(char *));
+    int argc = 0;
+    argv[argc++] = (char *)compiler;
+    argv[argc++] = "-x";
+    argv[argc++] = "c";
+    argv[argc++] = "-"; // Read from stdin
+    argv[argc++] = "-o";
+    argv[argc++] = (char *)out_binary_name;
+    for (int i = 0; i < flag_count; i++) {
+      argv[argc++] = (char *)flags[i];
+    }
+    argv[argc] = NULL;
+
+    execvp(argv[0], argv);
+    perror("execvp");
+    _exit(127);
+  } else {
+    close(pipefd[0]); // Close read end
+
+    // Push the entire AST string builder into the pipe
+    size_t total_written = 0;
+    while (total_written < code->len) {
+      ssize_t written = write(pipefd[1], code->buf + total_written,
+                              code->len - total_written);
+      if (written == -1) {
+        if (errno == EINTR)
+          continue;
+        perror("write to pipe");
+        break;
+      }
+      total_written += written;
+    }
+    close(pipefd[1]);
+
+    int status;
+    if (waitpid(pid, &status, 0) == -1)
+      return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+  }
+}
+
 bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
                              const char *compiler, const char **flags,
-                             int flag_count, Arena *arena, Module *main_mod) {
+                             int flag_count, Arena *arena, Module *main_mod,
+                             bool keep_c_files) {
   if (!sem)
     return false;
 
@@ -1987,128 +2053,104 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
       generate_c_code(mod->ast_root, &code, global_func_map, arena,
                       (mod == main_mod));
 
-      entry = entry->next; // Move to the next entry in the chain
+      entry = entry->next;
     }
   }
 
-  const char *tmp_c_file = "output_gen.c";
-  bool requires_compilation = true;
+  bool compile_success = false;
 
-  // Verify the compiled binary hasn't been deleted
-  FILE *bin_test = fopen(out_binary_name, "rb");
-  if (bin_test) {
-    fclose(bin_test);
-
-    // Read the existing generated C file
-    FILE *old_c = fopen(tmp_c_file, "rb");
-    if (old_c) {
-      fseek(old_c, 0, SEEK_END);
-      long old_size = ftell(old_c);
-      fseek(old_c, 0, SEEK_SET);
-
-      // Compare sizes, then contents
-      if (old_size == (long)code.len) {
-        char *old_buf = malloc(old_size);
-        if (fread(old_buf, 1, old_size, old_c) == (size_t)old_size) {
-          if (memcmp(old_buf, code.buf, old_size) == 0) {
-            requires_compilation = false;
-          }
-        }
-        free(old_buf);
-      }
-      fclose(old_c);
-    }
-  }
-
-  // Early exit if the C output is identical and binary exists
-  if (!requires_compilation) {
-    printf("Generated C code unchanged. Skipping GCC compilation.\n");
-    sb_free(&code);
-    map_free_buckets(global_func_map);
-    return true;
-  }
-
-  // Proceed to overwrite and invoke GCC
-  FILE *f = fopen(tmp_c_file, "w");
-  if (!f) {
-    fprintf(stderr, "Failed to create C output file.\n");
-    sb_free(&code);
-    return false;
-  }
-  fwrite(code.buf, 1, code.len, f);
-  fclose(f);
-  sb_free(&code);
-
-  StringBuilder cmd;
-  sb_init(&cmd);
-
-  sb_append(&cmd, compiler);
-  sb_append(&cmd, " -o ");
-  sb_append(&cmd, out_binary_name);
-  sb_append(&cmd, " ");
-  sb_append(&cmd, tmp_c_file);
-
-  for (int i = 0; i < flag_count; i++) {
-    sb_append(&cmd, " ");
-    sb_append(&cmd, flags[i]);
-  }
-
-  printf("Executing: %s\n", cmd.buf);
-
-  char **argv = NULL;
-  size_t argc = 0;
-  char *cmd_copy = strdup(cmd.buf);
-  if (!cmd_copy) {
-    fprintf(stderr, "Failed to duplicate command string\n");
-    sb_free(&cmd);
-    map_free_buckets(global_func_map);
-    return false;
-  }
-
-  char *token = strtok(cmd_copy, " ");
-  while (token) {
-    argv = realloc(argv, (argc + 2) * sizeof(char *));
-    argv[argc++] = token;
-    token = strtok(NULL, " ");
-  }
-  argv[argc] = NULL;
-
-  pid_t pid = fork();
-  int res = -1;
-
-  if (pid == -1) {
-    perror("fork");
-    free(cmd_copy);
-    free(argv);
-    sb_free(&cmd);
-    map_free_buckets(global_func_map);
-    return false;
-  } else if (pid == 0) {
-    // Child process execute the compiler
-    execvp(argv[0], argv);
-    // If we get here exec failed
-    perror("execvp");
-    _exit(127);
+  if (!keep_c_files) {
+    compile_success = compile_from_memory(compiler, flags, flag_count,
+                                          out_binary_name, &code);
   } else {
-    // Parent process wait for child
-    int status;
-    if (waitpid(pid, &status, 0) == -1) {
-      perror("waitpid");
-      res = -1;
-    } else if (WIFEXITED(status)) {
-      res = WEXITSTATUS(status);
+    char c_file_path[512] = ".tx_cache/output_gen.c";
+    bool requires_compilation = true;
+
+    if (check_exists(out_binary_name) && file_is_identical(c_file_path, &code)) {
+      requires_compilation = false;
+    }
+
+    if (!requires_compilation) {
+      printf("Generated C code unchanged and binary exists. Skipping GCC "
+             "compilation.\n");
+      compile_success = true;
     } else {
-      res = -1;
+      // Overwrite the outdated cache file
+      FILE *f = fopen(c_file_path, "w");
+      if (!f) {
+        fprintf(stderr, "Failed to create C output file at %s.\n", c_file_path);
+        sb_free(&code);
+        map_free_buckets(global_func_map);
+        return false;
+      }
+      fwrite(code.buf, 1, code.len, f);
+      fclose(f);
+
+      // Execute standard fork/exec using the file on disk
+      StringBuilder cmd;
+      sb_init(&cmd);
+
+      sb_append(&cmd, compiler);
+      sb_append(&cmd, " -o ");
+      sb_append(&cmd, out_binary_name);
+      sb_append(&cmd, " ");
+      sb_append(&cmd, c_file_path);
+                                   
+
+      for (int i = 0; i < flag_count; i++) {
+        sb_append(&cmd, " ");
+        sb_append(&cmd, flags[i]);
+      }
+
+      printf("Executing: %s\n", cmd.buf);
+
+      char **argv = NULL;
+      size_t argc = 0;
+      char *cmd_copy = strdup(cmd.buf);
+
+      if (!cmd_copy) {
+        fprintf(stderr, "Failed to duplicate command string\n");
+        sb_free(&cmd);
+        sb_free(&code);
+        map_free_buckets(global_func_map);
+        return false;
+      }
+
+      char *token = strtok(cmd_copy, " ");
+      while (token) {
+        argv = realloc(argv, (argc + 2) * sizeof(char *));
+        argv[argc++] = token;
+        token = strtok(NULL, " ");
+      }
+      argv[argc] = NULL;
+
+      pid_t pid = fork();
+      int res = -1;
+
+      if (pid == -1) {
+        perror("fork");
+      } else if (pid == 0) {
+        execvp(argv[0], argv);
+        perror("execvp"); // Only triggers if exec fails
+        _exit(127);
+      } else {
+        int status;
+        if (waitpid(pid, &status, 0) != -1 && WIFEXITED(status)) {
+          res = WEXITSTATUS(status);
+        }
+      }
+
+      free(cmd_copy);
+      free(argv);
+      sb_free(&cmd);
+
+      compile_success = (res == 0);
     }
   }
 
-  free(cmd_copy);
-  free(argv);
-
-  sb_free(&cmd);
+  sb_free(&code);
   map_free_buckets(global_func_map);
-
-  return res == 0;
+  return compile_success;
 }
 
 void mangle_mod_symbols(Arena *arena, Module *mod) {
