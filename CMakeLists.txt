@@ -11,6 +11,31 @@ add_library(settings INTERFACE)
 add_library(deps_public INTERFACE)
 add_library(deps_private INTERFACE)
 
+find_package(yyjson CONFIG QUIET)
+
+if(NOT yyjson_FOUND)
+	find_path(YYJSON_INCLUDE_DIR NAMES yyjson.h)
+	find_library(YYJSON_LIBRARY NAMES yyjson libyyjson)
+	
+	if(YYJSON_INCLUDE_DIR AND YYJSON_LIBRARY)
+		set(yyjson_FOUND TRUE)
+		
+		add_library(yyjson::yyjson UNKNOWN IMPORTED)
+		set_target_properties(yyjson::yyjson PROPERTIES
+			INTERFACE_INCLUDE_DIRECTORIES "${YYJSON_INCLUDE_DIR}"
+			IMPORTED_LOCATION "${YYJSON_LIBRARY}"
+		)
+	endif()
+endif()
+
+if(NOT yyjson_FOUND)
+	if(USE_CACHE_COMPRESSION STREQUAL "ON")
+		message(FATAL_ERROR "yyjson compression requested but libyyjson headers/libraries were not found!")
+	else()
+		message(STATUS "yyjson not found")
+	endif()
+endif()
+
 target_include_directories(settings INTERFACE 
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/private>
 )
@@ -98,6 +123,13 @@ endif()
 
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS  "src/*.c")
 
+if(yyjson_FOUND)
+	message(STATUS "Using system yyjson. Excluding internal src/yyjson.c from compilation.")
+	list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/yyjson.c")
+else()
+	message(STATUS "System yyjson not found. Compiling fallback internal src/yyjson.c.")
+endif()
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(DO_INSTALL)
 	include(GNUInstallDirs)
@@ -152,6 +184,11 @@ target_link_libraries(tereix_bin
 	PUBLIC deps_public 
 	PRIVATE settings deps_private
 )
+
+if(yyjson_FOUND)
+	target_link_libraries(tereix_bin PRIVATE yyjson::yyjson)
+endif()
+
 if(ENABLE_LTO_ON_TARGETS)
 	set_target_properties(tereix_bin PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
