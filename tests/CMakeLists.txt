@@ -10,4 +10,3 @@ function(add_tereix_test TEST_NAME)
   )
   add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
 endfunction()
-

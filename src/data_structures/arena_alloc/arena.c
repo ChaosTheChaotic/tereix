@@ -6,7 +6,7 @@ static size_t align_size(size_t size) { return (size + 7) & ~7; }
 ArenaBlock *arena_new_block(size_t size) {
   size_t block_size = size > ARENA_CHUNK_SIZE ? size : ARENA_CHUNK_SIZE;
   // Total size = Block metadata + the data buffer
-  ArenaBlock *block = malloc(sizeof(ArenaBlock) + block_size);
+  ArenaBlock *block = calloc(1, sizeof(ArenaBlock) + block_size);
   block->next = NULL;
   block->capacity = block_size;
   block->used = 0;

@@ -1953,7 +1953,7 @@ bool compile_from_memory(const char *compiler, const char **flags,
     close(pipefd[0]);
 
     // Construct command
-    size_t args_alloc = 6 + flag_count;
+    size_t args_alloc = 6 + flag_count + 1;
     char **argv = malloc(args_alloc * sizeof(char *));
     int argc = 0;
     argv[argc++] = (char *)compiler;
