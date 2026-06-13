@@ -607,7 +607,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
         char *last_slash = strrchr(current_abs, '/');
         if (last_slash) {
           *last_slash = '\0';
-          char full_path[PATH_MAX];
+          char full_path[PATH_MAX * 2];
           if (rel_path[0] == '/') {
             snprintf(full_path, sizeof(full_path), "%s", rel_path);
           } else {
@@ -1243,7 +1243,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                 if (last_slash)
                   *last_slash = '\0';
 
-                char full_path[PATH_MAX];
+                char full_path[PATH_MAX * 2];
                 if (rel_path[0] == '/')
                   snprintf(full_path, sizeof(full_path), "%s", rel_path);
                 else
@@ -1306,7 +1306,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                 snprintf(m_name, sizeof(m_name), "%.*s", (int)t.len, t.start);
 
                 char detail_buf[1024] = {0};
-                char insert_buf[256] = {0};
+                char insert_buf[512] = {0};
                 int kind = 1; // Default
 
                 if (target_stmt->type == AST_FUNC) {
@@ -1474,7 +1474,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                     char *last_slash = strrchr(current_abs, '/');
                     if (last_slash)
                       *last_slash = '\0';
-                    char full_path[PATH_MAX];
+                    char full_path[PATH_MAX * 2];
                     if (rel_path[0] == '/')
                       snprintf(full_path, sizeof(full_path), "%s", rel_path);
                     else
@@ -1550,7 +1550,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                     char *last_slash = strrchr(current_abs, '/');
                     if (last_slash)
                       *last_slash = '\0';
-                    char full_path[PATH_MAX];
+                    char full_path[PATH_MAX * 2];
                     if (rel_path[0] == '/')
                       snprintf(full_path, sizeof(full_path), "%s", rel_path);
                     else
@@ -1694,7 +1694,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
           snprintf(name_buf, sizeof(name_buf), "%.*s", (int)t.len, t.start);
 
           char detail_buf[1024] = {0};
-          char insert_buf[256] = {0};
+          char insert_buf[512] = {0};
           char *docs = get_comments_above(doc->txt, t);
 
           int kind = 1;
@@ -2370,7 +2370,7 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
                   if (last_slash)
                     *last_slash = '\0';
 
-                  char full_path[PATH_MAX];
+                  char full_path[PATH_MAX * 2];
                   if (rel_path[0] == '/')
                     snprintf(full_path, sizeof(full_path), "%s", rel_path);
                   else

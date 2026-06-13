@@ -27,6 +27,7 @@
             clang-tools
             valgrind
 						zstd
+						cmocka
           ];
         };
       });

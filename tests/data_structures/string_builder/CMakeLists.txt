@@ -1,0 +1,1 @@
+add_tereix_test(test_string_builder test_string_builder.c)

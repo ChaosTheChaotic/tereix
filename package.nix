@@ -27,6 +27,7 @@ stdenv.mkDerivation {
     "-DDO_INSTALL=ON"
     "-DUSE_CCACHE=OFF"
     "-DPKG_CONFIG=ON"
+		"-DBUILD_TESTING=OFF"
   ];
 	meta = {
 		description = "The compiler for the Tereix language";
