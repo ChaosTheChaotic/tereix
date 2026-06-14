@@ -1,0 +1,5 @@
+add_subdirectory(util)
+add_subdirectory(parser)
+add_subdirectory(ast_serde)
+add_subdirectory(sem)
+add_subdirectory(cgen)

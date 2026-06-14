@@ -57,3 +57,4 @@ function(add_tereix_test TEST_NAME)
 endfunction()
 
 add_subdirectory(data_structures)
+add_subdirectory(core)

@@ -1,0 +1,1 @@
+add_tereix_test(test_ast_serde test_ast_serde.c)
