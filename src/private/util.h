@@ -17,4 +17,6 @@ bool check_exists(const char *path);
 
 bool file_is_identical(const char *path, StringBuilder *code);
 
+void ensure_cache_dir();
+
 #endif // !UTIL_H

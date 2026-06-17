@@ -4,6 +4,52 @@
 #include <stdlib.h>
 #include <string.h>
 
+int parse_format_options(int argc, char **argv, CompileOptions *opts) {
+    // Default format options
+    opts->cmd = CMD_FMT;
+    opts->as.fmt.write = false;
+    opts->as.fmt.check = false;
+    opts->as.fmt.recursive = false;
+
+    int opt;
+    while ((opt = getopt(argc, argv, "hpwcr")) != -1) {
+        switch (opt) {
+        case 'p':
+          opts->print_ast = true;
+          break;
+        case 'h':
+          opts->help = true;
+          return 0;
+        case 'w':
+          opts->as.fmt.write = true;
+          break;
+        case 'c':
+            opts->as.fmt.check = true;
+            break;
+        case 'r':
+            opts->as.fmt.recursive = true;
+            break;
+        default:
+            return -1;
+        }
+    }
+
+    if (optind < argc) {
+        opts->input_file = argv[optind++];
+    } else {
+        fprintf(stderr, "Error: no input file specified for fmt.\n");
+        return -1;
+    }
+
+    if (optind < argc) {
+        fprintf(stderr, "Warning: extra arguments ignored for fmt: ");
+        while (optind < argc) fprintf(stderr, "%s ", argv[optind++]);
+        fprintf(stderr, "\n");
+    }
+
+    return 0;
+}
+
 const char *default_compiler(void) {
   const char *cc = getenv("CC");
   return cc ? cc : "cc";
@@ -11,7 +57,14 @@ const char *default_compiler(void) {
 
 int parse_options(int argc, char **argv, CompileOptions *opts) {
   memset(opts, 0, sizeof(*opts));
-  opts->compiler = default_compiler();
+
+  if (argc >= 2 && strcmp(argv[1], "fmt") == 0) {
+    // argv[1] as command, rest as fmt options
+    return parse_format_options(argc - 1, argv + 1, opts);
+  }
+
+	opts->cmd = CMD_BUILD;
+  opts->as.build.compiler = default_compiler();
 
   static struct option long_options[] = {
       {"print-ast", no_argument, 0, 'p'},
@@ -33,13 +86,13 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
       opts->help = true;
       return 0;
     case 'c':
-      opts->compiler = optarg;
+      opts->as.build.compiler = optarg;
       break;
     case 'o':
-      opts->output_file = optarg;
+      opts->as.build.output_file = optarg;
       break;
     case 'k':
-      opts->keep_c_files = true;
+      opts->as.build.keep_c_files = true;
       break;
     default:
       return -1;
@@ -52,11 +105,11 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
     optind++;
     remaining = argc - optind;
     if (remaining > 0) {
-      opts->extra_cflags = malloc((remaining + 1) * sizeof(char *));
-      opts->extra_cflag_count = remaining;
+      opts->as.build.extra_cflags = malloc((remaining + 1) * sizeof(char *));
+      opts->as.build.extra_cflag_count = remaining;
       for (int i = 0; i < remaining; i++)
-        opts->extra_cflags[i] = argv[optind + i];
-      opts->extra_cflags[remaining] = NULL;
+        opts->as.build.extra_cflags[i] = argv[optind + i];
+      opts->as.build.extra_cflags[remaining] = NULL;
     }
   }
   if (optind < argc && argv[optind][0] != '-') {
@@ -79,21 +132,31 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
 }
 
 void print_usage(const char *progname) {
-  printf("Usage: %s [options] <input.tx>\n", progname);
-  printf("Options:\n");
-  printf("  --lsp			   Run as an lsp\n");
-  printf("  -k, --keep-c            Keep generated .c files in .tx_cache/ to speed up compilation\n");
-  printf("  -p, --print-ast          Print the AST after parsing\n");
+  printf("Usage: %s [--lsp] [command] [options] [input...]\n", progname);
+  printf("\nCommands:\n");
+  printf("  [options] <input.tx>	       Compile a Tereix program (default)\n");
+  printf("  fmt [options] <input.tx>     Format source code\n");
+  printf("\nCommon options:\n");
+  printf("  -h, --help                   Show this help message\n");
+  printf("  -p, --print-ast              Print the AST after parsing\n");
+  printf("\nBuild options:\n");
+  printf("  -c, --compiler <cc>          Specify C compiler (default: $CC or "
+         "'cc')\n");
+  printf("  -o, --output <file>          Output binary name (default: input "
+         "base name)\n");
   printf(
-      "  -c, --compiler <cc>      Specify C compiler (default: $CC or 'cc')\n");
-  printf("  -o, --output <file>      Output binary name (default: input base "
-         "name)\n");
-  printf("  -h, --help               Show this help message\n");
-  printf("  --                       Pass following arguments directly to the "
-         "C compiler\n");
-  printf("\n");
-  printf("Examples:\n");
+      "  -k, --keep-c                 Keep generated .c files in .tx_cache/\n");
+  printf("  --                           Pass following arguments directly to "
+         "the C compiler\n");
+  printf("\nFmt options:\n");
+  printf(
+      "  -w, --write                  Write formatted output back to file\n");
+  printf("  -c, --check                  Check if files are formatted (exit "
+         "with status)\n");
+  printf("  -r, --recursive              Process directories recursively\n");
+  printf("\nExamples:\n");
   printf("  %s -p main.tx\n", progname);
   printf("  %s --compiler clang -O2 main.tx\n", progname);
-  printf("  %s -c gcc-12 -- -march=native main.tx\n", progname);
+  printf("  %s fmt -w main.tx\n", progname);
+  printf("  %s fmt -r src/\n", progname);
 }

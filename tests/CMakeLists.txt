@@ -58,3 +58,4 @@ endfunction()
 
 add_subdirectory(data_structures)
 add_subdirectory(core)
+add_subdirectory(fmt)

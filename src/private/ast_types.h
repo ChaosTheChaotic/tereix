@@ -97,10 +97,12 @@ typedef struct AstNode {
     struct {
       Token structn;
       struct AstNode *contents;
+			bool is_extern;
     } struct_def;
     struct {
       Token unionn;
       struct AstNode *contents;
+			bool is_extern;
     } union_def;
     struct {
       Token enumn;
@@ -220,6 +222,13 @@ typedef struct {
 #define AS_SIGNED(n) "i" #n,
 #define AS_FLOAT(n) "f" #n,
 
+typedef struct {
+  AstNode *node;
+  unsigned int depth;
+  const char *label;
+} AstPrintItem;
+
+
 struct AstNode;
 
 static const char *kwlist[] = {
@@ -282,5 +291,9 @@ void append_stmt(AstNode **head, AstNode *new_stmt);
 AstNode *file_to_ast(Arena *arena, const char *path, bool partial);
 AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath,
                     DiagList *diag_list, bool partial);
+
+bool print_type_info(DataType type, FILE *out_fp);
+
+void print_ast(AstNode *root);
 
 #endif // !AST_TYPES_H

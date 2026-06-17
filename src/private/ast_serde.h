@@ -3,12 +3,6 @@
 
 #include "ast_types.h"
 
-typedef struct {
-  AstNode *node;
-  int depth;
-  const char *label;
-} AstPrintItem;
-
 typedef struct DepNode {
   Token name;
   struct DepNode *next;

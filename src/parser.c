@@ -628,6 +628,7 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
         AstNode *snode = new_node(ctx->arena, AST_STRUCT);
         snode->as.struct_def.structn = ctx->curr;
+				snode->as.struct_def.is_extern = is_extern;
         adv(ctx);
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
@@ -656,6 +657,7 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
         AstNode *unode = new_node(ctx->arena, AST_UNION);
         unode->as.union_def.unionn = ctx->curr;
+				unode->as.struct_def.is_extern = is_extern;
         adv(ctx);
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
@@ -663,7 +665,7 @@ bool parse_step(ParseCtx *ctx) {
         } else if (is_extern && ctx->curr.type == TOKEN_PUNC &&
                    *ctx->curr.start == ';') {
           adv(ctx);
-          unode->as.struct_def.contents = NULL;
+          unode->as.union_def.contents = NULL;
           unode->src_end = ctx->prev.start + ctx->prev.len;
           append_stmt(target_list, unode);
           push_state(ctx, current_state);

@@ -1072,11 +1072,13 @@ uint32_t compute_node_hash(AstNode *root) {
         break;
       case AST_STRUCT:
         hash = hash_token(hash, n->as.struct_def.structn);
+        hash = combine_hash(hash, n->as.struct_def.is_extern);
         for (AstNode *c = n->as.struct_def.contents; c; c = c->next)
           hash = combine_hash(hash, c->node_hash);
         break;
       case AST_UNION:
         hash = hash_token(hash, n->as.union_def.unionn);
+        hash = combine_hash(hash, n->as.union_def.is_extern);
         for (AstNode *c = n->as.union_def.contents; c; c = c->next)
           hash = combine_hash(hash, c->node_hash);
         break;

@@ -2,6 +2,7 @@
 #include "arena.h"
 #include <limits.h>
 #include <string.h>
+#include <sys/stat.h>
 
 const char *resolve_alloc(Arena *arena, const char *rel_path) {
   char temp[PATH_MAX];
@@ -133,5 +134,16 @@ bool file_is_identical(const char *path, StringBuilder *code) {
   free(buf);
   fclose(f);
   return same;
+}
+
+void ensure_cache_dir() {
+  struct stat st = {0};
+  if (stat(".tx_cache", &st) == -1) {
+#if defined(_WIN32)
+    mkdir(".tx_cache");
+#else
+    mkdir(".tx_cache", 0700);
+#endif
+  }
 }
 
