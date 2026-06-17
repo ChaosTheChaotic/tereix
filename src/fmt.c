@@ -1269,6 +1269,25 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
 
     case AST_SIZEOF:
       if (item->step == 0) {
+        if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr &&
+            node->as.sizeof_expr.target_expr->type == AST_CAST) {
+          AstNode *cast = node->as.sizeof_expr.target_expr;
+          AstNode *op = cast->as.cast.op;
+
+          if (op && op->type == AST_IDENTIF &&
+              map_get(type_set, op->as.identif.val.start,
+                      op->as.identif.val.len) != NULL) {
+            FPRINTF_SAFE("%s", "(");
+            FMT_TYPE_SAFE(cast->as.cast.target);
+            FPRINTF_SAFE("%s", ")");
+            FPRINTF_SAFE("%s", "sizeof(");
+            FPRINTF_SAFE("%.*s", (int)op->as.identif.val.len,
+                         op->as.identif.val.start);
+            FPRINTF_SAFE("%s", ")");
+            top--;
+            break;
+          }
+        }
         FPRINTF_SAFE("%s", "sizeof(");
         if (node->as.sizeof_expr.is_type) {
           if (is_builtin_type_name(node->as.sizeof_expr.target_type.name.start,
