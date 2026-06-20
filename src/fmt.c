@@ -1332,6 +1332,143 @@ err_cleanup:
   return false;
 }
 
+#ifdef ENABLE_THREADS
+#include "thread_pool.h"
+#include <pthread.h>
+#include <stdatomic.h>
+
+typedef struct {
+  Worklist *worklist;
+  Arena *global_arena;
+  pthread_mutex_t *global_mutex;
+  HashMap *seen;
+  atomic_size_t *files_in_flight;
+  const CompileOptions *opts;
+} FmtWorkerData;
+
+bool fmt_worker_loop(void *arg) {
+  FmtWorkerData *data = (FmtWorkerData *)arg;
+  Worklist *wl = data->worklist;
+
+  while (1) {
+    const char *current_path = wl_pop(wl);
+    if (!current_path)
+      break;
+
+    pthread_mutex_lock(data->global_mutex);
+    const char *abs_path = resolve_alloc(data->global_arena, current_path);
+    bool already_seen = false;
+    if (abs_path) {
+      if (map_get(data->seen, abs_path, strlen(abs_path)) != NULL) {
+        already_seen = true;
+      } else {
+        map_set(data->seen, abs_path, strlen(abs_path), (void *)1);
+      }
+    }
+    pthread_mutex_unlock(data->global_mutex);
+
+    if (!abs_path || already_seen) {
+      atomic_fetch_sub(data->files_in_flight, 1);
+      continue;
+    }
+
+    const char *content = load_file(abs_path);
+    if (!content) {
+      atomic_fetch_sub(data->files_in_flight, 1);
+      continue;
+    }
+
+    pthread_mutex_lock(data->global_mutex);
+    printf("Formatting %s\n", abs_path);
+    pthread_mutex_unlock(data->global_mutex);
+
+    Arena thread_arena = {0};
+    DiagList diags;
+    diaglist_init(&diags, 1024);
+
+    AstNode *ast = str_to_ast(&thread_arena, content, abs_path, &diags, false);
+    if (!ast) {
+      pthread_mutex_lock(data->global_mutex);
+      for (size_t i = 0; i < diags.count; i++) {
+        printf("Error on %u:%u in file %s: %s\n", diags.items[i].start_line,
+               diags.items[i].start_char, diags.items[i].file,
+               diags.items[i].message);
+      }
+      fprintf(stderr, "No AST found after trying to parse %s\n", abs_path);
+      pthread_mutex_unlock(data->global_mutex);
+
+      diaglist_free(&diags);
+      free((void *)content);
+      arena_free_all(&thread_arena);
+      atomic_fetch_sub(data->files_in_flight, 1);
+      continue;
+    }
+    diaglist_free(&diags);
+
+    if (data->opts->print_ast) {
+      pthread_mutex_lock(data->global_mutex);
+      const char *mod_name = extract_mod_name(data->global_arena, abs_path);
+      printf("Module: %s\n", mod_name);
+      print_ast(ast);
+      pthread_mutex_unlock(data->global_mutex);
+    }
+
+    if (data->opts->as.fmt.recursive) {
+      AstNode *stmt = ast->as.block.first_stmt;
+      while (stmt) {
+        if (stmt->type == AST_USE) {
+          size_t path_len = stmt->as.use_stmt.path.len;
+          if (path_len > 2) {
+            pthread_mutex_lock(data->global_mutex);
+            char *clean_rel = arena_alloc(data->global_arena, path_len - 1);
+            strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
+            clean_rel[path_len - 2] = '\0';
+            pthread_mutex_unlock(data->global_mutex);
+
+            atomic_fetch_add(data->files_in_flight, 1);
+            wl_push(data->worklist, clean_rel);
+          }
+        }
+        stmt = stmt->next;
+      }
+    }
+
+    FILE *fp;
+    if (data->opts->as.fmt.write) {
+      fp = fopen(abs_path, "w+");
+    } else {
+      fp = stdout;
+    }
+
+    if (fp) {
+      HashMap type_set;
+      map_init(&type_set, &thread_arena, 128);
+      collect_type_names(ast, &type_set, &thread_arena);
+
+      // Prevent threads from stepping on each other if writing to stdout
+      if (!data->opts->as.fmt.write) {
+        pthread_mutex_lock(data->global_mutex);
+      }
+
+      fmt_ast(ast, fp, &type_set);
+
+      if (!data->opts->as.fmt.write) {
+        pthread_mutex_unlock(data->global_mutex);
+      }
+
+      if (data->opts->as.fmt.write) {
+        fclose(fp);
+      }
+    }
+
+    free((void *)content);
+    arena_free_all(&thread_arena);
+    atomic_fetch_sub(data->files_in_flight, 1);
+  }
+  return true;
+}
+#endif
+
 bool fmt_project(const CompileOptions *restrict opts) {
   ensure_cache_dir();
   Arena arena = {0};
@@ -1340,17 +1477,67 @@ bool fmt_project(const CompileOptions *restrict opts) {
   map_init(&seen, &arena, 1024);
 
   Worklist pending = {0};
+  wl_init(&pending);
   wl_push(&pending, opts->input_file);
 
+#ifdef ENABLE_THREADS
+  int num_threads = opts->thread_count;
+  if (num_threads <= 0) {
+    num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+    if (num_threads < 1)
+      num_threads = 1;
+    if (num_threads > 64)
+      num_threads = 64;
+  }
+
+  ThreadPool *pool = tp_create(num_threads);
+  pthread_mutex_t global_mutex;
+  pthread_mutex_init(&global_mutex, NULL);
+  atomic_size_t files_in_flight = 1;
+
+  FmtWorkerData wdata = {.worklist = &pending,
+                         .global_arena = &arena,
+                         .global_mutex = &global_mutex,
+                         .seen = &seen,
+                         .files_in_flight = &files_in_flight,
+                         .opts = opts};
+
+  for (int i = 0; i < num_threads; i++) {
+    tp_submit(pool, (TaskFunc)fmt_worker_loop, &wdata);
+  }
+
+  while (atomic_load(&files_in_flight) > 0) {
+    sched_yield();
+  }
+  wl_done(&pending);
+
+  tp_wait(pool);
+  tp_destroy(pool);
+  pthread_mutex_destroy(&global_mutex);
+
+#else
+  int files_in_flight = 1;
   const char *current_path;
-  while ((current_path = wl_pop(&pending)) != NULL) {
+
+  while (files_in_flight > 0 && (current_path = wl_pop(&pending)) != NULL) {
     const char *abs_path = resolve_alloc(&arena, current_path);
-    if (!abs_path || map_get(&seen, current_path, strlen(current_path)) != NULL)
+    if (!abs_path ||
+        map_get(&seen, current_path, strlen(current_path)) != NULL) {
+      files_in_flight--;
+      if (files_in_flight == 0)
+        wl_done(&pending);
       continue;
+    }
 
     map_set(&seen, current_path, strlen(current_path), (void *)1);
 
     const char *content = load_file(abs_path);
+    if (!content) {
+      files_in_flight--;
+      if (files_in_flight == 0)
+        wl_done(&pending);
+      continue;
+    }
 
     printf("Formatting %s\n", abs_path);
 
@@ -1365,6 +1552,8 @@ bool fmt_project(const CompileOptions *restrict opts) {
                diags.items[i].message);
       }
       fprintf(stderr, "No AST found after trying to parse %s\n", abs_path);
+      diaglist_free(&diags);
+      free((void *)content);
       exit(1);
     }
     diaglist_free(&diags);
@@ -1384,26 +1573,41 @@ bool fmt_project(const CompileOptions *restrict opts) {
             char *clean_rel = arena_alloc(&arena, path_len - 1);
             strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
+
+            files_in_flight++;
             wl_push(&pending, clean_rel);
           }
         }
         stmt = stmt->next;
       }
     }
+
     FILE *fp;
     if (opts->as.fmt.write) {
       fp = fopen(abs_path, "w+");
     } else {
       fp = stdout;
     }
-    HashMap type_set;
-    map_init(&type_set, &arena, 128);
-    collect_type_names(ast, &type_set, &arena);
 
-    fmt_ast(ast, fp, &type_set);
-    if (opts->as.fmt.write)
-      fclose(fp);
+    if (fp) {
+      HashMap type_set;
+      map_init(&type_set, &arena, 128);
+      collect_type_names(ast, &type_set, &arena);
+
+      fmt_ast(ast, fp, &type_set);
+      if (opts->as.fmt.write)
+        fclose(fp);
+    }
+
+    free(content);
+
+    files_in_flight--;
+    if (files_in_flight == 0) {
+      wl_done(&pending);
+    }
   }
+#endif
+
   if (pending.paths)
     free(pending.paths);
   arena_free_all(&arena);

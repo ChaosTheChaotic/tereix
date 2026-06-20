@@ -4,7 +4,13 @@
 #include "sem_types.h"
 #include "diag.h"
 
-extern Module *sem_current_mod;
+#ifdef ENABLE_THREADS
+#include <stdatomic.h>
+#include <unistd.h>
+#include "util.h"
+extern pthread_mutex_t sem_global_lock;
+#endif
+extern THREAD_LOCAL Module *sem_current_mod;
 extern Module *sem_main_mod;
 
 static void test_sem_valid_assignment(void **state) {

@@ -2,25 +2,28 @@
 #define SEM_TYPES_H
 
 #include "arena.h"
-#include "ast_types.h"
 #include "ast_serde.h"
+#include "ast_types.h"
 #include "diag.h"
 #include "hashmap.h"
 
 typedef struct {
   Arena *arena;
   HashMap mod_cache;
-	DiagList *diags;
+  DiagList *diags;
 
   const char
       *std_lib_env_path; // In case the user specifies a dir to go through for
                          // libraries in addition to the default one
+#ifdef ENABLE_THREADS
+  pthread_mutex_t mutex;
+#endif
 } SemCtx;
 
 typedef struct Module {
   const char *abs_path;
   const char *mod_name;
-	const char *content;
+  const char *content;
   AstNode *ast_root;
 
   Arena *mod_arena;
@@ -30,7 +33,7 @@ typedef struct Module {
   DeclMetadata *meta;
   bool is_dirty;
   bool interface_changed;
-	bool needs_cache_write;
+  bool needs_cache_write;
 
   HashMap local_symbols;
   HashMap imported_mods;
@@ -49,7 +52,7 @@ typedef struct Sym {
   Token name;
   AstNode *decl_node;
   bool is_imported_mod;
-	const char *fpath;
+  const char *fpath;
 } Sym;
 
 typedef struct {
@@ -78,7 +81,7 @@ typedef enum { ACTION_VISIT_NODE, ACTION_POP_SCOPE } TravAction;
 typedef struct {
   AstNode *node;
   TravAction action;
-	bool is_top_level;
+  bool is_top_level;
 } TravItem;
 
 void sem_init(SemCtx *ctx, Arena *arena);
@@ -96,5 +99,8 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx);
 void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx);
 
 void propagate_dirty_state(SemCtx *ctx);
+
+void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
+                ...);
 
 #endif // !SEM_TYPES_U

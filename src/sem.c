@@ -5,8 +5,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-Module *sem_current_mod = NULL;
-Module *sem_main_mod = NULL;
+#ifdef ENABLE_THREADS
+#include <pthread.h>
+
+pthread_mutex_t sem_global_lock;
+#endif
+THREAD_LOCAL Module *sem_current_mod = NULL;
+Module *sem_main_mod = NULL; // Set once then read-only so should be safe
 
 typedef struct {
   Module *mod;
@@ -94,8 +99,14 @@ void sem_report(SemCtx *ctx, DiagSeverity sev, Token token, const char *fmt,
 
   if (ctx && ctx->diags) {
     // Report the exact error location in the module it actually occurred in
+#ifdef ENABLE_THREADS
+    pthread_mutex_lock(&ctx->mutex);
+#endif
     diaglist_add(ctx->diags, sev, msg, report_file, report_line, report_col,
                  report_line, report_col + report_len);
+#ifdef ENABLE_THREADS
+    pthread_mutex_unlock(&ctx->mutex);
+#endif
 
     // Transitevely bubble the error up to the main modules use statement
     if (sem_current_mod != NULL && sem_current_mod != sem_main_mod) {
@@ -142,6 +153,9 @@ void sem_init(SemCtx *ctx, Arena *arena) {
   ctx->arena = arena;
   map_init(&ctx->mod_cache, arena, 1024);
   ctx->std_lib_env_path = getenv("TX_LIB_SEARCH_PATH");
+#ifdef ENABLE_THREADS
+  pthread_mutex_init(&ctx->mutex, NULL);
+#endif
 
   import_relations_count = 0;
   sem_current_mod = NULL;
@@ -159,6 +173,9 @@ void sem_deinit(SemCtx *ctx) {
       entry = entry->next;
     }
   }
+#ifdef ENABLE_THREADS
+  pthread_mutex_destroy(&ctx->mutex);
+#endif
   map_free_buckets(&ctx->mod_cache);
 }
 

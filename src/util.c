@@ -147,3 +147,31 @@ void ensure_cache_dir() {
   }
 }
 
+const char *load_file_into_arena(Arena *arena, const char *path) {
+  FILE *fp = fopen(path, "rb");
+  if (!fp)
+    return NULL;
+
+  if (fseek(fp, 0, SEEK_END) != 0) {
+    fclose(fp);
+    return NULL;
+  }
+  long fsize = ftell(fp);
+  if (fsize < 0) {
+    fclose(fp);
+    return NULL;
+  }
+  rewind(fp);
+
+  char *buf = arena_alloc(arena, fsize + 1);
+  if (!buf) {
+    fclose(fp);
+    return NULL;
+  }
+  size_t read = fread(buf, 1, fsize, fp);
+  fclose(fp);
+  if (read != (size_t)fsize)
+    return NULL;
+  buf[fsize] = '\0';
+  return buf;
+}

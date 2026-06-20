@@ -12,7 +12,7 @@ int parse_format_options(int argc, char **argv, CompileOptions *opts) {
     opts->as.fmt.recursive = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "hpwcr")) != -1) {
+    while ((opt = getopt(argc, argv, "hpwcrj:")) != -1) {
         switch (opt) {
         case 'p':
           opts->print_ast = true;
@@ -29,6 +29,13 @@ int parse_format_options(int argc, char **argv, CompileOptions *opts) {
         case 'r':
             opts->as.fmt.recursive = true;
             break;
+        case 'j':
+          opts->thread_count = atoi(optarg);
+          if (opts->thread_count < 1) {
+            fprintf(stderr, "Thread count must be at least 1.\n");
+            return -1;
+          }
+          break;
         default:
             return -1;
         }
@@ -72,11 +79,12 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
       {"compiler", required_argument, 0, 'c'},
       {"output", required_argument, 0, 'o'},
       {"keep-c", no_argument, 0, 'k'},
+      {"threads", required_argument, 0, 'j'},
       {0, 0, 0, 0}};
 
   int opt;
   int option_index = 0;
-  while ((opt = getopt_long(argc, argv, "phc:o:k", long_options,
+  while ((opt = getopt_long(argc, argv, "phc:o:kj:", long_options,
                             &option_index)) != -1) {
     switch (opt) {
     case 'p':
@@ -93,6 +101,13 @@ int parse_options(int argc, char **argv, CompileOptions *opts) {
       break;
     case 'k':
       opts->as.build.keep_c_files = true;
+      break;
+    case 'j':
+      opts->thread_count = atoi(optarg);
+      if (opts->thread_count < 1) {
+        fprintf(stderr, "Thread count must be at least 1.\n");
+        return -1;
+      }
       break;
     default:
       return -1;
@@ -139,6 +154,8 @@ void print_usage(const char *progname) {
   printf("\nCommon options:\n");
   printf("  -h, --help                   Show this help message\n");
   printf("  -p, --print-ast              Print the AST after parsing\n");
+  printf("  -j, --threads <N>          Use N threads for parsing (default: "
+         "auto)\n");
   printf("\nBuild options:\n");
   printf("  -c, --compiler <cc>          Specify C compiler (default: $CC or "
          "'cc')\n");

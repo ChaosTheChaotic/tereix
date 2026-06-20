@@ -5,6 +5,16 @@
 #include "string_builder.h"
 #include <stdbool.h>
 
+#if defined(_MSC_VER)
+#define THREAD_LOCAL __declspec(thread)
+#elif defined(__GNUC__) || defined(__clang__) || defined(__INTEL_COMPILER)
+#define THREAD_LOCAL __thread
+#elif __STDC_VERSION__ >= 201112L
+#define THREAD_LOCAL _Thread_local
+#else
+#error "Compiler or platform does not support thread-local storage natively."
+#endif
+
 const char *resolve_alloc(Arena *arena, const char *rel_path);
 const char *load_file(const char *path);
 
@@ -18,5 +28,7 @@ bool check_exists(const char *path);
 bool file_is_identical(const char *path, StringBuilder *code);
 
 void ensure_cache_dir();
+
+const char *load_file_into_arena(Arena *arena, const char *path);
 
 #endif // !UTIL_H

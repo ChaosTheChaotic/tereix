@@ -1,40 +1,58 @@
 #include "arena.h"
+#include <string.h>
 
 // Align the pointer to the nearest 8 bytes
 static size_t align_size(size_t size) { return (size + 7) & ~7; }
 
-ArenaBlock *arena_new_block(size_t size) {
-  size_t block_size = size > ARENA_CHUNK_SIZE ? size : ARENA_CHUNK_SIZE;
-  // Total size = Block metadata + the data buffer
-  ArenaBlock *block = calloc(1, sizeof(ArenaBlock) + block_size);
-  block->next = NULL;
-  block->capacity = block_size;
-  block->used = 0;
-  return block;
-}
-
 void *arena_alloc(Arena *arena, size_t size) {
-  size = align_size(size);
+#ifdef ENABLE_THREADS
+  pthread_mutex_lock(&arena->mutex);
+#endif
 
-  // If no block exists or current block is full
-  if (!arena->current ||
-      arena->current->used + size > arena->current->capacity) {
-    ArenaBlock *new_block = arena_new_block(size);
-    new_block->next = arena->current;
-    arena->current = new_block;
+	size = align_size(size);
+
+  ArenaBlock *block = arena->current;
+  if (!block || block->used + size > block->capacity) {
+    size_t alloc_size = sizeof(ArenaBlock) +
+                        (size > ARENA_CHUNK_SIZE ? size : ARENA_CHUNK_SIZE);
+    ArenaBlock *new_block = malloc(alloc_size);
+    if (!new_block) {
+#ifdef ENABLE_THREADS
+      pthread_mutex_unlock(&arena->mutex);
+#endif
+      return NULL;
+    }
+    new_block->next = NULL;
+    new_block->capacity = alloc_size - sizeof(ArenaBlock);
+    new_block->used = 0;
+    if (block) {
+      while (block->next)
+        block = block->next;
+      block->next = new_block;
+    } else {
+      arena->current = new_block;
+    }
+    block = new_block;
   }
 
-  void *ptr = &arena->current->data[arena->current->used];
-  arena->current->used += size;
+  void *ptr = block->data + block->used;
+  block->used += size;
+
+#ifdef ENABLE_THREADS
+  pthread_mutex_unlock(&arena->mutex);
+#endif
   return ptr;
 }
 
 void arena_free_all(Arena *arena) {
-  ArenaBlock *curr = arena->current;
-  while (curr) {
-    ArenaBlock *next = curr->next;
-    free(curr);
-    curr = next;
+  ArenaBlock *block = arena->current;
+  while (block) {
+    ArenaBlock *next = block->next;
+    free(block);
+    block = next;
   }
   arena->current = NULL;
+#ifdef ENABLE_THREADS
+  pthread_mutex_destroy(&arena->mutex);
+#endif
 }

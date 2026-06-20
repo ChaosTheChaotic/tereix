@@ -11,7 +11,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-extern Module *sem_current_mod;
+#ifdef ENABLE_THREADS
+#include "thread_pool.h"
+#include <unistd.h>
+extern pthread_mutex_t sem_global_lock;
+static pthread_mutex_t lsp_docs_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
+extern THREAD_LOCAL Module *sem_current_mod;
 extern Module *sem_main_mod;
 
 static LspState server_state = {.state = UNINITIALIZED};
@@ -89,7 +95,13 @@ uint64_t hash_module_interface(Module *mod) {
 }
 
 Doc *get_or_load_doc(const char *uri, const char *abs_path) {
+#ifdef ENABLE_THREADS
+  pthread_mutex_lock(&lsp_docs_mutex);
+#endif
   Doc *d = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
+#ifdef ENABLE_THREADS
+  pthread_mutex_unlock(&lsp_docs_mutex);
+#endif
   if (d)
     return d;
 
@@ -109,8 +121,14 @@ Doc *get_or_load_doc(const char *uri, const char *abs_path) {
   diaglist_init(&d->diags, 1024);
   d->ast_root = str_to_ast(d->ast_arena, d->txt, abs_path, &d->diags, true);
 
+#ifdef ENABLE_THREADS
+  pthread_mutex_lock(&lsp_docs_mutex);
+#endif
   map_set(&server_state.docs, d->uri, strlen(d->uri), d);
   server_state.doc_count++;
+#ifdef ENABLE_THREADS
+  pthread_mutex_unlock(&lsp_docs_mutex);
+#endif
   return d;
 }
 
@@ -1922,6 +1940,145 @@ void publish_diagnostics_from_list(const char *uri, DiagList *diags) {
   yyjson_mut_doc_free(doc);
 }
 
+#ifdef ENABLE_THREADS
+typedef struct {
+  SemCtx *sem;
+  Worklist *worklist;
+  Arena *global_arena;
+  pthread_mutex_t *arena_mutex;
+  atomic_size_t *modules_in_flight;
+  Doc *primary_doc;
+  const char *primary_abs;
+  AstNode *primary_ast;
+	HashMap *expanded;
+} LspWorkerData;
+
+bool lsp_worker_loop(void *arg) {
+  LspWorkerData *data = (LspWorkerData *)arg;
+  SemCtx *sem = data->sem;
+  Worklist *wl = data->worklist;
+
+  while (1) {
+    const char *rel_path = wl_pop(wl);
+    if (!rel_path)
+      break;
+
+    pthread_mutex_lock(data->arena_mutex);
+    const char *curr_abs = resolve_alloc(data->global_arena, rel_path);
+    bool already_expanded = false;
+    if (curr_abs) {
+      if (map_get(data->expanded, curr_abs, strlen(curr_abs)) != NULL) {
+        already_expanded = true;
+      } else {
+        map_set(data->expanded, curr_abs, strlen(curr_abs), (void *)1);
+      }
+    }
+    pthread_mutex_unlock(data->arena_mutex);
+
+    if (!curr_abs || already_expanded) {
+      atomic_fetch_sub(data->modules_in_flight, 1);
+      continue;
+    }
+
+    pthread_mutex_lock(&sem->mutex);
+    Module *mod = map_get(&sem->mod_cache, curr_abs, strlen(curr_abs));
+    if (mod == (Module *)1) { // In progress by another thread
+      pthread_mutex_unlock(&sem->mutex);
+      atomic_fetch_sub(data->modules_in_flight, 1);
+      continue;
+    }
+
+    bool is_primary = (strcmp(curr_abs, data->primary_abs) == 0);
+    if (!mod && !is_primary) {
+      map_set(&sem->mod_cache, curr_abs, strlen(curr_abs), (Module *)1);
+    }
+    pthread_mutex_unlock(&sem->mutex);
+
+    AstNode *ast = NULL;
+    if (is_primary) {
+      ast = data->primary_ast;
+    } else if (!mod) {
+      char uri_buf[8192];
+      snprintf(uri_buf, sizeof(uri_buf), "file://%s", curr_abs);
+      Doc *dep = get_or_load_doc(uri_buf, curr_abs);
+      if (dep)
+        ast = dep->ast_root;
+    }
+
+    if (!mod && ast) {
+      pthread_mutex_lock(data->arena_mutex);
+      char *perm_abs = arena_alloc(sem->arena, strlen(curr_abs) + 1);
+      strcpy(perm_abs, curr_abs);
+      const char *mod_name = extract_mod_name(sem->arena, perm_abs);
+      pthread_mutex_unlock(data->arena_mutex);
+
+      mod = new_mod(sem->arena, perm_abs, mod_name, ast);
+
+      char uri_buf[8192];
+      snprintf(uri_buf, sizeof(uri_buf), "file://%s", perm_abs);
+
+      pthread_mutex_lock(&lsp_docs_mutex);
+      Doc *dep = (Doc *)map_get(&server_state.docs, uri_buf, strlen(uri_buf));
+      pthread_mutex_unlock(&lsp_docs_mutex);
+
+      mod->mod_arena = dep ? dep->ast_arena : data->primary_doc->ast_arena;
+
+      mod->interface_hash = hash_module_interface(mod);
+      mod->interface_changed = true;
+      mod->is_dirty = true;
+
+      pthread_mutex_lock(&sem->mutex);
+      map_set(&sem->mod_cache, perm_abs, strlen(perm_abs), mod);
+      pthread_mutex_unlock(&sem->mutex);
+
+    } else if (mod && mod != (Module *)1 && is_primary) {
+      mod->ast_root = ast;
+      mod->mod_arena = data->primary_doc->ast_arena;
+
+      uint64_t new_hash = hash_module_interface(mod);
+      if (new_hash != mod->interface_hash || mod->ast_root != ast) {
+        mod->interface_changed = true;
+        mod->interface_hash = new_hash;
+      } else {
+        mod->interface_changed = false;
+      }
+      mod->is_dirty = true;
+
+      map_init(&mod->local_symbols, mod->mod_arena, 128);
+      map_init(&mod->imported_mods, mod->mod_arena, 32);
+    }
+
+    if (is_primary) {
+      sem_main_mod = mod;
+    }
+
+    if (mod && mod != (Module *)1 && mod->is_dirty && mod->ast_root) {
+      AstNode *stmt = mod->ast_root->as.block.first_stmt;
+      while (stmt) {
+        if (stmt->type == AST_USE) {
+          size_t path_len = stmt->as.use_stmt.path.len;
+          if (path_len > 2) {
+            pthread_mutex_lock(data->arena_mutex);
+            char *clean_rel =
+                arena_alloc(data->primary_doc->ast_arena, path_len - 1);
+            strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
+            clean_rel[path_len - 2] = '\0';
+            pthread_mutex_unlock(data->arena_mutex);
+
+            atomic_fetch_add(data->modules_in_flight, 1);
+            wl_push(wl, clean_rel);
+          }
+        }
+        stmt = stmt->next;
+      }
+    }
+
+    atomic_fetch_sub(data->modules_in_flight, 1);
+  }
+  return true;
+}
+#endif
+
 void compile_doc(Doc *doc) {
   if (doc->ast_arena) {
     char *abspath = absolute_from_uri(doc->uri);
@@ -1961,15 +2118,55 @@ void compile_doc(Doc *doc) {
     return;
   }
 
-  AstNode *root = str_to_ast(doc->ast_arena, doc->txt, abspath, &doc->diags, true);
+  AstNode *root =
+      str_to_ast(doc->ast_arena, doc->txt, abspath, &doc->diags, true);
 
   if (root) {
     SemCtx *sem = &server_state.proj_sem;
     sem->diags = &doc->diags;
 
     Worklist pending = {0};
+    wl_init(&pending); // Ensure inner thread locks init
     wl_push(&pending, abspath);
 
+#ifdef ENABLE_THREADS
+    int num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+    if (num_threads < 1)
+      num_threads = 1;
+    if (num_threads > 64)
+      num_threads = 64;
+
+    ThreadPool *pool = tp_create(num_threads);
+    pthread_mutex_t arena_mutex;
+    pthread_mutex_init(&arena_mutex, NULL);
+    atomic_size_t modules_in_flight = 1;
+
+    HashMap expanded;
+    map_init(&expanded, doc->ast_arena, 64);
+
+    LspWorkerData wdata = {.sem = sem,
+                           .worklist = &pending,
+                           .global_arena = sem->arena,
+                           .arena_mutex = &arena_mutex,
+                           .modules_in_flight = &modules_in_flight,
+                           .primary_doc = doc,
+                           .primary_abs = abspath,
+                           .primary_ast = root,
+                           .expanded = &expanded};
+
+    for (int i = 0; i < num_threads; i++) {
+      tp_submit(pool, (TaskFunc)lsp_worker_loop, &wdata);
+    }
+
+    while (atomic_load(&modules_in_flight) > 0) {
+      sched_yield();
+    }
+    wl_done(&pending);
+    tp_wait(pool);
+    tp_destroy(pool);
+    pthread_mutex_destroy(&arena_mutex);
+
+#else
     HashMap expanded;
     map_init(&expanded, doc->ast_arena, 64);
 
@@ -2008,11 +2205,9 @@ void compile_doc(Doc *doc) {
         mod->interface_changed = true;
         mod->is_dirty = true;
       } else if (mod && strcmp(curr_abs, abspath) == 0) {
-        // Existing module being modified right now
         mod->ast_root = root;
         mod->mod_arena = doc->ast_arena;
 
-        // Compute new interface hash
         uint64_t new_hash = hash_module_interface(mod);
         if (new_hash != mod->interface_hash || mod->ast_root != root) {
           mod->interface_changed = true;
@@ -2022,7 +2217,6 @@ void compile_doc(Doc *doc) {
         }
         mod->is_dirty = true;
 
-        // Wipe old scopes safely using the modules arena
         map_init(&mod->local_symbols, mod->mod_arena, 128);
         map_init(&mod->imported_mods, mod->mod_arena, 32);
         mod->is_dirty = true;
@@ -2031,8 +2225,6 @@ void compile_doc(Doc *doc) {
       if (strcmp(curr_abs, abspath) == 0)
         sem_main_mod = mod;
 
-      // Push dependencies (only need to re-evaluate if it's the file being
-      // edited)
       if (mod && mod->is_dirty && mod->ast_root) {
         AstNode *stmt = mod->ast_root->as.block.first_stmt;
         while (stmt) {
@@ -2050,6 +2242,7 @@ void compile_doc(Doc *doc) {
         }
       }
     }
+#endif
 
     resolve_imports(sem->arena, sem);
     propagate_dirty_state(sem);

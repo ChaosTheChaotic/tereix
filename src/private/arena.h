@@ -4,18 +4,24 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#ifdef ENABLE_THREADS
+#include <pthread.h>
+#endif
 
 #define ARENA_CHUNK_SIZE (1024 * 1024)
 
 typedef struct ArenaBlock {
-  struct ArenaBlock *next;
-  size_t capacity;
-  size_t used;
-  uint8_t data[];
+    struct ArenaBlock *next;
+    size_t capacity;
+    size_t used;
+    uint8_t data[];
 } ArenaBlock;
 
 typedef struct {
-  ArenaBlock *current;
+    ArenaBlock *current;
+#ifdef ENABLE_THREADS
+    pthread_mutex_t mutex;
+#endif
 } Arena;
 
 void *arena_alloc(Arena *arena, size_t size);

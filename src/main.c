@@ -1,16 +1,29 @@
 #include "ast_serde.h"
 #include "c_gen_types.h"
 #include "cli.h"
+#include "fmt.h"
 #include "hashutils.h"
 #include "lsp.h"
 #include "tereix_version.h"
 #include "util.h"
 #include "worklist.h"
-#include "fmt.h"
 #include <sys/stat.h>
 
-extern Module *sem_current_mod;
+#ifdef ENABLE_THREADS
+#include "thread_pool.h"
+#include <stdatomic.h>
+#include <unistd.h>
+extern pthread_mutex_t sem_global_lock;
+#endif
+extern THREAD_LOCAL Module *sem_current_mod;
 extern Module *sem_main_mod;
+
+typedef struct ParseTaskData {
+  const char *path;
+  SemCtx *sem;
+  Worklist *worklist;
+  Arena *arena;
+} ParseTaskData;
 
 void extract_dependencies(AstNode *root, void (*callback)(Token callee_name)) {
   if (!root)
@@ -266,95 +279,125 @@ void propagate_global_invalidation(SemCtx *sem) {
   arena_free_all(&temp_arena);
 }
 
-void compile_project(const CompileOptions *restrict opts) {
-  ensure_cache_dir();
-  Arena arena = {0};
-  SemCtx sem = {0};
-  sem_init(&sem, &arena);
+#ifdef ENABLE_THREADS
+typedef struct {
+  SemCtx *sem;
+  Worklist *worklist;
+  Arena *global_arena;
+  pthread_mutex_t *global_arena_mutex;
+  volatile int *error_occurred;
+  atomic_size_t *modules_in_flight;
+  uint64_t env_hash;
+} WorkerData;
 
-  char env_sig[2048] = {0};
-  int sig_len = snprintf(env_sig, sizeof(env_sig), "%s", TEREIX_BUILD_HASH);
-  // Hash the environment signature
-  uint64_t env_hash = hash_string(env_sig, sig_len);
+bool worker_loop(void *arg) {
+  WorkerData *data = (WorkerData *)arg;
+  SemCtx *sem = data->sem;
+  Worklist *wl = data->worklist;
+  Arena *global = data->global_arena;
+  pthread_mutex_t *arena_mutex = data->global_arena_mutex;
+  volatile int *error_flag = data->error_occurred;
+  atomic_size_t *in_flight = data->modules_in_flight;
+  uint64_t env_hash = data->env_hash;
 
-  // Initialize module mapping tracking configurations
-  sem_current_mod = NULL;
-  sem_main_mod = NULL;
+  while (1) {
+    const char *rel_path = wl_pop(wl);
+    if (!rel_path)
+      break; // worklist done
 
-  Worklist pending = {0};
-  wl_push(&pending, opts->input_file);
-
-  const char *current_path;
-  while ((current_path = wl_pop(&pending)) != NULL) {
-    const char *abs_path = resolve_alloc(&arena, current_path);
-    if (!abs_path || map_get(&sem.mod_cache, abs_path, strlen(abs_path)))
+    const char *abs_path = resolve_alloc(global, rel_path);
+    if (!abs_path) {
+      fprintf(stderr, "Failed to resolve path: %s\n", rel_path);
+      *error_flag = 1;
+      atomic_fetch_sub(in_flight, 1);
       continue;
+    }
 
-    const char *content = load_file(abs_path);
+    pthread_mutex_lock(&sem->mutex);
+    Module *existing = map_get(&sem->mod_cache, abs_path, strlen(abs_path));
+    if (existing) {
+      pthread_mutex_unlock(&sem->mutex);
+      atomic_fetch_sub(in_flight, 1);
+      continue;
+    }
+    map_set(&sem->mod_cache, abs_path, strlen(abs_path),
+            (Module *)1); // (Module*)1 acts as in progress
+    pthread_mutex_unlock(&sem->mutex);
+
+    // Create per module arena
+    pthread_mutex_lock(arena_mutex);
+    Arena *mod_arena = arena_alloc(global, sizeof(Arena));
+    *mod_arena = (Arena){0};
+    pthread_mutex_unlock(arena_mutex);
+
+    const char *content = load_file_into_arena(mod_arena, abs_path);
+    if (!content) {
+      fprintf(stderr, "Failed to load file: %s\n", abs_path);
+      *error_flag = 1;
+      atomic_fetch_sub(in_flight, 1);
+      continue;
+    }
+
     uint64_t file_hash = hash_string(content, strlen(content));
-		uint64_t curr_hash = combine_hash(file_hash, env_hash);
-    uint64_t path_hash = hash_string(abs_path, strlen(abs_path));
+    uint64_t curr_hash = combine_hash(file_hash, env_hash);
 
-    char cache_file[512];
-    char meta_file[512];
+    char cache_file[512], meta_file[512];
+    uint64_t path_hash = hash_string(abs_path, strlen(abs_path));
     snprintf(cache_file, sizeof(cache_file), ".tx_cache/%lu.cache", path_hash);
     snprintf(meta_file, sizeof(meta_file), ".tx_cache/%lu.meta", path_hash);
+
+    uint64_t cached_content_hash = 0;
+    FILE *fp = fopen(cache_file, "rb");
+    if (fp) {
+      if (fread(&cached_content_hash, sizeof(uint64_t), 1, fp) != 1)
+        cached_content_hash = 0;
+      fclose(fp);
+    }
 
     AstNode *ast = NULL;
     bool cache_loaded = false;
     DeclMetadata *meta = NULL;
 
-    // Read the file level content hash
-    FILE *fp = fopen(cache_file, "rb");
-    uint64_t cached_content_hash = 0;
-    if (fp) {
-      if (fread(&cached_content_hash, sizeof(uint64_t), 1, fp) != 1) {
-        cached_content_hash = 0;
-      }
-      fclose(fp);
-    }
-
     if (cached_content_hash == curr_hash) {
-      // Pass an offset to skip the header hash (8 bytes)
-      ast = cache_read_ast(&arena, cache_file, content, sizeof(uint64_t));
+      ast = cache_read_ast(mod_arena, cache_file, content, sizeof(uint64_t));
       if (ast) {
-        printf("Cache hit for %s\n", abs_path);
         cache_loaded = true;
-        // Load clean metadata since the file didn't change
-        meta = cache_read_decl_meta(&arena, meta_file, content);
+        meta = cache_read_decl_meta(mod_arena, meta_file, content);
         if (meta) {
-          for (DeclMetadata *m = meta; m; m = m->next) {
+          for (DeclMetadata *m = meta; m; m = m->next)
             m->is_dirty = false;
-          }
         }
       }
     }
 
     if (!cache_loaded) {
-      printf("Compiling %s\n", abs_path);
-
       DiagList diags;
       diaglist_init(&diags, 1024);
-
-      ast = str_to_ast(&arena, content, abs_path, &diags, false);
-
+      ast = str_to_ast(mod_arena, content, abs_path, &diags, false);
       if (!ast) {
+        pthread_mutex_lock(&sem->mutex);
         for (size_t i = 0; i < diags.count; i++) {
-          printf("Error on %u:%u in file %s: %s\n", diags.items[i].start_line,
-                 diags.items[i].start_char, diags.items[i].file,
-                 diags.items[i].message);
+          Token tok = {
+              .start = NULL,
+              .len = 0,
+              .line = diags.items[i].start_line,
+              .col = diags.items[i].start_char};
+          sem_report(sem, DIAG_ERROR, tok, "%s", diags.items[i].message);
         }
-        fprintf(stderr, "No AST found after trying to parse %s\n", abs_path);
-        exit(1);
+        pthread_mutex_unlock(&sem->mutex);
+        diaglist_free(&diags);
+        *error_flag = 1;
+        atomic_fetch_sub(in_flight, 1);
+        continue;
       }
       diaglist_free(&diags);
 
-      meta = analyze_module_declarations(&arena, ast);
-      DeclMetadata *old_meta = cache_read_decl_meta(&arena, meta_file, content);
-
+      meta = analyze_module_declarations(mod_arena, ast);
+      DeclMetadata *old_meta =
+          cache_read_decl_meta(mod_arena, meta_file, content);
       propagate_declaration_invalidation(old_meta, meta);
 
-      // Early dirty flag sync so we know what is safe to splice
+      // Sync dirty flags to AST nodes
       AstNode *stmt = ast->as.block.first_stmt;
       while (stmt) {
         Token name = {0};
@@ -382,18 +425,16 @@ void compile_project(const CompileOptions *restrict opts) {
         stmt = stmt->next;
       }
 
-      // Swap fully typed cached nodes into the fresh AST
+      // Splice cached typed nodes
       AstNode *old_ast =
-          cache_read_ast(&arena, cache_file, content, sizeof(uint64_t));
+          cache_read_ast(mod_arena, cache_file, content, sizeof(uint64_t));
       AstNode **ptr = &ast->as.block.first_stmt;
-
       while (*ptr) {
         AstNode *curr = *ptr;
         if (!curr->is_dirty &&
             (curr->type == AST_FUNC || curr->type == AST_VAR_DECL ||
              curr->type == AST_STRUCT || curr->type == AST_UNION ||
              curr->type == AST_ENUM)) {
-
           bool spliced = false;
           if (old_ast) {
             AstNode *old_stmt = old_ast->as.block.first_stmt;
@@ -402,17 +443,15 @@ void compile_project(const CompileOptions *restrict opts) {
                   old_stmt->type == curr->type) {
                 old_stmt->next = curr->next;
                 old_stmt->is_dirty = false;
-                *ptr = old_stmt; // Splice it in
+                *ptr = old_stmt;
                 spliced = true;
                 break;
               }
               old_stmt = old_stmt->next;
             }
           }
-
           if (!spliced) {
             curr->is_dirty = true;
-
             Token name = {0};
             if (curr->type == AST_FUNC)
               name = curr->as.func_def.fn_name;
@@ -424,12 +463,11 @@ void compile_project(const CompileOptions *restrict opts) {
               name = curr->as.enum_def.enumn;
             else if (curr->type == AST_VAR_DECL)
               name = curr->as.var_decl.id;
-
             if (name.start) {
               for (DeclMetadata *m = meta; m; m = m->next) {
                 if (m->name.len == name.len &&
                     memcmp(m->name.start, name.start, name.len) == 0) {
-                  m->is_dirty = true; // Sync metadata back so downstream knows
+                  m->is_dirty = true;
                   break;
                 }
               }
@@ -438,7 +476,246 @@ void compile_project(const CompileOptions *restrict opts) {
         }
         ptr = &(*ptr)->next;
       }
+      cache_write_decl_meta(meta_file, meta, content);
+    }
 
+    const char *mod_name = extract_mod_name(mod_arena, abs_path);
+    Module *mod = new_mod(mod_arena, abs_path, mod_name, ast);
+    mod->content_hash = curr_hash;
+    mod->meta = meta;
+    mod->content = content;
+    mod->needs_cache_write = !cache_loaded;
+
+    pthread_mutex_lock(&sem->mutex);
+    map_set(&sem->mod_cache, abs_path, strlen(abs_path), mod);
+    pthread_mutex_unlock(&sem->mutex);
+
+    // Push use statement dependencies
+    AstNode *stmt = ast->as.block.first_stmt;
+    while (stmt) {
+      if (stmt->type == AST_USE) {
+        size_t path_len = stmt->as.use_stmt.path.len;
+        if (path_len > 2) {
+          char *clean_rel = arena_alloc(mod_arena, path_len - 1);
+          strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
+          clean_rel[path_len - 2] = '\0';
+          atomic_fetch_add(in_flight, 1);
+          wl_push(wl, clean_rel);
+        }
+      }
+      stmt = stmt->next;
+    }
+
+    atomic_fetch_sub(in_flight, 1);
+  }
+  return true;
+}
+#endif // ENABLE_THREADS
+
+void compile_project(const CompileOptions *restrict opts) {
+  ensure_cache_dir();
+  Arena arena = {0};
+  SemCtx sem = {0};
+  sem_init(&sem, &arena);
+
+  char env_sig[2048] = {0};
+  int sig_len = snprintf(env_sig, sizeof(env_sig), "%s", TEREIX_BUILD_HASH);
+  uint64_t env_hash = hash_string(env_sig, sig_len);
+
+  sem_current_mod = NULL;
+  sem_main_mod = NULL;
+
+  Worklist pending = {0};
+  wl_init(&pending);
+
+  // Push the starting module
+  wl_push(&pending, opts->input_file);
+
+#ifdef ENABLE_THREADS
+  int num_threads = opts->thread_count;
+  if (num_threads <= 0) {
+    num_threads = sysconf(_SC_NPROCESSORS_ONLN);
+    if (num_threads < 1)
+      num_threads = 1;
+    if (num_threads > 64)
+      num_threads = 64;
+  }
+
+  ThreadPool *pool = tp_create(num_threads);
+  pthread_mutex_t arena_mutex;
+  pthread_mutex_init(&arena_mutex, NULL);
+  volatile int error_occurred = 0;
+  atomic_size_t modules_in_flight = 1; // Initial path pushed
+
+  WorkerData wdata = {.sem = &sem,
+                      .worklist = &pending,
+                      .global_arena = &arena,
+                      .global_arena_mutex = &arena_mutex,
+                      .error_occurred = &error_occurred,
+                      .modules_in_flight = &modules_in_flight,
+                      .env_hash = env_hash};
+
+  // Submit one task per thread each task will loop until worklist is done
+  for (int i = 0; i < num_threads; i++) {
+    tp_submit(pool, (TaskFunc)worker_loop, &wdata);
+  }
+
+  // Wait until all modules have been processed
+  while (atomic_load(&modules_in_flight) > 0) {
+    // Yield to avoid busy‑waiting
+    sched_yield();
+  }
+  wl_done(&pending); // signal workers that no more items will arrive
+
+  tp_wait(pool);
+  tp_destroy(pool);
+  pthread_mutex_destroy(&arena_mutex);
+
+  if (error_occurred) {
+    fprintf(stderr, "Errors occurred during parsing, exiting.\n");
+    exit(1);
+  }
+#else
+  const char *current_path;
+	unsigned int single_thread_error = 0;
+  while ((current_path = wl_pop(&pending)) != NULL) {
+    const char *abs_path = resolve_alloc(&arena, current_path);
+    if (!abs_path || map_get(&sem.mod_cache, abs_path, strlen(abs_path)))
+      continue;
+
+    const char *content = load_file(abs_path);
+    uint64_t file_hash = hash_string(content, strlen(content));
+    uint64_t curr_hash = combine_hash(file_hash, env_hash);
+    uint64_t path_hash = hash_string(abs_path, strlen(abs_path));
+
+    char cache_file[512], meta_file[512];
+    snprintf(cache_file, sizeof(cache_file), ".tx_cache/%lu.cache", path_hash);
+    snprintf(meta_file, sizeof(meta_file), ".tx_cache/%lu.meta", path_hash);
+
+    AstNode *ast = NULL;
+    bool cache_loaded = false;
+    DeclMetadata *meta = NULL;
+
+    uint64_t cached_content_hash = 0;
+    FILE *fp = fopen(cache_file, "rb");
+    if (fp) {
+      if (fread(&cached_content_hash, sizeof(uint64_t), 1, fp) != 1)
+        cached_content_hash = 0;
+      fclose(fp);
+    }
+
+    if (cached_content_hash == curr_hash) {
+      ast = cache_read_ast(&arena, cache_file, content, sizeof(uint64_t));
+      if (ast) {
+        printf("Cache hit for %s\n", abs_path);
+        cache_loaded = true;
+        meta = cache_read_decl_meta(&arena, meta_file, content);
+        if (meta) {
+          for (DeclMetadata *m = meta; m; m = m->next)
+            m->is_dirty = false;
+        }
+      }
+    }
+
+    if (!cache_loaded) {
+      printf("Compiling %s\n", abs_path);
+      DiagList diags;
+      diaglist_init(&diags, 1024);
+      ast = str_to_ast(&arena, content, abs_path, &diags, false);
+      if (!ast) {
+        for (size_t i = 0; i < diags.count; i++) {
+          Token tok = {.start = NULL,
+                       .len = 0,
+                       .line = diags.items[i].start_line,
+                       .col = diags.items[i].start_char};
+          sem_report(&sem, DIAG_ERROR, tok, "%s", diags.items[i].message);
+        }
+        diaglist_free(&diags);
+        single_thread_error = 1;
+        continue;
+      }
+      diaglist_free(&diags);
+
+      meta = analyze_module_declarations(&arena, ast);
+      DeclMetadata *old_meta = cache_read_decl_meta(&arena, meta_file, content);
+      propagate_declaration_invalidation(old_meta, meta);
+
+      AstNode *stmt = ast->as.block.first_stmt;
+      while (stmt) {
+        Token name = {0};
+        if (stmt->type == AST_FUNC)
+          name = stmt->as.func_def.fn_name;
+        else if (stmt->type == AST_STRUCT)
+          name = stmt->as.struct_def.structn;
+        else if (stmt->type == AST_UNION)
+          name = stmt->as.union_def.unionn;
+        else if (stmt->type == AST_ENUM)
+          name = stmt->as.enum_def.enumn;
+        else if (stmt->type == AST_VAR_DECL)
+          name = stmt->as.var_decl.id;
+        stmt->is_dirty = true;
+        if (name.start) {
+          for (DeclMetadata *m = meta; m; m = m->next) {
+            if (m->name.len == name.len &&
+                memcmp(m->name.start, name.start, name.len) == 0) {
+              stmt->is_dirty = m->is_dirty;
+              break;
+            }
+          }
+        }
+        stmt = stmt->next;
+      }
+
+      AstNode *old_ast =
+          cache_read_ast(&arena, cache_file, content, sizeof(uint64_t));
+      AstNode **ptr = &ast->as.block.first_stmt;
+      while (*ptr) {
+        AstNode *curr = *ptr;
+        if (!curr->is_dirty &&
+            (curr->type == AST_FUNC || curr->type == AST_VAR_DECL ||
+             curr->type == AST_STRUCT || curr->type == AST_UNION ||
+             curr->type == AST_ENUM)) {
+          bool spliced = false;
+          if (old_ast) {
+            AstNode *old_stmt = old_ast->as.block.first_stmt;
+            while (old_stmt) {
+              if (old_stmt->node_hash == curr->node_hash &&
+                  old_stmt->type == curr->type) {
+                old_stmt->next = curr->next;
+                old_stmt->is_dirty = false;
+                *ptr = old_stmt;
+                spliced = true;
+                break;
+              }
+              old_stmt = old_stmt->next;
+            }
+          }
+          if (!spliced) {
+            curr->is_dirty = true;
+            Token name = {0};
+            if (curr->type == AST_FUNC)
+              name = curr->as.func_def.fn_name;
+            else if (curr->type == AST_STRUCT)
+              name = curr->as.struct_def.structn;
+            else if (curr->type == AST_UNION)
+              name = curr->as.union_def.unionn;
+            else if (curr->type == AST_ENUM)
+              name = curr->as.enum_def.enumn;
+            else if (curr->type == AST_VAR_DECL)
+              name = curr->as.var_decl.id;
+            if (name.start) {
+              for (DeclMetadata *m = meta; m; m = m->next) {
+                if (m->name.len == name.len &&
+                    memcmp(m->name.start, name.start, name.len) == 0) {
+                  m->is_dirty = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        ptr = &(*ptr)->next;
+      }
       cache_write_decl_meta(meta_file, meta, content);
     }
 
@@ -449,10 +726,8 @@ void compile_project(const CompileOptions *restrict opts) {
     mod->content = content;
     mod->needs_cache_write = !cache_loaded;
 
-    // Track the entry main module layer context first
-    if (sem_main_mod == NULL) {
+    if (sem_main_mod == NULL)
       sem_main_mod = mod;
-    }
 
     if (opts->print_ast) {
       printf("Module: %s\n", mod_name);
@@ -475,21 +750,21 @@ void compile_project(const CompileOptions *restrict opts) {
       stmt = stmt->next;
     }
   }
-
+  if (single_thread_error) {
+    fprintf(stderr, "Errors occurred during parsing, exiting.\n");
+    exit(1);
+  }
   printf("AST Construction complete.\n");
+#endif // ENABLE_THREADS
 
-  // Run the cross-module invalidation engine
   propagate_global_invalidation(&sem);
 
   bool requires_rebuild = false;
-
-  // Sync the metadata dirty flags directly onto the AST nodes
   for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
     HashEntry *entry = sem.mod_cache.buckets[i];
     while (entry) {
       Module *mod = (Module *)entry->value;
       sync_dirty_flags_to_ast(mod);
-
       AstNode *stmt = mod->ast_root->as.block.first_stmt;
       while (stmt) {
         if (stmt->is_dirty)
@@ -523,7 +798,6 @@ void compile_project(const CompileOptions *restrict opts) {
       entry = entry->next;
     }
   }
-
   printf("Symbol collection complete.\n");
 
   ScopeStack ss;
@@ -536,11 +810,9 @@ void compile_project(const CompileOptions *restrict opts) {
       ss.count = 0;
       sem_current_mod = mod;
       resolve_scopes(&arena, mod, &ss, &sem);
-
       entry = entry->next;
     }
   }
-
   printf("Scope resolution complete.\n");
 
   for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
@@ -549,13 +821,12 @@ void compile_project(const CompileOptions *restrict opts) {
       Module *mod = (Module *)entry->value;
       sem_current_mod = mod;
       type_check_ast(&arena, mod->ast_root, &sem);
-
       entry = entry->next;
     }
   }
-
   printf("Type checking complete.\n");
 
+  // Write caches (now with typed ASTs)
   for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
     HashEntry *entry = sem.mod_cache.buckets[i];
     while (entry) {
@@ -565,8 +836,6 @@ void compile_project(const CompileOptions *restrict opts) {
         uint64_t path_hash = hash_string(mod->abs_path, strlen(mod->abs_path));
         snprintf(cache_file, sizeof(cache_file), ".tx_cache/%lu.cache",
                  path_hash);
-
-        // Write the hash header, then the fully typed AST
         FILE *out = fopen(cache_file, "wb");
         if (out) {
           fwrite(&mod->content_hash, sizeof(uint64_t), 1, out);
@@ -586,27 +855,16 @@ void compile_project(const CompileOptions *restrict opts) {
     HashEntry *entry = sem.mod_cache.buckets[i];
     while (entry) {
       Module *mod = entry->value;
-
-      if (strncmp(mod->abs_path, abs_path, strlen(abs_path)) == 0) {
+      if (strcmp(mod->abs_path, abs_path) == 0) {
         printf("Transpiling main module: %s\n", opts->input_file);
-
         const char *base = strrchr(opts->input_file, '/');
-        if (base) {
-          base++;
-        } else {
-          base = opts->input_file;
-        }
+        base = base ? base + 1 : opts->input_file;
 
         const char *bin_name;
         char derived_name[256];
         if (opts->as.build.output_file) {
           bin_name = opts->as.build.output_file;
         } else {
-          const char *base = strrchr(opts->input_file, '/');
-          if (base)
-            base++;
-          else
-            base = opts->input_file;
           strncpy(derived_name, base, sizeof(derived_name) - 1);
           derived_name[sizeof(derived_name) - 1] = '\0';
           char *dot = strrchr(derived_name, '.');
@@ -615,8 +873,6 @@ void compile_project(const CompileOptions *restrict opts) {
           bin_name = derived_name;
         }
 
-        // Build compiler flags array: start with standard flags, then user
-        // extra flags
         const char *std_flags[] = {"-O3", "-flto", "-Wno-strict-prototypes",
                                    "-Wextra", "-Wpedantic"};
         int total_flags = 5 + opts->as.build.extra_cflag_count;
@@ -629,21 +885,20 @@ void compile_project(const CompileOptions *restrict opts) {
           all_flags[idx++] = opts->as.build.extra_cflags[i];
         all_flags[idx] = NULL;
 
-        bool suc =
-            output_to_c_and_compile(&sem, bin_name, opts->as.build.compiler, all_flags,
-                                    total_flags, &arena, main_mod, opts->as.build.keep_c_files);
+        bool suc = output_to_c_and_compile(
+            &sem, bin_name, opts->as.build.compiler, all_flags, total_flags,
+            &arena, main_mod, opts->as.build.keep_c_files);
         if (suc)
           printf("Compiled successfully\n");
         else
           fprintf(stderr, "Failed to compile %s\n", opts->input_file);
       }
-      break;
+      entry = entry->next;
     }
-    entry = entry->next;
   }
 
   if (pending.paths)
-    free(pending.paths);
+    free((void *)pending.paths);
   sem_deinit(&sem);
   arena_free_all(&arena);
 }
@@ -664,9 +919,9 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-	if (opts.cmd == CMD_BUILD)
-		compile_project(&opts);
-	else if (opts.cmd == CMD_FMT)
-		fmt_project(&opts);
+  if (opts.cmd == CMD_BUILD)
+    compile_project(&opts);
+  else if (opts.cmd == CMD_FMT)
+    fmt_project(&opts);
   return 0;
 }

@@ -10,9 +10,10 @@ typedef enum {
 
 typedef struct {
   Cmd cmd;
+  const char *input_file;
+  unsigned int thread_count;
   bool help;
   bool print_ast;
-  const char *input_file;
   union {
     struct {
       const char *compiler;
