@@ -1423,10 +1423,11 @@ bool fmt_worker_loop(void *arg) {
             char *clean_rel = arena_alloc(data->global_arena, path_len - 1);
             strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
+            const char *normalized = normalize_module_path(data->global_arena, clean_rel);
             pthread_mutex_unlock(data->global_mutex);
 
             atomic_fetch_add(data->files_in_flight, 1);
-            wl_push(data->worklist, clean_rel);
+            wl_push(data->worklist, normalized);
           }
         }
         stmt = stmt->next;
@@ -1573,9 +1574,10 @@ bool fmt_project(const CompileOptions *restrict opts) {
             char *clean_rel = arena_alloc(&arena, path_len - 1);
             strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
+            const char *normalized = normalize_module_path(&arena, clean_rel);
 
             files_in_flight++;
-            wl_push(&pending, clean_rel);
+            wl_push(&pending, normalized);
           }
         }
         stmt = stmt->next;

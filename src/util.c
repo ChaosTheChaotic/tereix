@@ -175,3 +175,14 @@ const char *load_file_into_arena(Arena *arena, const char *path) {
   buf[fsize] = '\0';
   return buf;
 }
+
+const char *normalize_module_path(Arena *arena, const char *path) {
+  size_t len = strlen(path);
+  if (len >= 3 && strcmp(path + len - 3, ".tx") == 0) {
+    return path;
+  } else {
+    char *new_path = arena_alloc(arena, len + 4);
+    sprintf(new_path, "%s.tx", path);
+    return new_path;
+  }
+}

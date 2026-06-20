@@ -619,6 +619,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
       char *rel_path = arena_alloc(&tmp_arena, path_tok.len - 1);
       strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
       rel_path[path_tok.len - 2] = '\0';
+      const char *normalized = normalize_module_path(&tmp_arena, rel_path);
 
       char *current_abs = absolute_from_uri(uri);
       if (current_abs) {
@@ -626,11 +627,11 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
         if (last_slash) {
           *last_slash = '\0';
           char full_path[PATH_MAX * 2];
-          if (rel_path[0] == '/') {
-            snprintf(full_path, sizeof(full_path), "%s", rel_path);
+          if (normalized[0] == '/') {
+            snprintf(full_path, sizeof(full_path), "%s", normalized);
           } else {
             snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
-                     rel_path);
+                     normalized);
           }
           char *resolved = realpath(full_path, NULL);
           if (resolved) {
@@ -1254,6 +1255,8 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
               char rel_path[PATH_MAX];
               strncpy(rel_path, pt.start + 1, pt.len - 2);
               rel_path[pt.len - 2] = '\0';
+              const char *normalized =
+                  normalize_module_path(&tmp_arena, rel_path);
 
               char *current_abs = absolute_from_uri(uri);
               if (current_abs) {
@@ -1262,16 +1265,16 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                   *last_slash = '\0';
 
                 char full_path[PATH_MAX * 2];
-                if (rel_path[0] == '/')
-                  snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                if (normalized[0] == '/')
+                  snprintf(full_path, sizeof(full_path), "%s", normalized);
                 else
                   snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
-                           rel_path);
+                           normalized);
 
                 char *resolved = realpath(full_path, NULL);
                 // Fallback to library search path if local realpath fails
                 if (!resolved) {
-                  const char *lib_res = resolve_alloc(&tmp_arena, rel_path);
+                  const char *lib_res = resolve_alloc(&tmp_arena, normalized);
                   if (lib_res)
                     resolved = strdup(lib_res);
                 }
@@ -1487,17 +1490,19 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                   char rel_path[PATH_MAX];
                   strncpy(rel_path, pt.start + 1, pt.len - 2);
                   rel_path[pt.len - 2] = '\0';
+                  const char *normalized =
+                      normalize_module_path(&tmp_arena, rel_path);
                   char *current_abs = absolute_from_uri(uri);
                   if (current_abs) {
                     char *last_slash = strrchr(current_abs, '/');
                     if (last_slash)
                       *last_slash = '\0';
                     char full_path[PATH_MAX * 2];
-                    if (rel_path[0] == '/')
-                      snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                    if (normalized[0] == '/')
+                      snprintf(full_path, sizeof(full_path), "%s", normalized);
                     else
                       snprintf(full_path, sizeof(full_path), "%s/%s",
-                               current_abs, rel_path);
+                               current_abs, normalized);
                     char *resolved = realpath(full_path, NULL);
                     if (resolved) {
                       char target_uri[8192];
@@ -1563,17 +1568,19 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                   char rel_path[PATH_MAX];
                   strncpy(rel_path, pt.start + 1, pt.len - 2);
                   rel_path[pt.len - 2] = '\0';
+                  const char *normalized =
+                      normalize_module_path(&tmp_arena, rel_path);
                   char *current_abs = absolute_from_uri(uri);
                   if (current_abs) {
                     char *last_slash = strrchr(current_abs, '/');
                     if (last_slash)
                       *last_slash = '\0';
                     char full_path[PATH_MAX * 2];
-                    if (rel_path[0] == '/')
-                      snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                    if (normalized[0] == '/')
+                      snprintf(full_path, sizeof(full_path), "%s", normalized);
                     else
                       snprintf(full_path, sizeof(full_path), "%s/%s",
-                               current_abs, rel_path);
+                               current_abs, normalized);
                     char *resolved = realpath(full_path, NULL);
                     if (resolved) {
                       char target_uri[8192];
@@ -1964,7 +1971,8 @@ bool lsp_worker_loop(void *arg) {
       break;
 
     pthread_mutex_lock(data->arena_mutex);
-    const char *curr_abs = resolve_alloc(data->global_arena, rel_path);
+    const char *normalized = normalize_module_path(data->global_arena, rel_path);
+    const char *curr_abs = resolve_alloc(data->global_arena, normalized);
     bool already_expanded = false;
     if (curr_abs) {
       if (map_get(data->expanded, curr_abs, strlen(curr_abs)) != NULL) {
@@ -2556,6 +2564,8 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
                 char rel_path[PATH_MAX];
                 strncpy(rel_path, pt.start + 1, pt.len - 2);
                 rel_path[pt.len - 2] = '\0';
+                const char *normalized =
+                    normalize_module_path(&tmp_arena, rel_path);
 
                 char *current_abs = absolute_from_uri(uri);
                 if (current_abs) {
@@ -2564,11 +2574,11 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
                     *last_slash = '\0';
 
                   char full_path[PATH_MAX * 2];
-                  if (rel_path[0] == '/')
-                    snprintf(full_path, sizeof(full_path), "%s", rel_path);
+                  if (normalized[0] == '/')
+                    snprintf(full_path, sizeof(full_path), "%s", normalized);
                   else
                     snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
-                             rel_path);
+                             normalized);
 
                   char *resolved = realpath(full_path, NULL);
                   if (resolved) {

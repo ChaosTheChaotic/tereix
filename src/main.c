@@ -499,8 +499,10 @@ bool worker_loop(void *arg) {
           char *clean_rel = arena_alloc(mod_arena, path_len - 1);
           strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
           clean_rel[path_len - 2] = '\0';
+          const char *normalized =
+              normalize_module_path(data->global_arena, clean_rel);
           atomic_fetch_add(in_flight, 1);
-          wl_push(wl, clean_rel);
+          wl_push(wl, normalized);
         }
       }
       stmt = stmt->next;
@@ -744,7 +746,8 @@ void compile_project(const CompileOptions *restrict opts) {
           char *clean_rel = arena_alloc(&arena, path_len - 1);
           strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
           clean_rel[path_len - 2] = '\0';
-          wl_push(&pending, clean_rel);
+          const char *normalized = normalize_module_path(&arena, clean_rel);
+          wl_push(&pending, normalized);
         }
       }
       stmt = stmt->next;

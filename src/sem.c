@@ -288,7 +288,8 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
             char *clean_rel = arena_alloc(arena, path_len - 1);
             strncpy(clean_rel, raw_path + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
-            const char *abs_import_path = resolve_alloc(arena, clean_rel);
+            const char *normalized = normalize_module_path(arena, clean_rel);
+            const char *abs_import_path = resolve_alloc(arena, normalized);
 
             Module *imported_mod = map_get(&sem->mod_cache, abs_import_path,
                                            strlen(abs_import_path));

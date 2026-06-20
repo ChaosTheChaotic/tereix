@@ -218,6 +218,22 @@ static void test_file_is_identical_nonexistent(void **state) {
     sb_free(&sb);
 }
 
+static void test_use_normalization_tx(void **state) {
+	(void)state;
+    Arena arena = {0};
+		const char *test_path_with_tx = "test.tx";
+		const char *normalized = normalize_module_path(&arena, test_path_with_tx);
+		assert_string_equal(test_path_with_tx, normalized);
+}
+
+static void test_use_normalization(void **state) {
+	(void)state;
+    Arena arena = {0};
+		const char *test_path = "test";
+		const char *normalized = normalize_module_path(&arena, test_path);
+		assert_string_equal(normalized, "test.tx");
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_resolve_alloc_valid_path),
@@ -244,6 +260,9 @@ int main(void) {
         cmocka_unit_test(test_file_is_identical_false_content),
         cmocka_unit_test(test_file_is_identical_false_length),
         cmocka_unit_test(test_file_is_identical_nonexistent),
+
+				cmocka_unit_test(test_use_normalization_tx),
+				cmocka_unit_test(test_use_normalization),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

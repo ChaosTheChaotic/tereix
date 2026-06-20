@@ -31,4 +31,6 @@ void ensure_cache_dir();
 
 const char *load_file_into_arena(Arena *arena, const char *path);
 
+const char *normalize_module_path(Arena *arena, const char *path);
+
 #endif // !UTIL_H

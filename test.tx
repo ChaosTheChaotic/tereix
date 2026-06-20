@@ -1,4 +1,4 @@
-use "testai.tx";
+use "testai";
 
 threadlocal i32 a = 0 - 1;
 extern threadlocal i32 ea = 0 - 1;
