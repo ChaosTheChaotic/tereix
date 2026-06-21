@@ -612,55 +612,42 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
   AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
   if (ident && ident->type == AST_USE) {
     Token path_tok = ident->as.use_stmt.path;
-    // Extract the path inside the quotes
     if (path_tok.len >= 2 && path_tok.start[0] == '"' &&
         path_tok.start[path_tok.len - 1] == '"') {
 
       char *rel_path = arena_alloc(&tmp_arena, path_tok.len - 1);
       strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
       rel_path[path_tok.len - 2] = '\0';
-      const char *normalized = normalize_module_path(&tmp_arena, rel_path);
 
       char *current_abs = absolute_from_uri(uri);
       if (current_abs) {
-        char *last_slash = strrchr(current_abs, '/');
-        if (last_slash) {
-          *last_slash = '\0';
-          char full_path[PATH_MAX * 2];
-          if (normalized[0] == '/') {
-            snprintf(full_path, sizeof(full_path), "%s", normalized);
-          } else {
-            snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
-                     normalized);
-          }
-          char *resolved = realpath(full_path, NULL);
-          if (resolved) {
-            yyjson_mut_val *root;
-            yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-            yyjson_mut_val *result = yyjson_mut_obj(jdoc);
+        const char *resolved =
+            resolve_module_path(&tmp_arena, current_abs, rel_path);
+        if (resolved) {
+          yyjson_mut_val *root;
+          yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+          yyjson_mut_val *result = yyjson_mut_obj(jdoc);
 
-            char target_uri[8192];
-            snprintf(target_uri, sizeof(target_uri), "file://%s", resolved);
-            yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
+          char target_uri[8192];
+          snprintf(target_uri, sizeof(target_uri), "file://%s", resolved);
+          yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
 
-            yyjson_mut_val *range = yyjson_mut_obj(jdoc);
-            yyjson_mut_val *start = yyjson_mut_obj(jdoc);
-            yyjson_mut_obj_add_int(jdoc, start, "line", 0);
-            yyjson_mut_obj_add_int(jdoc, start, "character", 0);
-            yyjson_mut_val *end = yyjson_mut_obj(jdoc);
-            yyjson_mut_obj_add_int(jdoc, end, "line", 0);
-            yyjson_mut_obj_add_int(jdoc, end, "character", 0);
-            yyjson_mut_obj_add_val(jdoc, range, "start", start);
-            yyjson_mut_obj_add_val(jdoc, range, "end", end);
-            yyjson_mut_obj_add_val(jdoc, result, "range", range);
-            yyjson_mut_obj_add_val(jdoc, root, "result", result);
+          yyjson_mut_val *range = yyjson_mut_obj(jdoc);
+          yyjson_mut_val *start = yyjson_mut_obj(jdoc);
+          yyjson_mut_obj_add_int(jdoc, start, "line", 0);
+          yyjson_mut_obj_add_int(jdoc, start, "character", 0);
+          yyjson_mut_val *end = yyjson_mut_obj(jdoc);
+          yyjson_mut_obj_add_int(jdoc, end, "line", 0);
+          yyjson_mut_obj_add_int(jdoc, end, "character", 0);
+          yyjson_mut_obj_add_val(jdoc, range, "start", start);
+          yyjson_mut_obj_add_val(jdoc, range, "end", end);
+          yyjson_mut_obj_add_val(jdoc, result, "range", range);
+          yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-            lsp_send_doc(jdoc);
-            free(resolved);
-            free(current_abs);
-            arena_free_all(&tmp_arena);
-            return;
-          }
+          lsp_send_doc(jdoc);
+          free(current_abs);
+          arena_free_all(&tmp_arena);
+          return;
         }
         free(current_abs);
       }
@@ -1255,30 +1242,11 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
               char rel_path[PATH_MAX];
               strncpy(rel_path, pt.start + 1, pt.len - 2);
               rel_path[pt.len - 2] = '\0';
-              const char *normalized =
-                  normalize_module_path(&tmp_arena, rel_path);
 
               char *current_abs = absolute_from_uri(uri);
               if (current_abs) {
-                char *last_slash = strrchr(current_abs, '/');
-                if (last_slash)
-                  *last_slash = '\0';
-
-                char full_path[PATH_MAX * 2];
-                if (normalized[0] == '/')
-                  snprintf(full_path, sizeof(full_path), "%s", normalized);
-                else
-                  snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
-                           normalized);
-
-                char *resolved = realpath(full_path, NULL);
-                // Fallback to library search path if local realpath fails
-                if (!resolved) {
-                  const char *lib_res = resolve_alloc(&tmp_arena, normalized);
-                  if (lib_res)
-                    resolved = strdup(lib_res);
-                }
-
+                const char *resolved =
+                    resolve_module_path(&tmp_arena, current_abs, rel_path);
                 if (resolved) {
                   char target_uri[8192];
                   snprintf(target_uri, sizeof(target_uri), "file://%s",
@@ -1297,7 +1265,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                       mod_ast = imported_doc->ast_root;
                     }
                   }
-                  free(resolved);
                 }
                 free(current_abs);
               }
@@ -1971,8 +1938,8 @@ bool lsp_worker_loop(void *arg) {
       break;
 
     pthread_mutex_lock(data->arena_mutex);
-    const char *normalized = normalize_module_path(data->global_arena, rel_path);
-    const char *curr_abs = resolve_alloc(data->global_arena, normalized);
+    const char *curr_abs =
+        resolve_module_path(data->global_arena, data->primary_abs, rel_path);
     bool already_expanded = false;
     if (curr_abs) {
       if (map_get(data->expanded, curr_abs, strlen(curr_abs)) != NULL) {
@@ -2564,23 +2531,11 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
                 char rel_path[PATH_MAX];
                 strncpy(rel_path, pt.start + 1, pt.len - 2);
                 rel_path[pt.len - 2] = '\0';
-                const char *normalized =
-                    normalize_module_path(&tmp_arena, rel_path);
 
                 char *current_abs = absolute_from_uri(uri);
                 if (current_abs) {
-                  char *last_slash = strrchr(current_abs, '/');
-                  if (last_slash)
-                    *last_slash = '\0';
-
-                  char full_path[PATH_MAX * 2];
-                  if (normalized[0] == '/')
-                    snprintf(full_path, sizeof(full_path), "%s", normalized);
-                  else
-                    snprintf(full_path, sizeof(full_path), "%s/%s", current_abs,
-                             normalized);
-
-                  char *resolved = realpath(full_path, NULL);
+                  const char *resolved =
+                      resolve_module_path(&tmp_arena, current_abs, rel_path);
                   if (resolved) {
                     char target_uri[8192];
                     snprintf(target_uri, sizeof(target_uri), "file://%s",
@@ -2599,7 +2554,6 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
                           if (t.len == ident_len &&
                               strncmp(t.start, target_name, ident_len) == 0) {
                             res.decl_node = mod_stmt;
-                            free(resolved);
                             free(current_abs);
                             goto fallback_found;
                           }
@@ -2607,7 +2561,6 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
                         mod_stmt = mod_stmt->next;
                       }
                     }
-                    free(resolved);
                   }
                   free(current_abs);
                 }

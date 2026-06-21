@@ -288,9 +288,13 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
             char *clean_rel = arena_alloc(arena, path_len - 1);
             strncpy(clean_rel, raw_path + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
-            const char *normalized = normalize_module_path(arena, clean_rel);
-            const char *abs_import_path = resolve_alloc(arena, normalized);
-
+            const char *abs_import_path =
+                resolve_module_path(arena, current_mod->abs_path, clean_rel);
+            if (!abs_import_path) {
+              sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
+                         "Module not found: %.*s", (int)path_len, raw_path);
+              return false;
+            }
             Module *imported_mod = map_get(&sem->mod_cache, abs_import_path,
                                            strlen(abs_import_path));
 

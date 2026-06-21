@@ -186,3 +186,81 @@ const char *normalize_module_path(Arena *arena, const char *path) {
     return new_path;
   }
 }
+
+const char *get_stdlib_dir() {
+#if defined(_WIN32) || defined(_WIN64)
+#define LOCAL_PREFIX "C:\\Program Files\\"
+#else
+#define LOCAL_PREFIX "/usr/local/"
+#endif
+  const char *suffix = "tereix";
+  size_t needed = strlen(LOCAL_PREFIX) + strlen(suffix) + 1;
+
+  char *path = (char *)malloc(needed);
+  if (path == NULL) {
+    return NULL;
+  }
+
+  snprintf(path, needed, "%s%s", LOCAL_PREFIX, suffix);
+
+  return path;
+}
+
+const char *resolve_module_path(Arena *arena,
+                                const char *importing_file_abs_path,
+                                const char *import_path) {
+  if (!importing_file_abs_path || !import_path)
+    return NULL;
+
+  if (import_path[0] == '/') {
+    const char *norm = normalize_module_path(arena, import_path);
+    if (check_exists(norm)) {
+      return resolve_alloc(arena, norm);
+    }
+    return NULL;
+  }
+
+  const char *norm = normalize_module_path(arena, import_path);
+
+  char *base_dir = arena_alloc(arena, strlen(importing_file_abs_path) + 1);
+  strcpy(base_dir, importing_file_abs_path);
+  char *last_slash = strrchr(base_dir, '/');
+  if (last_slash)
+    *last_slash = '\0';
+  else
+    base_dir[0] = '\0';
+
+  char candidate[PATH_MAX * 2];
+
+  if (base_dir[0]) {
+    snprintf(candidate, sizeof(candidate), "%s/%s", base_dir, norm);
+    if (check_exists(candidate)) {
+      return resolve_alloc(arena, candidate);
+    }
+  }
+
+  const char *env_paths = getenv("TX_LIB_SEARCH_PATH");
+  if (env_paths) {
+    char *env_copy = strdup(env_paths);
+    char *tok = strtok(env_copy, ":;");
+    while (tok) {
+      snprintf(candidate, sizeof(candidate), "%s/%s", tok, norm);
+      if (check_exists(candidate)) {
+        free(env_copy);
+        return resolve_alloc(arena, candidate);
+      }
+      tok = strtok(NULL, ":;");
+    }
+    free(env_copy);
+  }
+
+  const char *stdlib = get_stdlib_dir();
+  if (stdlib) {
+    snprintf(candidate, sizeof(candidate), "%s/%s", stdlib, norm);
+    if (check_exists(candidate)) {
+      return resolve_alloc(arena, candidate);
+    }
+  }
+
+  return NULL;
+}

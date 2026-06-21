@@ -499,10 +499,15 @@ bool worker_loop(void *arg) {
           char *clean_rel = arena_alloc(mod_arena, path_len - 1);
           strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
           clean_rel[path_len - 2] = '\0';
-          const char *normalized =
-              normalize_module_path(data->global_arena, clean_rel);
-          atomic_fetch_add(in_flight, 1);
-          wl_push(wl, normalized);
+          const char *abs_path =
+              resolve_module_path(data->global_arena, mod->abs_path, clean_rel);
+          if (abs_path) {
+            atomic_fetch_add(in_flight, 1);
+            wl_push(wl, abs_path);
+          } else {
+            sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
+                       "Module not found: %.*s", (int)path_len, stmt->as.use_stmt.path.start);
+          }
         }
       }
       stmt = stmt->next;
@@ -746,8 +751,15 @@ void compile_project(const CompileOptions *restrict opts) {
           char *clean_rel = arena_alloc(&arena, path_len - 1);
           strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
           clean_rel[path_len - 2] = '\0';
-          const char *normalized = normalize_module_path(&arena, clean_rel);
-          wl_push(&pending, normalized);
+          const char *abs_path =
+              resolve_module_path(&arena, mod->abs_path, clean_rel);
+          if (abs_path) {
+            atomic_fetch_add(in_flight, 1);
+            wl_push(wl, abs_path);
+          } else {
+            sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
+                       "Module not found: %.*s", (int)path_len, stmt->as.use_stmt.path.start);
+          }
         }
       }
       stmt = stmt->next;

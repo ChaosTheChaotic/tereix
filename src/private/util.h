@@ -33,4 +33,8 @@ const char *load_file_into_arena(Arena *arena, const char *path);
 
 const char *normalize_module_path(Arena *arena, const char *path);
 
+const char *resolve_module_path(Arena *arena,
+                                const char *importing_file_abs_path,
+                                const char *import_path);
+
 #endif // !UTIL_H
