@@ -9,7 +9,7 @@ CLEAN=false
 CMAKE_EXTRA_ARGS=()
 
 show_help() {
-    cat <<EOH
+	cat <<EOH
 Configure script for tereix
 
 Usage: $0 [OPTIONS] -- [CMAKE_OPTIONS]
@@ -28,40 +28,64 @@ CMake Options (can be passed after --):
   -DMARCH_NATIVE=[ON|OFF]    Build library optimized for native arch (default: OFF)
   -DDO_INSTALL=[ON|OFF]    Try to install library after it is build (default: OFF)
 	-DUSE_CACHE_COMPRESSION=[ON|OFF|AUTO] Try to use zstd for compressing the AST (default: AUTO)
+	-DALLOW_PARALLEL=[ON|OFF|AUTO] Build in capability to compile with multiple threads
 EOH
 }
 
 if ! command -v cmake &>/dev/null; then
-    echo "Error: cmake is not installed." >&2
-    exit 1
+	echo "Error: cmake is not installed." >&2
+	exit 1
 fi
 
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        -h|--help)      show_help; exit 0 ;;
--b|--build-dir)
-  [[ -z "" ]] && echo "Error: -b requires an argument" && exit 1
-  BUILD_DIR=""
-  shift 2
-  ;;
-        -c|--clean)     CLEAN=true; shift ;;
-        -g|--generator) GEN="$2"; shift 2 ;;
-        --no-ninja)     GEN="Unix Makefiles"; shift ;;
-        --)             shift; CMAKE_EXTRA_ARGS+=("$@"); break ;;
-        -D*)            CMAKE_EXTRA_ARGS+=("$1"); shift ;;
-        *)              echo "Unknown option: $1" >&2; show_help; exit 1 ;;
-    esac
+	case $1 in
+		-h | --help)
+			show_help
+			exit 0
+			;;
+		-b | --build-dir)
+			[[ -z "" ]] && echo "Error: -b requires an argument" && exit 1
+			BUILD_DIR=""
+			shift 2
+			;;
+		-c | --clean)
+			CLEAN=true
+			shift
+			;;
+		-g | --generator)
+			GEN="$2"
+			shift 2
+			;;
+		--no-ninja)
+			GEN="Unix Makefiles"
+			shift
+			;;
+		--)
+			shift
+			CMAKE_EXTRA_ARGS+=("$@")
+			break
+			;;
+		-D*)
+			CMAKE_EXTRA_ARGS+=("$1")
+			shift
+			;;
+		*)
+			echo "Unknown option: $1" >&2
+			show_help
+			exit 1
+			;;
+	esac
 done
 
 if [[ "$CLEAN" == true && -n "$BUILD_DIR" && "$BUILD_DIR" != "/" ]]; then
-    echo "Cleaning build directory: $BUILD_DIR"
-    rm -rf "$BUILD_DIR"
+	echo "Cleaning build directory: $BUILD_DIR"
+	rm -rf "$BUILD_DIR"
 else
-  echo "Refusing to clean dangerous dir"
+	echo "Refusing to clean dangerous dir"
 fi
 
 if [[ -z "$GEN" ]] && command -v ninja &>/dev/null; then
-    GEN="Ninja"
+	GEN="Ninja"
 fi
 
 CMAKE_CMD=("cmake" "-S" "$SRC_DIR" "-B" "$BUILD_DIR")
@@ -75,7 +99,7 @@ echo "Command:   ${CMAKE_CMD[*]}"
 echo "========================"
 
 if "${CMAKE_CMD[@]}"; then
-    echo "Configuration successful. Run 'cmake --build $BUILD_DIR' to compile."
+	echo "Configuration successful. Run 'cmake --build $BUILD_DIR' to compile."
 else
-    exit 1
+	exit 1
 fi
