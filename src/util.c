@@ -188,22 +188,15 @@ const char *normalize_module_path(Arena *arena, const char *path) {
 }
 
 const char *get_stdlib_dir() {
-#if defined(_WIN32) || defined(_WIN64)
-#define LOCAL_PREFIX "C:\\Program Files\\"
+#ifdef TX_STDLIB_DIR
+  return TX_STDLIB_DIR;
 #else
-#define LOCAL_PREFIX "/usr/local/"
+#if defined(_WIN32) || defined(_WIN64)
+  return "C:\\Program Files\\tereix";
+#else
+  return "/usr/local/tereix";
 #endif
-  const char *suffix = "tereix";
-  size_t needed = strlen(LOCAL_PREFIX) + strlen(suffix) + 1;
-
-  char *path = (char *)malloc(needed);
-  if (path == NULL) {
-    return NULL;
-  }
-
-  snprintf(path, needed, "%s%s", LOCAL_PREFIX, suffix);
-
-  return path;
+#endif
 }
 
 const char *resolve_module_path(Arena *arena,
