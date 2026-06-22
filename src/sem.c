@@ -209,6 +209,13 @@ bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float) {
   if (t.name.len < 2)
     return false;
 
+  if (t.name.len == 4 && strncmp(t.name.start, "size", 4) == 0) {
+    *is_signed = false;
+    *is_float = false;
+    *width = 64;
+    return true;
+  }
+
   char kind = t.name.start[0];
   if (kind == 'u' || kind == 'i' || kind == 'f') {
     *is_signed = (kind == 'i' || kind == 'f');
@@ -1225,30 +1232,47 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
             }
           }
         }
-
-        if (!is_type_compatible(left_t, right_t, false) &&
-            !is_type_compatible(right_t, left_t, false)) {
-          sem_report(ctx, DIAG_WARNING, node->as.binop.op,
-                     "Type Error at %u:%u: Incompatible operands '%.*s' and "
-                     "'%.*s' for "
-                     "'%.*s'.\n",
-                     node->as.binop.op.line, node->as.binop.op.col,
-                     left_t.name.len, left_t.name.start, right_t.name.len,
-                     right_t.name.start, node->as.binop.op.len,
-                     node->as.binop.op.start);
-        }
-
         if (node->as.binop.op.type == TOKEN_COMPARE) {
-          node->eval_type = EXPECT_BOOL;
-        } else if (item.expected) {
-          node->eval_type = *item.expected;
-        } else {
-          int l_w = 0, r_w = 0;
+          int l_w, r_w;
           bool l_s, r_s, l_f, r_f;
-          get_numeric_info(left_t, &l_w, &l_s, &l_f);
-          get_numeric_info(right_t, &r_w, &r_s, &r_f);
+          bool left_num = get_numeric_info(left_t, &l_w, &l_s, &l_f);
+          bool right_num = get_numeric_info(right_t, &r_w, &r_s, &r_f);
 
-          node->eval_type = (l_w >= r_w) ? left_t : right_t;
+          bool ptr_ok = (left_t.ptr_depth == right_t.ptr_depth &&
+                         left_t.array_dimens == right_t.array_dimens);
+
+          if (!(left_num && right_num) && !ptr_ok) {
+            sem_report(ctx, DIAG_ERROR, node->as.binop.op,
+                       "Cannot compare non‑numeric types '%.*s' and '%.*s'",
+                       left_t.name.len, left_t.name.start, right_t.name.len,
+                       right_t.name.start);
+          }
+          node->eval_type = EXPECT_BOOL;
+        } else {
+          if (!is_type_compatible(left_t, right_t, false) &&
+              !is_type_compatible(right_t, left_t, false)) {
+            sem_report(ctx, DIAG_WARNING, node->as.binop.op,
+                       "Type Error at %u:%u: Incompatible operands '%.*s' and "
+                       "'%.*s' for "
+                       "'%.*s'.\n",
+                       node->as.binop.op.line, node->as.binop.op.col,
+                       left_t.name.len, left_t.name.start, right_t.name.len,
+                       right_t.name.start, node->as.binop.op.len,
+                       node->as.binop.op.start);
+          }
+
+          if (node->as.binop.op.type == TOKEN_COMPARE) {
+            node->eval_type = EXPECT_BOOL;
+          } else if (item.expected) {
+            node->eval_type = *item.expected;
+          } else {
+            int l_w = 0, r_w = 0;
+            bool l_s, r_s, l_f, r_f;
+            get_numeric_info(left_t, &l_w, &l_s, &l_f);
+            get_numeric_info(right_t, &r_w, &r_s, &r_f);
+
+            node->eval_type = (l_w >= r_w) ? left_t : right_t;
+          }
         }
         break;
       }
