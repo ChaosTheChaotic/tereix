@@ -902,8 +902,9 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
             curr = curr->next;
           }
           for (int i = count - 1; i >= 0; i--) {
-            stack[top++] = (TCItem){arr[i], TC_VISIT_CHILDREN, NULL,
-                                    item.curr_func, false};
+            DataType *exp = (i == 0) ? item.expected : NULL;
+            stack[top++] =
+                (TCItem){arr[i], TC_VISIT_CHILDREN, exp, item.curr_func, false};
           }
           free(arr);
         }
@@ -948,10 +949,10 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_IF:
         if (node->as.if_check.elseAct)
           stack[top++] = (TCItem){node->as.if_check.elseAct, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
+                                  item.expected, item.curr_func, false};
         if (node->as.if_check.action)
           stack[top++] = (TCItem){node->as.if_check.action, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
+                                  item.expected, item.curr_func, false};
         stack[top++] = (TCItem){node->as.if_check.check, TC_VISIT_CHILDREN,
                                 &EXPECT_BOOL, item.curr_func, false};
         break;
