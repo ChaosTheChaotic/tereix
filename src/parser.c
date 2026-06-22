@@ -143,7 +143,7 @@ inline bool is_newline(char c) { return (c == '\n' || c == '\r'); }
 
 void skip_irrelevant(LexCtx *ctx) {
   while (*ctx->curr != '\0') {
-    if (isspace(*ctx->curr)) {
+    if (isspace((unsigned char)*ctx->curr)) {
       if (is_newline(*ctx->curr)) {
         ctx->line++;
         ctx->col = 0;
@@ -181,8 +181,8 @@ Token next_token(ParseCtx *pctx) {
   unsigned int len = 0;
 
   // Identifiers, Keywords, Booleans
-  if (isalpha(*ctx->curr) || *ctx->curr == '_') {
-    while (isalnum(*ctx->curr) || *ctx->curr == '_') {
+  if (isalpha((unsigned char)*ctx->curr) || *ctx->curr == '_') {
+    while (isalnum((unsigned char)*ctx->curr) || *ctx->curr == '_') {
       ctx->curr++;
       ctx->col++;
     }
@@ -199,9 +199,9 @@ Token next_token(ParseCtx *pctx) {
   }
 
   // Numeric Literals
-  else if (isdigit(*ctx->curr)) {
+  else if (isdigit((unsigned char)*ctx->curr)) {
     bool has_dot = false;
-    while (isdigit(*ctx->curr) || *ctx->curr == '.') {
+    while (isdigit((unsigned char)*ctx->curr) || *ctx->curr == '.') {
       if (*ctx->curr == '.') {
         if (has_dot)
           break;

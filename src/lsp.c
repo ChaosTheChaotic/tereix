@@ -1120,11 +1120,16 @@ int get_index_from_pos(const char *txt, int line, int character) {
   while (txt[i] != '\0') {
     if (cur_l == line && cur_c == character)
       return i;
+
     if (txt[i] == '\n') {
       cur_l++;
       cur_c = 0;
-    } else
-      cur_c++;
+    } else {
+      // Only increment the column counter if this is not a UTF-8 continuation
+      if ((txt[i] & 0xC0) != 0x80) {
+        cur_c++;
+      }
+    }
     i++;
   }
   return i; // end of string
