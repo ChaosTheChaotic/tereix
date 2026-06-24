@@ -1250,10 +1250,15 @@ bool parse_step(ParseCtx *ctx) {
   }
 
   case STATE_SIZEOF_EXPR_DONE: {
-    AstNode *expr = pop_node(ctx);
     AstNode *sz_node = ctx->node_stack[ctx->node_count - 1];
-    sz_node->as.sizeof_expr.target_expr = expr;
-
+    if (sz_node->type == AST_SIZEOF) {
+      report_error(ctx, ctx->curr, "Expected expression after sizeof");
+      sz_node->as.sizeof_expr.target_expr = NULL;
+    } else {
+      AstNode *expr = pop_node(ctx);
+      sz_node = ctx->node_stack[ctx->node_count - 1];
+      sz_node->as.sizeof_expr.target_expr = expr;
+    }
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
       adv(ctx);
       ctx->expect_operand = false;
@@ -1268,9 +1273,15 @@ bool parse_step(ParseCtx *ctx) {
   }
 
   case STATE_INDEX_DONE: {
-    AstNode *index_expr = pop_node(ctx);
-    AstNode *idx_node = ctx->node_stack[ctx->node_count - 1];
-    idx_node->as.index.index = index_expr;
+    AstNode *top_node = ctx->node_stack[ctx->node_count - 1];
+    if (top_node->type == AST_INDEX) {
+      AstNode *idx_node = pop_node(ctx);
+      idx_node->as.index.index = NULL;
+    } else {
+      AstNode *index_expr = pop_node(ctx);
+      AstNode *idx_node = ctx->node_stack[ctx->node_count - 1];
+      idx_node->as.index.index = index_expr;
+    }
 
     // Remove the dummy
     if (ctx->op_count > 0 &&
@@ -1314,19 +1325,24 @@ bool parse_step(ParseCtx *ctx) {
   }
 
   case STATE_ARRAY_ELEMENT_DONE: {
-    AstNode *element_expr = pop_node(ctx);
-    AstNode *array_node = ctx->node_stack[ctx->node_count - 1];
-
-    // Append the element to the array's linked list
-    if (array_node->as.array_lit.elements == NULL) {
-      array_node->as.array_lit.elements = element_expr;
+    AstNode *top = ctx->node_stack[ctx->node_count - 1];
+    if (top->type == AST_ARRAY_LIT &&
+        (ctx->node_count == 1 ||
+         ctx->node_stack[ctx->node_count - 2]->type != AST_ARRAY_LIT)) {
+      report_error(ctx, ctx->curr, "Expected expression in array literal");
+      // Nothing to append
     } else {
-      AstNode *curr = array_node->as.array_lit.elements;
-      while (curr->next)
-        curr = curr->next;
-      curr->next = element_expr;
+      AstNode *element_expr = pop_node(ctx);
+      AstNode *array_node = ctx->node_stack[ctx->node_count - 1];
+      if (array_node->as.array_lit.elements == NULL) {
+        array_node->as.array_lit.elements = element_expr;
+      } else {
+        AstNode *curr = array_node->as.array_lit.elements;
+        while (curr->next)
+          curr = curr->next;
+        curr->next = element_expr;
+      }
     }
-
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',') {
       adv(ctx);
     } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ']') {
@@ -2303,28 +2319,40 @@ bool parse_step(ParseCtx *ctx) {
     break;
   }
   case STATE_RET_DONE: {
-    AstNode *expr_result = pop_node(ctx);
-    AstNode *ret_node = pop_node(ctx);
-
-    ret_node->as.ret_stmt.expr = expr_result;
+    AstNode *top_node = ctx->node_stack[ctx->node_count - 1];
+    if (top_node->type == AST_RET) {
+      AstNode *ret_node = pop_node(ctx);
+      ret_node->as.ret_stmt.expr = NULL;
+    } else {
+      AstNode *expr_result = pop_node(ctx);
+      AstNode *ret_node = pop_node(ctx);
+      ret_node->as.ret_stmt.expr = expr_result;
+    }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
-    } else if (expr_result->type != AST_BLOCK) {
-      fprintf(
-          stderr,
-          "Error: Expected ';' after return expression at line %u, col %u\n",
-          ctx->lex->line, ctx->lex->col);
-      return false;
+    } else if (top_node->type != AST_RET) {
+      report_error(ctx, ctx->curr, "Expected ';' after return expression");
+      adv(ctx);
+      sync(ctx);
+      recover_state(ctx, current_state);
+      break;
     }
     break;
   }
   case STATE_VAR_INIT_DONE: {
-    AstNode *init_expr = pop_node(ctx);
-    AstNode *var_node = ctx->node_stack[ctx->node_count - 1];
-
-    var_node->as.var_decl.init = init_expr;
-
+    AstNode *top = ctx->node_stack[ctx->node_count - 1];
+    if (top->type == AST_VAR_DECL) {
+      report_error(ctx, ctx->curr,
+                   "Expected expression after '=' in variable declaration");
+      top->as.var_decl.init = NULL;
+      pop_node(ctx);
+    } else {
+      AstNode *init_expr = pop_node(ctx);
+      AstNode *var_node = ctx->node_stack[ctx->node_count - 1];
+      var_node->as.var_decl.init = init_expr;
+      pop_node(ctx);
+    }
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
     } else {
@@ -2334,8 +2362,6 @@ bool parse_step(ParseCtx *ctx) {
       recover_state(ctx, current_state);
       break;
     }
-
-    pop_node(ctx);
     break;
   }
   case STATE_IN_FUNC_ARGS: {

@@ -234,9 +234,16 @@ void format_func_signature(AstNode *func_node, char *buf, size_t size) {
                                size - offset);
 
   // Name
-  offset += snprintf(buf + offset, size - offset, " %.*s(",
-                     (int)func_node->as.func_def.fn_name.len,
-                     func_node->as.func_def.fn_name.start);
+  unsigned int written = snprintf(buf + offset, size - offset, " %.*s(",
+                                  (int)func_node->as.func_def.fn_name.len,
+                                  func_node->as.func_def.fn_name.start);
+  if (written > 0) {
+    offset += written;
+  }
+  if (offset >= size) {
+    offset = size - 1; // Clamp to prevent underflow on the next call
+    return;            // Stop writing to buffer
+  }
 
   // Parameters
   AstNode *param = func_node->as.func_def.params;
@@ -1122,10 +1129,12 @@ int get_index_from_pos(const char *txt, int line, int character) {
       return i;
 
     if (txt[i] == '\n') {
+      if (cur_l == line)
+        return i;
+
       cur_l++;
       cur_c = 0;
     } else {
-      // Only increment the column counter if this is not a UTF-8 continuation
       if ((txt[i] & 0xC0) != 0x80) {
         cur_c++;
       }
@@ -1929,7 +1938,7 @@ typedef struct {
   Doc *primary_doc;
   const char *primary_abs;
   AstNode *primary_ast;
-	HashMap *expanded;
+  HashMap *expanded;
 } LspWorkerData;
 
 bool lsp_worker_loop(void *arg) {
