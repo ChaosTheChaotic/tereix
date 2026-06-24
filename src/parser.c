@@ -1389,14 +1389,6 @@ bool parse_step(ParseCtx *ctx) {
       break;
     }
 
-    if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
-        strncmp(ctx->curr.start, "self", 4) == 0) {
-      push_state(ctx, STATE_PARSE_BLOCK);
-      push_state(ctx, STATE_EXPR_STMT_DONE);
-      push_state(ctx, STATE_IN_EXPR);
-      break;
-    }
-
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
       adv(ctx);
 
@@ -1411,6 +1403,18 @@ bool parse_step(ParseCtx *ctx) {
     }
 
     push_state(ctx, STATE_PARSE_BLOCK);
+
+    if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
+        strncmp(ctx->curr.start, "self", 4) == 0) {
+      // Decide if self is an expression or a type.
+      Token next = peek_token(ctx);
+      if (next.type != TOKEN_IDENTIF) {
+				// Declaration
+        push_state(ctx, STATE_EXPR_STMT_DONE);
+        push_state(ctx, STATE_IN_EXPR);
+        break;
+      }
+    }
 
     if (ctx->curr.type == TOKEN_KW) {
       if (strncmp(ctx->curr.start, "struct", 6) == 0 ||
@@ -1660,7 +1664,6 @@ bool parse_step(ParseCtx *ctx) {
       recover_state(ctx, current_state);
       break;
     }
-    break;
     break;
   }
 

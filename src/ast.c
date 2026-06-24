@@ -45,6 +45,9 @@ void write_ast(const char *path) {
 }
 
 void append_stmt(AstNode **head, AstNode *new_stmt) {
+  if (!new_stmt)
+    return;
+  new_stmt->next = NULL;
   if (*head == NULL) {
     *head = new_stmt;
   } else {
