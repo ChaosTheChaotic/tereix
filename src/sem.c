@@ -940,7 +940,11 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         if (item.expected) {
           inner = arena_alloc(arena, sizeof(DataType));
           *inner = *item.expected;
-          inner->ptr_depth++;
+          if (node->type == AST_ADDR_OF) {
+            inner->ptr_depth--;
+          } else {
+            inner->ptr_depth++;
+          }
         }
         stack[top++] = (TCItem){node->as.unop.operand, TC_VISIT_CHILDREN, inner,
                                 item.curr_func, false};

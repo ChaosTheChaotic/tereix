@@ -22,23 +22,25 @@ void report_error(ParseCtx *ctx, Token token, const char *fmt, ...) {
   va_list args;
   va_start(args, fmt);
   char *message = NULL;
-  int len = vasprintf(&message, fmt, args);
+  int msg_len = vasprintf(&message, fmt, args);
   va_end(args);
 
-  if (len < 0)
+  if (msg_len < 0)
     return;
 
   if (ctx->diags) {
     unsigned int line = token.line;
     unsigned int col = token.col;
-    unsigned int len = token.len;
+    unsigned int tok_len = token.len;
 
     diaglist_add(ctx->diags, DIAG_ERROR, message, ctx->lex->file, line, col,
-                 line, col + len);
+                 line, col + tok_len);
   } else {
     fprintf(stderr, "Error at line %u, col %u: %s\n", token.line, token.col,
             message);
   }
+  if (message)
+    free(message);
   ctx->err_count++;
   ctx->panic_mode = true;
 }
@@ -896,6 +898,7 @@ bool parse_step(ParseCtx *ctx) {
           push_node(ctx, vnode);
           push_state(ctx, current_state);
           push_state(ctx, STATE_VAR_INIT_DONE);
+          ctx->expect_operand = true;
           push_state(ctx, STATE_IN_EXPR);
           break;
         }
@@ -903,6 +906,7 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
           vnode->src_end = ctx->prev.start + ctx->prev.len;
         }
+        push_state(ctx, current_state);
         break;
       }
     }
