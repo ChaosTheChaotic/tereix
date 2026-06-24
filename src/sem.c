@@ -942,7 +942,7 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           *inner = *item.expected;
           if (node->type == AST_ADDR_OF) {
             inner->ptr_depth--;
-          } else {
+          } else if (node->type == AST_DEREF) {
             inner->ptr_depth++;
           }
         }

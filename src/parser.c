@@ -2623,7 +2623,7 @@ DataType parse_type(ParseCtx *ctx) {
   } else if (ctx->curr.type == TOKEN_IDENTIF ||
              is_builtin_type_kw(ctx, ctx->curr)) {
     type.name = ctx->curr;
-    if (ctx->curr.type == TOKEN_IDENTIF)
+    if (ctx->curr.type == TOKEN_IDENTIF && is_builtin_type_kw(ctx, ctx->curr))
       type.is_custom = true;
     adv(ctx);
 
