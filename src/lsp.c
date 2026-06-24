@@ -2052,10 +2052,15 @@ bool lsp_worker_loop(void *arg) {
                 arena_alloc(data->primary_doc->ast_arena, path_len - 1);
             strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
+
+            const char *abs_import = resolve_module_path(
+                data->global_arena, mod->abs_path, clean_rel);
             pthread_mutex_unlock(data->arena_mutex);
 
-            atomic_fetch_add(data->modules_in_flight, 1);
-            wl_push(wl, clean_rel);
+            if (abs_import) {
+              atomic_fetch_add(data->modules_in_flight, 1);
+              wl_push(wl, abs_import);
+            }
           }
         }
         stmt = stmt->next;
@@ -2224,7 +2229,12 @@ void compile_doc(Doc *doc) {
               strncpy(clean_rel, stmt->as.use_stmt.path.start + 1,
                       path_len - 2);
               clean_rel[path_len - 2] = '\0';
-              wl_push(&pending, clean_rel);
+
+              const char *abs_import =
+                  resolve_module_path(doc->ast_arena, mod->abs_path, clean_rel);
+              if (abs_import) {
+                wl_push(&pending, abs_import);
+              }
             }
           }
           stmt = stmt->next;
