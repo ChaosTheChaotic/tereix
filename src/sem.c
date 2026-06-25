@@ -1398,12 +1398,18 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
 
       case AST_INDEX:
         if (node->as.index.base) {
+          DataType base_type = node->as.index.base->eval_type;
           node->eval_type = node->as.index.base->eval_type;
           if (node->eval_type.array_dimens > 0) {
             node->eval_type.array_dimens--;
           } else if (node->eval_type.name.len == 3 &&
                      strncmp(node->eval_type.name.start, "str", 3) == 0) {
-            node->eval_type = create_basic_type("char");
+            DataType char_type = create_basic_type("char");
+            char_type.is_mut = base_type.is_mut;
+						char_type.is_static = base_type.is_static;
+						char_type.is_extern = base_type.is_extern;
+						char_type.is_threadlocal = base_type.is_threadlocal;
+            node->eval_type = char_type;
           }
         }
         break;
