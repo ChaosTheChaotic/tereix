@@ -1038,6 +1038,7 @@ bool parse_step(ParseCtx *ctx) {
         push_op(ctx, ctx->curr, false, false);
         ctx->expect_operand = true;
         adv(ctx);
+        push_state(ctx, STATE_GROUPING_DONE);
         push_state(ctx, STATE_IN_EXPR);
         break;
       }
@@ -1255,6 +1256,25 @@ bool parse_step(ParseCtx *ctx) {
     adv(ctx);
     sync(ctx);
     recover_state(ctx, current_state);
+    break;
+  }
+
+  case STATE_GROUPING_DONE: {
+    if (ctx->op_count > 0 &&
+        *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+      ctx->op_count--;
+    }
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+      adv(ctx);
+      ctx->expect_operand = false; // A group is a completed operand
+      push_state(ctx, STATE_IN_EXPR);
+    } else {
+      report_error(ctx, ctx->curr, "Expected ')' after expression");
+      adv(ctx);
+      sync(ctx);
+      recover_state(ctx, current_state);
+    }
     break;
   }
 

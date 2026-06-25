@@ -47,6 +47,7 @@ typedef enum {
   STATE_SWITCH_DONE,
   STATE_IF_ELSE_DONE,
   STATE_SIZEOF_EXPR_DONE,
+  STATE_GROUPING_DONE,
 } ParseState;
 
 typedef struct {
