@@ -236,6 +236,7 @@ Token next_token(ParseCtx *pctx) {
         case '\\':
         case '"':
         case '\'':
+        case '0':
           // Valid (not implementing unicode and all the other ones bro gimmie a
           // break)
           break;
