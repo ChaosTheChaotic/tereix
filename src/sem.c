@@ -1401,6 +1401,9 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           node->eval_type = node->as.index.base->eval_type;
           if (node->eval_type.array_dimens > 0) {
             node->eval_type.array_dimens--;
+          } else if (node->eval_type.name.len == 3 &&
+                     strncmp(node->eval_type.name.start, "str", 3) == 0) {
+            node->eval_type = create_basic_type("char");
           }
         }
         break;
