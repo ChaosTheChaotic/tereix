@@ -5,11 +5,11 @@
 #include <stdio.h>
 
 inline AstNode *new_node_with_src(Arena *arena, ASTN_TYPE type, ParseCtx *ctx) {
-    AstNode *n = new_node(arena, type);
-    if (n) {
-        n->src_start = ctx->curr.start;
-    }
-    return n;
+  AstNode *n = new_node(arena, type);
+  if (n) {
+    n->src_start = ctx->curr.start;
+  }
+  return n;
 }
 
 #undef new_node
@@ -146,15 +146,17 @@ inline bool is_newline(char c) { return (c == '\n' || c == '\r'); }
 void skip_irrelevant(LexCtx *ctx) {
   while (*ctx->curr != '\0') {
     if (isspace((unsigned char)*ctx->curr)) {
-      if (is_newline(*ctx->curr)) {
+      if (*ctx->curr == '\n') {
         ctx->line++;
-        ctx->col = 0;
+        ctx->col = 1;
+      } else if (*ctx->curr == '\r') {
+        ctx->col = 1;
       } else {
         ctx->col++;
       }
       ctx->curr++;
     } else if (strncmp(ctx->curr, "//", 2) == 0) {
-      while (*ctx->curr != '\0' && !is_newline(*ctx->curr)) {
+      while (*ctx->curr != '\0' && *ctx->curr != '\n' && *ctx->curr != '\r') {
         ctx->curr++;
         ctx->col++;
       }
@@ -251,9 +253,11 @@ Token next_token(ParseCtx *pctx) {
         continue;
       }
 
-      if (is_newline(*ctx->curr)) {
+      if (*ctx->curr == '\n') {
         ctx->line++;
-        ctx->col = 0;
+        ctx->col = 1;
+      } else if (*ctx->curr == '\r') {
+        ctx->col = 1;
       } else {
         ctx->col++;
       }
@@ -446,8 +450,10 @@ void apply_op(ParseCtx *ctx) {
   OpInfo info = ctx->op_stack[--ctx->op_count];
 
   if (info.is_unary) {
-    if (ctx->node_count < 1)
+    if (ctx->node_count < 1) {
+      report_error(ctx, info.op, "Missing operand for unary operator");
       return;
+    }
     AstNode *operand = pop_node(ctx);
 
     if (info.op.len == 0) {
@@ -475,8 +481,10 @@ void apply_op(ParseCtx *ctx) {
 
     push_node(ctx, unop);
   } else {
-    if (ctx->node_count < 2)
+    if (ctx->node_count < 2) {
+      report_error(ctx, info.op, "Missing operands for binary operator");
       return;
+    }
     AstNode *right = pop_node(ctx);
     AstNode *left = pop_node(ctx);
 
@@ -630,7 +638,7 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
         AstNode *snode = new_node(ctx->arena, AST_STRUCT);
         snode->as.struct_def.structn = ctx->curr;
-				snode->as.struct_def.is_extern = is_extern;
+        snode->as.struct_def.is_extern = is_extern;
         adv(ctx);
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
@@ -659,7 +667,7 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
         AstNode *unode = new_node(ctx->arena, AST_UNION);
         unode->as.union_def.unionn = ctx->curr;
-				unode->as.struct_def.is_extern = is_extern;
+        unode->as.struct_def.is_extern = is_extern;
         adv(ctx);
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
           adv(ctx);
@@ -1313,6 +1321,8 @@ bool parse_step(ParseCtx *ctx) {
         (ctx->curr.type == TOKEN_PUNC &&
          (*ctx->curr.start == ';' || *ctx->curr.start == '}'))) {
       report_error(ctx, ctx->curr, "Unexpected token in function arguments");
+      adv(ctx);
+      sync(ctx);
       recover_state(ctx, current_state);
       break;
     }
@@ -1425,7 +1435,7 @@ bool parse_step(ParseCtx *ctx) {
       // Decide if self is an expression or a type.
       Token next = peek_token(ctx);
       if (next.type != TOKEN_IDENTIF) {
-				// Declaration
+        // Declaration
         push_state(ctx, STATE_EXPR_STMT_DONE);
         push_state(ctx, STATE_IN_EXPR);
         break;
@@ -1909,6 +1919,7 @@ bool parse_step(ParseCtx *ctx) {
       push_state(ctx, STATE_PARSE_BLOCK);
     } else {
       push_state(ctx, STATE_IN_EXPR);
+      break;
     }
     break;
   }
@@ -2394,6 +2405,8 @@ bool parse_step(ParseCtx *ctx) {
         (ctx->curr.type == TOKEN_PUNC &&
          (*ctx->curr.start == ';' || *ctx->curr.start == '}'))) {
       report_error(ctx, ctx->curr, "Unexpected token in function arguments");
+      adv(ctx);
+      sync(ctx);
       recover_state(ctx, current_state);
       break;
     }

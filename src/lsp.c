@@ -178,19 +178,29 @@ size_t format_type_to_buf(DataType type, char *buf, size_t size) {
     return 0;
   size_t offset = 0;
 
-  // Modifiers
-  if (type.is_static)
-    offset += snprintf(buf + offset, size - offset, "static ");
-  if (type.is_mut)
-    offset += snprintf(buf + offset, size - offset, "mut ");
-  if (type.is_threadlocal)
-    offset += snprintf(buf + offset, size - offset, "threadlocal ");
-  if (type.is_extern)
-    offset += snprintf(buf + offset, size - offset, "extern ");
-  if (type.is_async)
-    offset += snprintf(buf + offset, size - offset, "async ");
+#define S_APP(...)                                                             \
+  do {                                                                         \
+    if (offset < size - 1) {                                                   \
+      int w = snprintf(buf + offset, size - offset, __VA_ARGS__);              \
+      if (w > 0) {                                                             \
+        offset += w;                                                           \
+        if (offset >= size)                                                    \
+          offset = size - 1;                                                   \
+      }                                                                        \
+    }                                                                          \
+  } while (0)
 
-  // Pointers & References
+  if (type.is_static)
+    S_APP("static ");
+  if (type.is_mut)
+    S_APP("mut ");
+  if (type.is_threadlocal)
+    S_APP("threadlocal ");
+  if (type.is_extern)
+    S_APP("extern ");
+  if (type.is_async)
+    S_APP("async ");
+
   if (type.ptr_depth != 0) {
     char symbol = (type.ptr_depth > 0) ? '*' : '&';
     int count = (type.ptr_depth > 0) ? type.ptr_depth : -type.ptr_depth;
@@ -199,67 +209,57 @@ size_t format_type_to_buf(DataType type, char *buf, size_t size) {
     }
   }
 
-  // Base Type Name
   if (type.name.len > 0) {
-    offset += snprintf(buf + offset, size - offset, "%.*s", (int)type.name.len,
-                       type.name.start);
+    S_APP("%.*s", (int)type.name.len, type.name.start);
   }
 
-  // Array Bounds
   for (unsigned int i = 0; i < type.array_dimens; i++) {
     if (type.dim_sizes && type.dim_sizes[i]) {
       AstNode *dim = type.dim_sizes[i];
       if (dim->type == AST_NUM_LIT) {
-        offset +=
-            snprintf(buf + offset, size - offset, "[%.*s]",
-                     (int)dim->as.num_lit.val.len, dim->as.num_lit.val.start);
+        S_APP("[%.*s]", (int)dim->as.num_lit.val.len,
+              dim->as.num_lit.val.start);
       } else {
-        offset += snprintf(buf + offset, size - offset, "[expr]");
+        S_APP("[expr]");
       }
     } else {
-      offset += snprintf(buf + offset, size - offset, "[]");
+      S_APP("[]");
     }
   }
+#undef S_APP
   return offset;
 }
 
 void format_func_signature(AstNode *func_node, char *buf, size_t size) {
-  if (!func_node || func_node->type != AST_FUNC)
-    return;
-
+  if (!func_node || func_node->type != AST_FUNC || !buf || size == 0) return;
   size_t offset = 0;
 
-  // Return Type
-  offset += format_type_to_buf(func_node->as.func_def.ret_type, buf + offset,
-                               size - offset);
+  #define S_APP(...) do { \
+    if (offset < size - 1) { \
+      int w = snprintf(buf + offset, size - offset, __VA_ARGS__); \
+      if (w > 0) { offset += w; if (offset >= size) offset = size - 1; } \
+    } \
+  } while(0)
 
-  // Name
-  unsigned int written = snprintf(buf + offset, size - offset, " %.*s(",
-                                  (int)func_node->as.func_def.fn_name.len,
-                                  func_node->as.func_def.fn_name.start);
-  if (written > 0) {
-    offset += written;
-  }
-  if (offset >= size) {
-    offset = size - 1; // Clamp to prevent underflow on the next call
-    return;            // Stop writing to buffer
-  }
+  offset += format_type_to_buf(func_node->as.func_def.ret_type, buf + offset, size - offset);
+  if (offset >= size) offset = size - 1;
 
-  // Parameters
+  S_APP(" %.*s(", (int)func_node->as.func_def.fn_name.len, func_node->as.func_def.fn_name.start);
+
   AstNode *param = func_node->as.func_def.params;
   while (param && offset < size - 1) {
-    offset += format_type_to_buf(param->as.fn_param.type, buf + offset,
-                                 size - offset);
-    offset +=
-        snprintf(buf + offset, size - offset, " %.*s",
-                 (int)param->as.fn_param.id.len, param->as.fn_param.id.start);
+    offset += format_type_to_buf(param->as.fn_param.type, buf + offset, size - offset);
+    if (offset >= size) offset = size - 1;
+
+    S_APP(" %.*s", (int)param->as.fn_param.id.len, param->as.fn_param.id.start);
 
     if (param->next) {
-      offset += snprintf(buf + offset, size - offset, ", ");
+      S_APP(", ");
     }
     param = param->next;
   }
-  snprintf(buf + offset, size - offset, ")");
+  S_APP(")");
+  #undef S_APP
 }
 
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
@@ -1125,7 +1125,7 @@ int get_index_from_pos(const char *txt, int line, int character) {
     return 0;
   int cur_l = 0, cur_c = 0, i = 0;
   while (txt[i] != '\0') {
-    if (cur_l == line && cur_c == character)
+    if (cur_l == line && cur_c >= character)
       return i;
 
     if (txt[i] == '\n') {
@@ -1135,8 +1135,13 @@ int get_index_from_pos(const char *txt, int line, int character) {
       cur_l++;
       cur_c = 0;
     } else {
-      if ((txt[i] & 0xC0) != 0x80) {
-        cur_c++;
+      unsigned char c = txt[i];
+      if ((c & 0xC0) != 0x80) {
+        if ((c & 0xF8) == 0xF0) {
+          cur_c += 2;
+        } else {
+          cur_c += 1;
+        }
       }
     }
     i++;
@@ -2035,6 +2040,10 @@ bool lsp_worker_loop(void *arg) {
 
       map_init(&mod->local_symbols, mod->mod_arena, 128);
       map_init(&mod->imported_mods, mod->mod_arena, 32);
+    } else if (!mod && !ast) {
+      pthread_mutex_lock(&sem->mutex);
+      map_set(&sem->mod_cache, curr_abs, strlen(curr_abs), NULL);
+      pthread_mutex_unlock(&sem->mutex);
     }
 
     if (is_primary) {
@@ -2078,10 +2087,11 @@ void compile_doc(Doc *doc) {
     char *abspath = absolute_from_uri(doc->uri);
     if (abspath) {
       SemCtx *sem = &server_state.proj_sem;
+      pthread_mutex_lock(&sem->mutex);
       Module *mod = map_get(&sem->mod_cache, abspath, strlen(abspath));
 
       // Check if the modules arena matches the one we are about to destroy
-      if (mod && mod->mod_arena == doc->ast_arena) {
+      if (mod && mod != (Module *)1 && mod->mod_arena == doc->ast_arena) {
         map_free_buckets(&mod->local_symbols);
         map_free_buckets(&mod->imported_mods);
 
@@ -2090,7 +2100,10 @@ void compile_doc(Doc *doc) {
         mod->local_symbols.capacity = 0;
         mod->imported_mods.buckets = NULL;
         mod->imported_mods.capacity = 0;
+
+        mod->ast_root = NULL;
       }
+      pthread_mutex_unlock(&sem->mutex);
       free(abspath);
     }
 
@@ -2318,6 +2331,16 @@ void compile_doc(Doc *doc) {
   const char *current_uri = doc->uri;
   bool has_current = false;
 
+  for (size_t i = 0; i < server_state.docs.capacity; i++) {
+    HashEntry *entry = server_state.docs.buckets[i];
+    while (entry) {
+      Doc *d = (Doc *)entry->value;
+      DiagList empty = {0};
+      publish_diagnostics_from_list(d->uri, &empty);
+      entry = entry->next;
+    }
+  }
+
   for (size_t i = 0; i < diag_groups.capacity; i++) {
     HashEntry *entry = diag_groups.buckets[i];
     while (entry) {
@@ -2325,10 +2348,13 @@ void compile_doc(Doc *doc) {
       DiagList *group = (DiagList *)entry->value;
       char uri[PATH_MAX + 8];
       snprintf(uri, sizeof(uri), "file://%s", file_path);
-      if (strcmp(uri, current_uri) == 0) {
-        publish_diagnostics_from_list(uri, group);
+
+      publish_diagnostics_from_list(uri, group);
+
+      if (strcmp(uri, current_uri) == 0)
         has_current = true;
-      }
+
+      diaglist_free(group);
       entry = entry->next;
     }
   }
@@ -2337,6 +2363,7 @@ void compile_doc(Doc *doc) {
     DiagList empty = {0};
     publish_diagnostics_from_list(doc->uri, &empty);
   }
+  map_free_buckets(&diag_groups);
   free(abspath);
 }
 

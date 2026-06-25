@@ -9,6 +9,9 @@ void diaglist_init(DiagList *list, size_t initial_cap) {
 }
 
 void diaglist_free(DiagList *list) {
+  for (size_t i = 0; i < list->count; i++) {
+    free((void *)list->items[i].message);
+  }
   free(list->items);
   list->items = NULL;
   list->cap = list->count = 0;

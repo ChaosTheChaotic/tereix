@@ -31,6 +31,10 @@ void propagate_dirty_state(SemCtx *ctx) {
       HashEntry *entry = ctx->mod_cache.buckets[i];
       while (entry) {
         Module *mod = (Module *)entry->value;
+        if (!mod || mod == (Module *)1) {
+          entry = entry->next;
+          continue;
+        }
         if (mod->is_dirty) {
           entry = entry->next;
           continue;
@@ -282,6 +286,11 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
     HashEntry *entry = sem->mod_cache.buckets[i];
     while (entry) {
       Module *current_mod = (Module *)entry->value;
+      if (!current_mod || current_mod == (Module *)1 ||
+          !current_mod->ast_root) {
+        entry = entry->next;
+        continue;
+      }
       sem_current_mod = current_mod;
 
       AstNode *stmt = current_mod->ast_root->as.block.first_stmt;
@@ -923,7 +932,7 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_BINOP: {
         DataType *operand_expected = item.expected;
 
-        if (node->as.binop.op.type == TOKEN_COMPARE) {
+        if (node->as.binop.op.type && node->as.binop.op.type == TOKEN_COMPARE) {
           operand_expected = NULL;
         }
 
@@ -982,7 +991,7 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         break;
       case AST_FUNC_CALL: {
         AstNode *fn_decl = NULL;
-        if (node->as.func_call.caller->type == AST_IDENTIF &&
+        if (node->as.func_call.caller && node->as.func_call.caller->type == AST_IDENTIF &&
             node->as.func_call.caller->as.identif.res_sm) {
           fn_decl = node->as.func_call.caller->as.identif.res_sm->decl_node;
         }
