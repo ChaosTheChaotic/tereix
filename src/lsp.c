@@ -82,8 +82,15 @@ uint64_t hash_module_interface(Module *mod) {
 
       AstNode *member = stmt->as.enum_def.contents;
       while (member) {
-        Token m_name = member->as.enum_member.name;
-        hash = combine_hash(hash, hash_string(m_name.start, m_name.len));
+        if (member->type == AST_ENUM_MEMBER) {
+          Token m_name = member->as.enum_member.name;
+          hash = combine_hash(hash, hash_string(m_name.start, m_name.len));
+        } else if (member->type == AST_FUNC) {
+          Token m_name = member->as.func_def.fn_name;
+          Token ret = member->as.func_def.ret_type.name;
+          hash = combine_hash(hash, hash_string(m_name.start, m_name.len));
+          hash = combine_hash(hash, hash_string(ret.start, ret.len));
+        }
         member = member->next;
       }
     }

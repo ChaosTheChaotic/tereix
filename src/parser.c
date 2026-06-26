@@ -2300,6 +2300,157 @@ bool parse_step(ParseCtx *ctx) {
       }
     }
 
+    bool is_method = false;
+    {
+      ParseCtx tmp_parse = *ctx;
+      LexCtx tmp_lex = *ctx->lex;
+      tmp_parse.lex = &tmp_lex;
+      Token t = tmp_parse.curr;
+      while (t.type != TOKEN_EOF && t.type != TOKEN_PUNC) {
+        t = next_token(&tmp_parse);
+        if (t.type == TOKEN_PUNC && *t.start == '(') {
+          is_method = true;
+          break;
+        }
+        if (t.type == TOKEN_PUNC &&
+            (*t.start == ',' || *t.start == '=' || *t.start == '}')) {
+          break;
+        }
+      }
+    }
+
+    if (is_method) {
+      if (!is_type(ctx)) {
+        report_error(ctx, ctx->curr, "Expected type in enum method definition");
+        adv(ctx);
+        sync(ctx);
+        recover_state(ctx, current_state);
+        break;
+      }
+
+      DataType field_type = parse_type(ctx);
+
+      if (field_type.is_async || field_type.is_inline) {
+        report_error(ctx, ctx->curr, "Error: Invalid modifier on enum method");
+        return false;
+      }
+
+      if (ctx->curr.type != TOKEN_IDENTIF &&
+          !is_builtin_type_kw(ctx, ctx->curr)) {
+        report_error(ctx, ctx->curr, "Expected method identifier");
+        adv(ctx);
+        sync(ctx);
+        recover_state(ctx, current_state);
+        break;
+      }
+
+      Token name = ctx->curr;
+      adv(ctx);
+
+      if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
+        if (field_type.is_threadlocal) {
+          report_error(ctx, ctx->curr,
+                       "Error: 'threadlocal' cannot be applied to method");
+          return false;
+        }
+
+        AstNode *fnode = new_node(ctx->arena, AST_FUNC);
+        fnode->as.func_def.fn_name = name;
+        fnode->as.func_def.ret_type = field_type;
+        fnode->as.func_def.is_async = field_type.is_async;
+        fnode->as.func_def.is_inline = field_type.is_inline;
+        fnode->as.func_def.is_extern = field_type.is_extern;
+        adv(ctx);
+
+        AstNode *params_head = NULL;
+        AstNode *params_tail = NULL;
+
+        while (ctx->curr.type != TOKEN_EOF &&
+               !(ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')')) {
+          if (!is_type(ctx)) {
+            report_error(ctx, ctx->curr,
+                         "Expected type in function parameters");
+            adv(ctx);
+            sync(ctx);
+            recover_state(ctx, current_state);
+            break;
+          }
+          DataType p_type = parse_type(ctx);
+          Token p_name;
+
+          if (p_type.is_self) {
+            if (ctx->curr.type == TOKEN_IDENTIF) {
+              p_name = ctx->curr;
+              adv(ctx);
+            } else {
+              p_name.start = "self";
+              p_name.len = 4;
+              p_name.type = TOKEN_IDENTIF;
+            }
+          } else {
+            if (ctx->curr.type != TOKEN_IDENTIF &&
+                !is_builtin_type_kw(ctx, ctx->curr)) {
+              fprintf(stderr, "Expected identifier after type in params\n");
+              return false;
+            }
+            p_name = ctx->curr;
+            adv(ctx);
+          }
+
+          if (p_type.is_async || p_type.is_inline) {
+            report_error(ctx, ctx->curr,
+                         "Error: Invalid modifier on parameter");
+            adv(ctx);
+            sync(ctx);
+            recover_state(ctx, current_state);
+            break;
+          }
+
+          AstNode *pnode = new_node(ctx->arena, AST_PARAM);
+          pnode->as.fn_param.type = p_type;
+          pnode->as.fn_param.id = p_name;
+
+          if (!params_head)
+            params_head = params_tail = pnode;
+          else {
+            params_tail->next = pnode;
+            params_tail = pnode;
+          }
+
+          if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',')
+            adv(ctx);
+        }
+        fnode->as.func_def.params = params_head;
+        adv(ctx);
+
+        if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+          if (!fnode->as.func_def.is_extern) {
+            report_error(ctx, ctx->curr,
+                         "Error: Method must be extern if no body");
+            return false;
+          }
+          adv(ctx);
+          fnode->as.func_def.block = NULL;
+          fnode->src_end = ctx->prev.start + ctx->prev.len;
+          append_stmt(&parent->as.enum_def.contents, fnode);
+          push_state(ctx, current_state);
+          break;
+        } else {
+          append_stmt(&parent->as.enum_def.contents, fnode);
+          push_node(ctx, fnode);
+          push_state(ctx, current_state);
+          push_state(ctx, STATE_IN_FUNC);
+          break;
+        }
+      } else {
+        report_error(ctx, ctx->curr, "Expected '(' after method name in enum");
+        adv(ctx);
+        sync(ctx);
+        recover_state(ctx, current_state);
+        break;
+      }
+    }
+
     if (ctx->curr.type != TOKEN_IDENTIF) {
       report_error(ctx, ctx->curr, "Expected identifier in enum");
       adv(ctx);

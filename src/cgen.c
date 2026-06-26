@@ -1718,10 +1718,12 @@ void lower_defers(AstNode *root, Arena *arena) {
         for (size_t i = defer_count; i > f->block_base; i--) {
           AstNode *cloned =
               clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
-          if (!n->as.block.first_stmt)
+          if (!n->as.block.first_stmt) {
             n->as.block.first_stmt = cloned;
-          else
+						tail = cloned;
+					} else {
             tail->next = cloned;
+					}
           while (tail->next)
             tail = tail->next;
         }
@@ -1767,10 +1769,12 @@ void lower_defers(AstNode *root, Arena *arena) {
         for (size_t i = defer_count; i > f->func_base; i--) {
           AstNode *cloned =
               clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
-          if (!blk->as.block.first_stmt)
+          if (!blk->as.block.first_stmt) {
             blk->as.block.first_stmt = cloned;
-          else
+						tail = cloned;
+					} else {
             tail->next = cloned;
+					}
           while (tail->next)
             tail = tail->next;
         }
@@ -1800,10 +1804,12 @@ void lower_defers(AstNode *root, Arena *arena) {
         for (size_t i = defer_count; i > f->loop_base; i--) {
           AstNode *cloned =
               clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
-          if (!blk->as.block.first_stmt)
+          if (!blk->as.block.first_stmt) {
             blk->as.block.first_stmt = cloned;
-          else
+					tail = cloned;
+					} else {
             tail->next = cloned;
+					}
           while (tail->next)
             tail = tail->next;
         }
@@ -1853,6 +1859,7 @@ void lower_defers(AstNode *root, Arena *arena) {
     } else if (n->type == AST_SWITCH) {
       if (f->step == 0) {
         f->step = 1;
+        f->loop_base = defer_count;
         if (n->as.switch_stmt.default_case) {
           if (top >= cap) {
             cap *= 2;
