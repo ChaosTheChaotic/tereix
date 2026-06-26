@@ -749,7 +749,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
       Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
       scope_declare(ss, self_tok, enum_sym);
 
-      PUSH_LL_REVERSE(node->as.struct_def.contents, ACTION_VISIT_NODE, false);
+      PUSH_LL_REVERSE(node->as.enum_def.contents, ACTION_VISIT_NODE, false);
       break;
     }
 
