@@ -263,11 +263,58 @@ char *format_identifier(const char *input, size_t len, FormatStyle style) {
   return output;
 }
 
-bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
+void print_comments_between(const char *start, const char *end, FILE *out_fp,
+                            unsigned int depth) {
+  if (!start || !end || start >= end)
+    return;
+  const char *p = start;
+
+  while (p < end) {
+    if (p[0] == '/' && p[1] == '/') {
+      // Check if this comment is on a new line or trailing the previous node
+      bool is_new_line = false;
+      const char *check = p - 1;
+      while (check >= start) {
+        if (*check == '\n') {
+          is_new_line = true;
+          break;
+        }
+        if (!isspace((unsigned char)*check)) {
+          is_new_line = false;
+          break;
+        }
+        check--;
+      }
+      if (check < start)
+        is_new_line = false;
+
+      if (is_new_line) {
+        for (unsigned int i = 0; i < depth; i++)
+          fputc('\t', out_fp);
+      } else {
+        fputc(' ', out_fp); // Preserve inline spacing for trailing comments
+      }
+
+      // Print the comment content up to the newline
+      while (p < end && *p != '\n' && *p != '\r') {
+        fputc(*p, out_fp);
+        p++;
+      }
+      fputc('\n', out_fp);
+    } else {
+      p++;
+    }
+  }
+}
+
+bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
+             const char *source_text) {
   if (!root) {
     fprintf(stderr, "No root AST was passed to fmt_ast");
     return false;
   }
+
+  const char *last_pos = source_text;
 
   Arena tmp_arena = {0};
   HashMap extern_set;
@@ -351,8 +398,6 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
   do {                                                                         \
     if (t.is_static)                                                           \
       FPRINTF_SAFE("%s", "static ");                                           \
-    if (t.is_mut)                                                              \
-      FPRINTF_SAFE("%s", "mut ");                                              \
     if (t.is_threadlocal)                                                      \
       FPRINTF_SAFE("%s", "threadlocal ");                                      \
     if (t.is_extern)                                                           \
@@ -367,16 +412,12 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
       for (int _i = 0; _i < cnt; _i++)                                         \
         FPRINTF_SAFE("%c", sym);                                               \
     }                                                                          \
-    if (t.name.len > 0) {                                                      \
-      if (is_builtin_type_name(t.name.start, t.name.len) ||                    \
-          map_get(&extern_set, t.name.start, t.name.len) != NULL) {            \
-        FPRINTF_SAFE("%.*s", (int)t.name.len, t.name.start);                   \
-      } else {                                                                 \
-        char *f_type =                                                         \
-            format_identifier(t.name.start, t.name.len, FMT_PASCAL_CASE);      \
-        FPRINTF_SAFE("%s", f_type);                                            \
-        free(f_type);                                                          \
-      }                                                                        \
+    if (t.is_mut)                                                              \
+      FPRINTF_SAFE("%s", "mut ");                                              \
+    if (t.is_self) {                                                           \
+      FPRINTF_SAFE("%s", "self");                                              \
+    } else if (t.name.len > 0) {                                               \
+      FPRINTF_SAFE("%.*s", (int)t.name.len, t.name.start);                     \
     }                                                                          \
     for (unsigned int _i = 0; _i < t.array_dimens; _i++) {                     \
       if (t.dim_sizes && _i < t.array_dimens && t.dim_sizes[_i]) {             \
@@ -408,6 +449,13 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
       continue;
     }
 
+    if (item->step == 0 && node->src_start && last_pos < node->src_start) {
+      print_comments_between(last_pos, node->src_start, out_fp, item->depth);
+      last_pos = node->src_start;
+    }
+
+    size_t old_top = top;
+
     switch (node->type) {
     case AST_PROGRAM:
     case AST_BLOCK:
@@ -428,11 +476,19 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
 
           unsigned int next_depth =
               item->depth + (node->type == AST_PROGRAM ? 0 : 1);
-          for (unsigned int i = 0; i < next_depth; i++)
-            FPRINTF_SAFE("%c", '\t');
 
-          // Check if this statement needs a terminating semicolon applied by
-          // the block
+          if (stmt->src_start && last_pos < stmt->src_start) {
+            print_comments_between(last_pos, stmt->src_start, out_fp,
+                                   next_depth);
+            last_pos = stmt->src_start;
+          }
+
+          // Print indentation for the statement itself
+          for (unsigned int i = 0; i < next_depth; i++) {
+            FPRINTF_SAFE("%c", '\t');
+          }
+
+          // Determine if the statement needs a semicolon later
           bool needs_semi =
               (stmt->type == AST_FUNC_CALL || stmt->type == AST_BINOP ||
                stmt->type == AST_UOP || stmt->type == AST_IDENTIF ||
@@ -484,35 +540,29 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
       if (item->step == 0) {
         FMT_TYPE_SAFE(node->as.func_def.ret_type);
         FPRINTF_SAFE("%s", " ");
-
-        bool is_ext = map_get(&extern_set, node->as.func_def.fn_name.start,
-                              node->as.func_def.fn_name.len) != NULL;
-        if (is_ext) {
-          FPRINTF_SAFE("%.*s(", (int)node->as.func_def.fn_name.len,
-                       node->as.func_def.fn_name.start);
-        } else {
-          char *f_name =
-              format_identifier(node->as.func_def.fn_name.start,
-                                node->as.func_def.fn_name.len, FMT_SNAKE_CASE);
-          FPRINTF_SAFE("%s(", f_name);
-          free(f_name);
-        }
+        FPRINTF_SAFE("%.*s(", (int)node->as.func_def.fn_name.len,
+                     node->as.func_def.fn_name.start);
 
         AstNode *param = node->as.func_def.params;
         while (param) {
           FMT_TYPE_SAFE(param->as.fn_param.type);
-          FPRINTF_SAFE("%s", " ");
-          char *p_name =
-              format_identifier(param->as.fn_param.id.start,
-                                param->as.fn_param.id.len, FMT_CAMEL_CASE);
-          FPRINTF_SAFE("%s", p_name);
-          free(p_name);
+
+          bool is_implicit_self =
+              param->as.fn_param.type.is_self &&
+              param->as.fn_param.id.len == 4 &&
+              strncmp(param->as.fn_param.id.start, "self", 4) == 0;
+
+          if (!is_implicit_self) {
+            FPRINTF_SAFE("%s", " ");
+            FPRINTF_SAFE("%.*s", (int)param->as.fn_param.id.len,
+                         param->as.fn_param.id.start);
+          }
+
           if (param->next)
             FPRINTF_SAFE("%s", ", ");
           param = param->next;
         }
         FPRINTF_SAFE("%s", ")");
-
         if (node->as.func_def.block) {
           item->step = 1;
           if (top >= stack_cap) {
@@ -538,22 +588,43 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
     }
 
     case AST_VAR_DECL: {
+      bool is_global_or_sue = false;
+      if (top >= 2) {
+        AstNode *parent = stack[top - 2].node;
+        if (parent->type == AST_PROGRAM || parent->type == AST_STRUCT ||
+            parent->type == AST_UNION || parent->type == AST_EXTERN) {
+          is_global_or_sue = true;
+        }
+      } else {
+        is_global_or_sue = true;
+      }
+
+      bool extra_newline = false;
+      if (!item->aux) {
+        if (is_global_or_sue) {
+          if (node->next && node->next->type != AST_VAR_DECL) {
+            extra_newline = true;
+          }
+        } else {
+          if (node->next && node->src_end && node->next->src_start) {
+            int nl_count = 0;
+            for (const char *p = node->src_end; p < node->next->src_start;
+                 p++) {
+              if (*p == '\n')
+                nl_count++;
+            }
+            if (nl_count >= 2) {
+              extra_newline = true;
+            }
+          }
+        }
+      }
+
       if (item->step == 0) {
         FMT_TYPE_SAFE(node->as.var_decl.type);
         FPRINTF_SAFE("%s", " ");
-
-        bool is_ext = map_get(&extern_set, node->as.var_decl.id.start,
-                              node->as.var_decl.id.len) != NULL;
-        if (is_ext) {
-          FPRINTF_SAFE("%.*s", (int)node->as.var_decl.id.len,
-                       node->as.var_decl.id.start);
-        } else {
-          char *v_name =
-              format_identifier(node->as.var_decl.id.start,
-                                node->as.var_decl.id.len, FMT_CAMEL_CASE);
-          FPRINTF_SAFE("%s", v_name);
-          free(v_name);
-        }
+        FPRINTF_SAFE("%.*s", (int)node->as.var_decl.id.len,
+                     node->as.var_decl.id.start);
 
         if (node->as.var_decl.init) {
           FPRINTF_SAFE("%s", " = ");
@@ -567,10 +638,14 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
               (FmtStackItem){node->as.var_decl.init, item->depth, 0, NULL};
         } else {
           FPRINTF_SAFE("%s", item->aux ? "; " : ";\n");
+          if (extra_newline)
+            FPRINTF_SAFE("%s", "\n");
           top--;
         }
       } else {
         FPRINTF_SAFE("%s", item->aux ? "; " : ";\n");
+        if (extra_newline)
+          FPRINTF_SAFE("%s", "\n");
         top--;
       }
       break;
@@ -601,36 +676,18 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
         if (node->type == AST_UNION && node->as.union_def.is_extern)
           is_extern_node = true;
 
-        bool is_ext =
-            map_get(&extern_set, name_tok.start, name_tok.len) != NULL ||
-            is_extern_node;
-
         if (is_extern_node) {
           FPRINTF_SAFE("%s", "extern ");
         }
 
         FPRINTF_SAFE("%s ", kw);
         if (is_decl_only) {
-          if (is_ext) {
-            FPRINTF_SAFE("%.*s;\n\n", (int)name_tok.len, name_tok.start);
-          } else {
-            char *t_name = format_identifier(name_tok.start, name_tok.len,
-                                             FMT_PASCAL_CASE);
-            FPRINTF_SAFE("%s;\n", t_name);
-            free(t_name);
-          }
+          FPRINTF_SAFE("%.*s;\n\n", (int)name_tok.len, name_tok.start);
           top--;
           break;
         }
 
-        if (is_ext) {
-          FPRINTF_SAFE("%.*s {\n", (int)name_tok.len, name_tok.start);
-        } else {
-          char *t_name =
-              format_identifier(name_tok.start, name_tok.len, FMT_PASCAL_CASE);
-          FPRINTF_SAFE("%s {\n", t_name);
-          free(t_name);
-        }
+        FPRINTF_SAFE("%.*s {\n", (int)name_tok.len, name_tok.start);
 
         item->aux = (node->type == AST_STRUCT)  ? node->as.struct_def.contents
                     : (node->type == AST_UNION) ? node->as.union_def.contents
@@ -665,15 +722,7 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
       if (item->step == 0) {
         if (node->as.func_call.caller->type == AST_IDENTIF) {
           Token ident = node->as.func_call.caller->as.identif.val;
-
-          if (map_get(&extern_set, ident.start, ident.len) != NULL) {
-            FPRINTF_SAFE("%.*s(", (int)ident.len, ident.start);
-          } else {
-            char *fn_name =
-                format_identifier(ident.start, ident.len, FMT_SNAKE_CASE);
-            FPRINTF_SAFE("%s(", fn_name);
-            free(fn_name);
-          }
+          FPRINTF_SAFE("%.*s(", (int)ident.len, ident.start);
           item->step = 2;
         } else {
           item->step = 1;
@@ -718,21 +767,7 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
 
     case AST_IDENTIF: {
       Token ident = node->as.identif.val;
-
-      if (map_get(&extern_set, ident.start, ident.len) != NULL) {
-        FPRINTF_SAFE("%.*s", (int)ident.len, ident.start);
-        top--;
-        break;
-      }
-
-      char *formatted = NULL;
-      if (type_set && map_get(type_set, ident.start, ident.len)) {
-        formatted = format_identifier(ident.start, ident.len, FMT_PASCAL_CASE);
-      } else {
-        formatted = format_identifier(ident.start, ident.len, FMT_CAMEL_CASE);
-      }
-      FPRINTF_SAFE("%s", formatted);
-      free(formatted);
+      FPRINTF_SAFE("%.*s", (int)ident.len, ident.start);
       top--;
       break;
     }
@@ -926,11 +961,8 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
 
     case AST_ENUM_MEMBER:
       if (item->step == 0) {
-        char *m_name =
-            format_identifier(node->as.enum_member.name.start,
-                              node->as.enum_member.name.len, FMT_PASCAL_CASE);
-        FPRINTF_SAFE("%s", m_name);
-        free(m_name);
+        FPRINTF_SAFE("%.*s", (int)node->as.enum_member.name.len,
+                     node->as.enum_member.name.start);
         if (node->as.enum_member.val) {
           FPRINTF_SAFE("%s", " = ");
           item->step = 1;
@@ -1106,18 +1138,8 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
             (FmtStackItem){node->as.member.base, item->depth, 0, NULL};
       } else {
         FPRINTF_SAFE("%s", ".");
-
-        if (map_get(&extern_set, node->as.member.name.start,
-                    node->as.member.name.len) != NULL) {
-          FPRINTF_SAFE("%.*s", (int)node->as.member.name.len,
-                       node->as.member.name.start);
-        } else {
-          char *m_name =
-              format_identifier(node->as.member.name.start,
-                                node->as.member.name.len, FMT_CAMEL_CASE);
-          FPRINTF_SAFE("%s", m_name);
-          free(m_name);
-        }
+        FPRINTF_SAFE("%.*s", (int)node->as.member.name.len,
+                     node->as.member.name.start);
         top--;
       }
       break;
@@ -1215,18 +1237,14 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
                    node->as.use_stmt.path.start);
       if (node->as.use_stmt.alias.len > 0) {
         FPRINTF_SAFE("%s", " as ");
-        char *alias_name =
-            format_identifier(node->as.use_stmt.alias.start,
-                              node->as.use_stmt.alias.len, FMT_CAMEL_CASE);
-        FPRINTF_SAFE("%s", alias_name);
-        free(alias_name);
+        FPRINTF_SAFE("%.*s", (int)node->as.use_stmt.alias.len,
+                     node->as.use_stmt.alias.start);
       }
       FPRINTF_SAFE("%s", ";\n");
 
       if (node->next && node->next->type != AST_USE) {
         FPRINTF_SAFE("%s", "\n");
       }
-
       top--;
       break;
 
@@ -1243,16 +1261,11 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
     case AST_CAST:
       if (item->step == 0) {
         FPRINTF_SAFE("%s", "(");
-        if (is_builtin_type_name(node->as.cast.target.name.start,
-                                 node->as.cast.target.name.len)) {
+        if (node->as.cast.target.is_self) {
+          FPRINTF_SAFE("%s", "self");
+        } else {
           FPRINTF_SAFE("%.*s", (int)node->as.cast.target.name.len,
                        node->as.cast.target.name.start);
-        } else {
-          char *type_name =
-              format_identifier(node->as.cast.target.name.start,
-                                node->as.cast.target.name.len, FMT_PASCAL_CASE);
-          FPRINTF_SAFE("%s", type_name);
-          free(type_name);
         }
         FPRINTF_SAFE("%s", ")");
         item->step = 1;
@@ -1290,16 +1303,11 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
         }
         FPRINTF_SAFE("%s", "sizeof(");
         if (node->as.sizeof_expr.is_type) {
-          if (is_builtin_type_name(node->as.sizeof_expr.target_type.name.start,
-                                   node->as.sizeof_expr.target_type.name.len)) {
+          if (node->as.sizeof_expr.target_type.is_self) {
+            FPRINTF_SAFE("%s", "self");
+          } else {
             FPRINTF_SAFE("%.*s", (int)node->as.sizeof_expr.target_type.name.len,
                          node->as.sizeof_expr.target_type.name.start);
-          } else {
-            char *type_name = format_identifier(
-                node->as.sizeof_expr.target_type.name.start,
-                node->as.sizeof_expr.target_type.name.len, FMT_PASCAL_CASE);
-            FPRINTF_SAFE("%s", type_name);
-            free(type_name);
           }
           FPRINTF_SAFE("%s", ")");
           top--;
@@ -1321,6 +1329,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set) {
     case AST_PARAM:
       break;
     }
+    if (top < old_top) {
+      if (node->src_end && node->src_end > last_pos) {
+        last_pos = node->src_end;
+      }
+    }
+  }
+
+  if (last_pos) {
+    size_t remain = strlen(last_pos);
+    print_comments_between(last_pos, last_pos + remain, out_fp, 0);
   }
 
   free(stack);
@@ -1423,8 +1441,10 @@ bool fmt_worker_loop(void *arg) {
             char *clean_rel = arena_alloc(data->global_arena, path_len - 1);
             strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
-						// Fomatter should only check local deps to prevent libraries being formatted
-            const char *normalized = normalize_module_path(data->global_arena, clean_rel);
+            // Fomatter should only check local deps to prevent libraries being
+            // formatted
+            const char *normalized =
+                normalize_module_path(data->global_arena, clean_rel);
             pthread_mutex_unlock(data->global_mutex);
 
             atomic_fetch_add(data->files_in_flight, 1);
@@ -1452,7 +1472,7 @@ bool fmt_worker_loop(void *arg) {
         pthread_mutex_lock(data->global_mutex);
       }
 
-      fmt_ast(ast, fp, &type_set);
+      fmt_ast(ast, fp, &type_set, content);
 
       if (!data->opts->as.fmt.write) {
         pthread_mutex_unlock(data->global_mutex);
@@ -1575,7 +1595,8 @@ bool fmt_project(const CompileOptions *restrict opts) {
             char *clean_rel = arena_alloc(&arena, path_len - 1);
             strncpy(clean_rel, stmt->as.use_stmt.path.start + 1, path_len - 2);
             clean_rel[path_len - 2] = '\0';
-						// Fomatter should only check local deps to prevent libraries being formatted
+            // Fomatter should only check local deps to prevent libraries being
+            // formatted
             const char *normalized = normalize_module_path(&arena, clean_rel);
 
             files_in_flight++;
@@ -1598,7 +1619,7 @@ bool fmt_project(const CompileOptions *restrict opts) {
       map_init(&type_set, &arena, 128);
       collect_type_names(ast, &type_set, &arena);
 
-      fmt_ast(ast, fp, &type_set);
+      fmt_ast(ast, fp, &type_set, content);
       if (opts->as.fmt.write)
         fclose(fp);
     }

@@ -91,7 +91,7 @@ static void test_fmt_structs_unions_enums(void **state) {
         "\tHow,\n"
         "}\n\n"
         "struct Xexor {\n"
-        "\tmut bool no;\n"
+        "\tmut bool no;\n\n"
         "\ti32 size() {\n"
         "\t\tret 3;\n"
         "\t}\n"
@@ -144,11 +144,12 @@ static void test_fmt_switch_statement(void **state) {
 static void test_fmt_defers_and_casts(void **state) {
     (void)state;
     const char *input = 
-        "struct Xexor { bool hi; } void test() { mut i64 bee = (i64)b; defer { b + 3; } defer b + 3; putchar((i32)sizeof(Xexor)); }";
+        "struct Xexor { bool hi; i32 hello; } void test() { mut i64 bee = (i64)b; defer { b + 3; } defer b + 3; putchar((i32)sizeof(Xexor)); }";
 
     const char *expected = 
 				"struct Xexor {\n"
 				"\tbool hi;\n"
+				"\ti32 hello;\n"
 				"}\n\n"
         "void test() {\n"
         "\tmut i64 bee = (i64)b;\n"
