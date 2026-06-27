@@ -4,6 +4,7 @@
 , ninja
 , pkg-config
 , cmocka
+, stdlibSrc
 }:
 
 stdenv.mkDerivation {
@@ -27,8 +28,15 @@ stdenv.mkDerivation {
     "-DDO_INSTALL=ON"
     "-DUSE_CCACHE=OFF"
     "-DPKG_CONFIG=ON"
-		"-DBUILD_TESTING=OFF"
+    "-DBUILD_TESTING=OFF"
+    "-DFETCH_STDLIB=OFF"
   ];
+
+  postInstall = ''
+    mkdir -p $out/lib/tereix/std
+    cp -r ${stdlibSrc}/* $out/lib/tereix/std/
+  '';
+
 	meta = {
 		description = "The compiler for the Tereix language";
 		homepage = "https://github.com/ChaosTheChaotic/tereix";

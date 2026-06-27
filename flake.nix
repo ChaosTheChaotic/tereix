@@ -3,10 +3,14 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    tereix-stdlib = {
+      url = "github:ChaosTheChaotic/tereix-stdlib";
+      flake = false;
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    { self, nixpkgs, tereix-stdlib }:
     let
       systems = [
         "x86_64-linux"
@@ -16,7 +20,9 @@
     in
     {
       packages = forAllSystems (system: {
-        default = nixpkgs.legacyPackages.${system}.callPackage ./package.nix { };
+        default = nixpkgs.legacyPackages.${system}.callPackage ./package.nix {
+          stdlibSrc = tereix-stdlib;
+        };
       });
 
       devShells = forAllSystems (system: {

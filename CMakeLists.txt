@@ -5,6 +5,7 @@ option(USE_CCACHE "Try to use ccache for faster builds" OFF)
 option(USE_LTO "Use linktime optimizations if available" ON)
 option(MARCH_NATIVE "Build library optimized for native arch" OFF)
 option(DO_INSTALL "Try to install library after it is build" OFF)
+option(FETCH_STDLIB "Fetch stdlib and install it (via git)" ON)
 set(USE_CACHE_COMPRESSION "AUTO" CACHE STRING "Compress AST cache using zstd (ON, OFF, AUTO)")
 set(ALLOW_PARALLEL "AUTO" CACHE STRING "Compiles in the ability to use multiple threads for compilation (ON, OFF, AUTO)")
 
@@ -194,6 +195,9 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 if(DO_INSTALL)
 	include(GNUInstallDirs)
+	target_compile_definitions(settings INTERFACE 
+		TX_STDLIB_DIR=\"${CMAKE_INSTALL_PREFIX}/lib/tereix/std\"
+	)
 endif()
 
 add_executable(tereix_bin ${SOURCES})
@@ -263,4 +267,19 @@ enable_testing()
 include(CTest)
 if(BUILD_TESTING)
 	add_subdirectory(tests)
+endif()
+
+if(FETCH_STDLIB)
+    include(FetchContent)
+    FetchContent_Declare(
+        tereix_stdlib
+        GIT_REPOSITORY https://github.com/ChaosTheChaotic/tereix-stdlib.git
+        GIT_TAG        master
+    )
+    FetchContent_MakeAvailable(tereix_stdlib)
+
+    if(DO_INSTALL)
+        install(DIRECTORY ${tereix_stdlib_SOURCE_DIR}/
+                DESTINATION ${CMAKE_INSTALL_LIBDIR}/tereix/std)
+    endif()
 endif()

@@ -29,6 +29,7 @@ CMake Options (can be passed after --):
   -DDO_INSTALL=[ON|OFF]    Try to install library after it is build (default: OFF)
 	-DUSE_CACHE_COMPRESSION=[ON|OFF|AUTO] Try to use zstd for compressing the AST (default: AUTO)
 	-DALLOW_PARALLEL=[ON|OFF|AUTO] Build in capability to compile with multiple threads
+	-DFETCH_STDLIB=[ON|OFF] Fetch and install stdlib from github
 EOH
 }
 
