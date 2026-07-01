@@ -205,14 +205,27 @@ Token next_token(ParseCtx *pctx) {
   // Numeric Literals
   else if (isdigit((unsigned char)*ctx->curr)) {
     bool has_dot = false;
-    while (isdigit((unsigned char)*ctx->curr) || *ctx->curr == '.') {
-      if (*ctx->curr == '.') {
-        if (has_dot)
-          break;
-        has_dot = true;
+
+    // Check for hex literal prefix
+    if (*ctx->curr == '0' &&
+        (*(ctx->curr + 1) == 'x' || *(ctx->curr + 1) == 'X')) {
+      ctx->curr += 2;
+      ctx->col += 2;
+      while (isxdigit((unsigned char)*ctx->curr)) {
+        ctx->curr++;
+        ctx->col++;
       }
-      ctx->curr++;
-      ctx->col++;
+    } else {
+      // Standard decimal or float literal
+      while (isdigit((unsigned char)*ctx->curr) || *ctx->curr == '.') {
+        if (*ctx->curr == '.') {
+          if (has_dot)
+            break;
+          has_dot = true;
+        }
+        ctx->curr++;
+        ctx->col++;
+      }
     }
     len = ctx->curr - ctx->start;
     type = TOKEN_NUM_LIT;
@@ -2956,6 +2969,18 @@ inline bool is_numeric_slice(const char *start, unsigned int len) {
     i++;
   }
 
+  // Allow Hex literals
+  if (i + 1 < len && start[i] == '0' &&
+      (start[i + 1] == 'x' || start[i + 1] == 'X')) {
+    i += 2;
+    for (; i < len; i++) {
+      if (!isxdigit((unsigned char)start[i]))
+        return false;
+    }
+    return true;
+  }
+
+  // Standard Decimal Check
   for (; i < len; i++) {
     if (start[i] == '.') {
       if (has_decimal)

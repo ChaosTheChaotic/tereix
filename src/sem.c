@@ -1158,7 +1158,12 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           if (is_float) {
             node->eval_type = create_basic_type("f32");
           } else {
-            long long val = atoll(val_str);
+            char buf[64] = {0};
+            int copy_len = len < 63 ? len : 63;
+            strncpy(buf, val_str, copy_len);
+
+            long long val = strtoll(buf, NULL, 0);
+
             if (val >= -128 && val <= 127)
               node->eval_type = create_basic_type("i8");
             else if (val >= -32768 && val <= 32767)
