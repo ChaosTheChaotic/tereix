@@ -1,5 +1,6 @@
 #include "sem_types.h"
 #include "util.h"
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -832,6 +833,81 @@ static Token get_expr_token(AstNode *node) {
   }
 }
 
+// Check if a DataType represents a numeric type
+bool is_numeric_type(DataType t) {
+  if (t.ptr_depth != 0 || t.array_dimens != 0 || t.is_custom)
+    return false;
+  const char *s = t.name.start;
+  size_t len = t.name.len;
+  if (len == 4 && strncmp(s, "size", 4) == 0)
+    return true;
+  if (len == 4 && strncmp(s, "char", 4) == 0)
+    return true; // treat char as numeric
+  if (len < 2 || len > 3)
+    return false;
+  char first = s[0];
+  if (first != 'i' && first != 'u' && first != 'f')
+    return false;
+  // ensure rest are digits
+  for (size_t i = 1; i < len; i++) {
+    if (!isdigit((unsigned char)s[i]))
+      return false;
+  }
+  return true;
+}
+
+long long parse_num_lit(AstNode *node) {
+  if (node->type != AST_NUM_LIT)
+    return 0;
+  const char *start = node->as.num_lit.val.start;
+  size_t len = node->as.num_lit.val.len;
+  char buf[64] = {0};
+  size_t copy = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+  memcpy(buf, start, copy);
+  return strtoll(buf, NULL, 0);
+}
+
+bool fits_in_type(long long val, DataType t) {
+  int width;
+  bool is_signed, is_float;
+  if (!get_numeric_info(t, &width, &is_signed, &is_float))
+    return false;
+  if (is_float)
+    return true; // any integer can be converted to float
+  if (is_signed) {
+    if (width == 8)
+      return val >= -128 && val <= 127;
+    if (width == 16)
+      return val >= -32768 && val <= 32767;
+    if (width == 32)
+      return val >= -2147483648LL && val <= 2147483647LL;
+    if (width == 64)
+      return true; // any 64 bit signed can hold all long long values
+  } else {
+    unsigned long long uval = (unsigned long long)val;
+    if (width == 8)
+      return uval <= 255;
+    if (width == 16)
+      return uval <= 65535;
+    if (width == 32)
+      return uval <= 4294967295ULL;
+    if (width == 64)
+      return true;
+  }
+  return false;
+}
+
+DataType common_numeric_type(DataType a, DataType b) {
+  int w1, w2;
+  bool s1, s2, f1, f2;
+  get_numeric_info(a, &w1, &s1, &f1);
+  get_numeric_info(b, &w2, &s2, &f2);
+  // prefer larger width, if equal, prefer signed
+  if (w1 >= w2)
+    return a;
+  return b;
+}
+
 void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
   if (!root)
     return;
@@ -991,7 +1067,8 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         break;
       case AST_FUNC_CALL: {
         AstNode *fn_decl = NULL;
-        if (node->as.func_call.caller && node->as.func_call.caller->type == AST_IDENTIF &&
+        if (node->as.func_call.caller &&
+            node->as.func_call.caller->type == AST_IDENTIF &&
             node->as.func_call.caller->as.identif.res_sm) {
           fn_decl = node->as.func_call.caller->as.identif.res_sm->decl_node;
         }
@@ -1219,49 +1296,115 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_BINOP: {
         if (!node->as.binop.left || !node->as.binop.right)
           break;
-        DataType left_t = node->as.binop.left->eval_type;
-        DataType right_t = node->as.binop.right->eval_type;
 
-        bool is_assign = (node->as.binop.op.type == TOKEN_ASSIGN);
+        AstNode *left = node->as.binop.left;
+        AstNode *right = node->as.binop.right;
 
-        if (!is_assign && node->as.binop.op.type != TOKEN_COMPARE &&
-            node->as.binop.op.len >= 2) {
-          if (node->as.binop.op.start[node->as.binop.op.len - 1] == '=') {
+        DataType left_t = left->eval_type;
+        DataType right_t = right->eval_type;
+
+        bool left_lit = (left->type == AST_NUM_LIT);
+        bool right_lit = (right->type == AST_NUM_LIT);
+
+        if (left_lit && is_numeric_type(right_t)) {
+          long long val = parse_num_lit(left);
+          if (fits_in_type(val, right_t)) {
+            left->eval_type = right_t;
+            left_t = right_t;
+          } else {
+            sem_report(ctx, DIAG_ERROR, left->as.num_lit.val,
+                       "Integer literal %lld does not fit in type '%.*s'", val,
+                       (int)right_t.name.len, right_t.name.start);
+            left->eval_type = right_t;
+            left_t = right_t;
+          }
+        } else if (right_lit && is_numeric_type(left_t)) {
+          long long val = parse_num_lit(right);
+          if (fits_in_type(val, left_t)) {
+            right->eval_type = left_t;
+            right_t = left_t;
+          } else {
+            sem_report(ctx, DIAG_ERROR, right->as.num_lit.val,
+                       "Integer literal %lld does not fit in type '%.*s'", val,
+                       (int)left_t.name.len, left_t.name.start);
+            right->eval_type = left_t;
+            right_t = left_t;
+          }
+        }
+
+        // If both are numeric literals, choose a common type
+        if (left_lit && right_lit) {
+          if (is_numeric_type(left_t) && is_numeric_type(right_t)) {
+            if (item.expected && is_numeric_type(*item.expected)) {
+              long long lval = parse_num_lit(left);
+              long long rval = parse_num_lit(right);
+              if (fits_in_type(lval, *item.expected) &&
+                  fits_in_type(rval, *item.expected)) {
+                left->eval_type = *item.expected;
+                right->eval_type = *item.expected;
+                left_t = *item.expected;
+                right_t = *item.expected;
+              } else {
+                DataType common = common_numeric_type(left_t, right_t);
+                left->eval_type = common;
+                right->eval_type = common;
+                left_t = common;
+                right_t = common;
+              }
+            } else {
+              DataType common = common_numeric_type(left_t, right_t);
+              left->eval_type = common;
+              right->eval_type = common;
+              left_t = common;
+              right_t = common;
+            }
+          }
+        }
+
+        bool is_assign = false;
+        Token op = node->as.binop.op;
+        if (op.type == TOKEN_ASSIGN) {
+          is_assign = true;
+        } else if (op.len == 2) {
+          const char *s = op.start;
+          if ((s[0] == '+' || s[0] == '-' || s[0] == '*' || s[0] == '/' ||
+               s[0] == '%' || s[0] == '&' || s[0] == '|' || s[0] == '^') &&
+              s[1] == '=') {
+            is_assign = true;
+          }
+        } else if (op.len == 3) {
+          const char *s = op.start;
+          if ((s[0] == '<' && s[1] == '<' && s[2] == '=') ||
+              (s[0] == '>' && s[1] == '>' && s[2] == '=')) {
             is_assign = true;
           }
         }
 
         if (is_assign && !left_t.is_mut) {
-          Token err_tok = get_expr_token(node->as.binop.left);
+          Token err_tok = get_expr_token(left);
           if (err_tok.len == 0)
-            err_tok = node->as.binop.op;
+            err_tok = op;
           sem_report(ctx, DIAG_ERROR, err_tok,
                      "Cannot mutate immutable variable '%.*s'", err_tok.len,
                      err_tok.start);
         }
 
-        if (node->as.binop.op.start[0] == '/') {
-          AstNode *right = node->as.binop.right;
-
-          if (right->type == AST_NUM_LIT) {
-            if (atof(right->as.num_lit.val.start) == 0.0) {
-              sem_report(ctx, DIAG_ERROR, right->as.num_lit.val,
-                         "Error at line %u, col %u: Division by zero.\n",
-                         node->as.binop.op.line, node->as.binop.op.col);
-            }
+        if (op.start[0] == '/' && right->type == AST_NUM_LIT) {
+          if (atof(right->as.num_lit.val.start) == 0.0) {
+            sem_report(ctx, DIAG_ERROR, right->as.num_lit.val,
+                       "Division by zero.");
           }
         }
-        if (node->as.binop.op.type == TOKEN_COMPARE) {
+
+        if (op.type == TOKEN_COMPARE) {
           int l_w, r_w;
           bool l_s, r_s, l_f, r_f;
           bool left_num = get_numeric_info(left_t, &l_w, &l_s, &l_f);
           bool right_num = get_numeric_info(right_t, &r_w, &r_s, &r_f);
-
           bool ptr_ok = (left_t.ptr_depth == right_t.ptr_depth &&
                          left_t.array_dimens == right_t.array_dimens);
-
           if (!(left_num && right_num) && !ptr_ok) {
-            sem_report(ctx, DIAG_ERROR, node->as.binop.op,
+            sem_report(ctx, DIAG_ERROR, op,
                        "Cannot compare non‑numeric types '%.*s' and '%.*s'",
                        left_t.name.len, left_t.name.start, right_t.name.len,
                        right_t.name.start);
@@ -1270,27 +1413,24 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         } else {
           if (!is_type_compatible(left_t, right_t, false) &&
               !is_type_compatible(right_t, left_t, false)) {
-            sem_report(ctx, DIAG_WARNING, node->as.binop.op,
-                       "Type Error at %u:%u: Incompatible operands '%.*s' and "
-                       "'%.*s' for "
-                       "'%.*s'.\n",
-                       node->as.binop.op.line, node->as.binop.op.col,
+            sem_report(ctx, DIAG_WARNING, op,
+                       "Incompatible operands '%.*s' and '%.*s' for '%.*s'",
                        left_t.name.len, left_t.name.start, right_t.name.len,
-                       right_t.name.start, node->as.binop.op.len,
-                       node->as.binop.op.start);
+                       right_t.name.start, op.len, op.start);
           }
 
-          if (node->as.binop.op.type == TOKEN_COMPARE) {
-            node->eval_type = EXPECT_BOOL;
-          } else if (item.expected) {
+          if (item.expected) {
             node->eval_type = *item.expected;
           } else {
-            int l_w = 0, r_w = 0;
-            bool l_s, r_s, l_f, r_f;
-            get_numeric_info(left_t, &l_w, &l_s, &l_f);
-            get_numeric_info(right_t, &r_w, &r_s, &r_f);
-
-            node->eval_type = (l_w >= r_w) ? left_t : right_t;
+            if (is_numeric_type(left_t) && is_numeric_type(right_t)) {
+              int l_w = 0, r_w = 0;
+              bool l_s, r_s, l_f, r_f;
+              get_numeric_info(left_t, &l_w, &l_s, &l_f);
+              get_numeric_info(right_t, &r_w, &r_s, &r_f);
+              node->eval_type = (l_w >= r_w) ? left_t : right_t;
+            } else {
+              node->eval_type = left_t;
+            }
           }
         }
         break;
@@ -1411,9 +1551,9 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
                      strncmp(node->eval_type.name.start, "str", 3) == 0) {
             DataType char_type = create_basic_type("char");
             char_type.is_mut = base_type.is_mut;
-						char_type.is_static = base_type.is_static;
-						char_type.is_extern = base_type.is_extern;
-						char_type.is_threadlocal = base_type.is_threadlocal;
+            char_type.is_static = base_type.is_static;
+            char_type.is_extern = base_type.is_extern;
+            char_type.is_threadlocal = base_type.is_threadlocal;
             node->eval_type = char_type;
           }
         }
