@@ -1427,10 +1427,15 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
                                strncmp(right_t.name.start, "str", 3) == 0 &&
                                right_t.ptr_depth == 0);
 
-          bool is_ptr_arithmetic =
-              (op.len == 1 && (op.start[0] == '+' || op.start[0] == '-')) &&
-              ((left_is_ptr && is_numeric_type(right_t)) ||
-               (right_is_ptr && is_numeric_type(left_t)));
+          bool is_ptr_arithmetic = false;
+          if ((op.len == 1 && (op.start[0] == '+' || op.start[0] == '-')) ||
+              (op.len == 2 && ((op.start[0] == '+' && op.start[1] == '=') ||
+                               (op.start[0] == '-' && op.start[1] == '=')))) {
+            if ((left_is_ptr && is_numeric_type(right_t)) ||
+                (right_is_ptr && is_numeric_type(left_t))) {
+              is_ptr_arithmetic = true;
+            }
+          }
 
           // Bypass warning if it is pointer arithmetic
           if (!is_ptr_arithmetic &&
