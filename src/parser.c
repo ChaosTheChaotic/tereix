@@ -1226,7 +1226,8 @@ bool parse_step(ParseCtx *ctx) {
           !(is_unary && !is_postfix) && (ctx->curr.type != TOKEN_ASSIGN);
 
       while (ctx->op_count > 0 &&
-             *ctx->op_stack[ctx->op_count - 1].op.start != '(') {
+             (ctx->op_stack[ctx->op_count - 1].op.start == NULL ||
+              *ctx->op_stack[ctx->op_count - 1].op.start != '(')) {
         OpInfo top_op = ctx->op_stack[ctx->op_count - 1];
         int top_prec =
             get_precedence(top_op.op, top_op.is_unary, top_op.is_postfix);
@@ -1282,9 +1283,9 @@ bool parse_step(ParseCtx *ctx) {
 
   case STATE_GROUPING_DONE: {
     if (ctx->op_count > 0 &&
-        *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+        ctx->op_stack[ctx->op_count - 1].op.start != NULL &&
+        *ctx->op_stack[ctx->op_count - 1].op.start == '(')
       ctx->op_count--;
-    }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
       adv(ctx);
@@ -1335,9 +1336,9 @@ bool parse_step(ParseCtx *ctx) {
 
     // Remove the dummy
     if (ctx->op_count > 0 &&
-        *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+        ctx->op_stack[ctx->op_count - 1].op.start != NULL &&
+        *ctx->op_stack[ctx->op_count - 1].op.start == '(')
       ctx->op_count--;
-    }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ']') {
       adv(ctx);
@@ -1413,9 +1414,9 @@ bool parse_step(ParseCtx *ctx) {
   case STATE_BLOCK_EXPR_DONE: {
     // Remove dummy
     if (ctx->op_count > 0 &&
-        *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+        ctx->op_stack[ctx->op_count - 1].op.start != NULL &&
+        *ctx->op_stack[ctx->op_count - 1].op.start == '(')
       ctx->op_count--;
-    }
     break;
   }
   case STATE_IN_FUNC: {
@@ -2572,9 +2573,9 @@ bool parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
       adv(ctx);
       if (ctx->op_count > 0 &&
-          *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+          ctx->op_stack[ctx->op_count - 1].op.start != NULL &&
+          *ctx->op_stack[ctx->op_count - 1].op.start == '(')
         ctx->op_count--;
-      }
       ctx->expect_operand = false;
       push_state(ctx, STATE_IN_EXPR);
       break;
@@ -2585,9 +2586,9 @@ bool parse_step(ParseCtx *ctx) {
       if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
         adv(ctx);
         if (ctx->op_count > 0 &&
-            *ctx->op_stack[ctx->op_count - 1].op.start == '(') {
+            ctx->op_stack[ctx->op_count - 1].op.start != NULL &&
+            *ctx->op_stack[ctx->op_count - 1].op.start == '(')
           ctx->op_count--;
-        }
         ctx->expect_operand = false;
         push_state(ctx, STATE_IN_EXPR);
         break;

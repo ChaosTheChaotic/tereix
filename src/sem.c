@@ -221,6 +221,13 @@ bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float) {
     return true;
   }
 
+  if (t.name.len == 4 && strncmp(t.name.start, "char", 4) == 0) {
+    *is_signed = false;
+    *is_float = false;
+    *width = 8;
+    return true;
+  }
+
   char kind = t.name.start[0];
   if (kind == 'u' || kind == 'i' || kind == 'f') {
     *is_signed = (kind == 'i' || kind == 'f');
@@ -1411,7 +1418,23 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           }
           node->eval_type = EXPECT_BOOL;
         } else {
-          if (!is_type_compatible(left_t, right_t, false) &&
+          bool left_is_ptr = left_t.ptr_depth > 0 ||
+                             (left_t.name.len == 3 &&
+                              strncmp(left_t.name.start, "str", 3) == 0 &&
+                              left_t.ptr_depth == 0);
+          bool right_is_ptr = right_t.ptr_depth > 0 ||
+                              (right_t.name.len == 3 &&
+                               strncmp(right_t.name.start, "str", 3) == 0 &&
+                               right_t.ptr_depth == 0);
+
+          bool is_ptr_arithmetic =
+              (op.len == 1 && (op.start[0] == '+' || op.start[0] == '-')) &&
+              ((left_is_ptr && is_numeric_type(right_t)) ||
+               (right_is_ptr && is_numeric_type(left_t)));
+
+          // Bypass warning if it is pointer arithmetic
+          if (!is_ptr_arithmetic &&
+              !is_type_compatible(left_t, right_t, false) &&
               !is_type_compatible(right_t, left_t, false)) {
             sem_report(ctx, DIAG_WARNING, op,
                        "Incompatible operands '%.*s' and '%.*s' for '%.*s'",
@@ -1422,7 +1445,10 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
           if (item.expected) {
             node->eval_type = *item.expected;
           } else {
-            if (is_numeric_type(left_t) && is_numeric_type(right_t)) {
+            // Assign the pointer type as the result for pointer arithmetic
+            if (is_ptr_arithmetic) {
+              node->eval_type = left_is_ptr ? left_t : right_t;
+            } else if (is_numeric_type(left_t) && is_numeric_type(right_t)) {
               int l_w = 0, r_w = 0;
               bool l_s, r_s, l_f, r_f;
               get_numeric_info(left_t, &l_w, &l_s, &l_f);
@@ -1568,8 +1594,23 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
 
       case AST_DEREF:
         if (node->as.unop.operand) {
-          node->eval_type = node->as.unop.operand->eval_type;
-          node->eval_type.ptr_depth--;
+          DataType base_type = node->as.unop.operand->eval_type;
+
+          if (base_type.ptr_depth == 0 && base_type.array_dimens == 0 &&
+              base_type.name.len == 3 &&
+              strncmp(base_type.name.start, "str", 3) == 0) {
+
+            DataType char_type = create_basic_type("char");
+            char_type.is_mut = base_type.is_mut;
+            char_type.is_static = base_type.is_static;
+            char_type.is_extern = base_type.is_extern;
+            char_type.is_threadlocal = base_type.is_threadlocal;
+            node->eval_type = char_type;
+
+          } else {
+            node->eval_type = base_type;
+            node->eval_type.ptr_depth--;
+          }
         }
         break;
 
