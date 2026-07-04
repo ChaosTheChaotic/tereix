@@ -228,6 +228,24 @@ bool get_numeric_info(DataType t, int *width, bool *is_signed, bool *is_float) {
     return true;
   }
 
+  if (t.name.len == 5 && strncmp(t.name.start + 1, "size", 4) == 0) {
+    char first = t.name.start[0];
+    if (first == 'u') {
+      *is_signed = false;
+      *is_float = false;
+    } else if (first == 'i') {
+      *is_signed = true;
+      *is_float = false;
+    } else if (first == 'f') {
+      *is_signed = true;
+      *is_float = true;
+    } else {
+      return false;
+    }
+    *width = 64;
+    return true;
+  }
+
   char kind = t.name.start[0];
   if (kind == 'u' || kind == 'i' || kind == 'f') {
     *is_signed = (kind == 'i' || kind == 'f');
@@ -849,13 +867,19 @@ bool is_numeric_type(DataType t) {
   if (len == 4 && strncmp(s, "size", 4) == 0)
     return true;
   if (len == 4 && strncmp(s, "char", 4) == 0)
-    return true; // treat char as numeric
+    return true;
+  // Handle {i,u,f}size
+  if (len == 5 && strncmp(s + 1, "size", 4) == 0) {
+    char first = s[0];
+    if (first == 'i' || first == 'u' || first == 'f')
+      return true;
+  }
   if (len < 2 || len > 3)
     return false;
   char first = s[0];
   if (first != 'i' && first != 'u' && first != 'f')
     return false;
-  // ensure rest are digits
+
   for (size_t i = 1; i < len; i++) {
     if (!isdigit((unsigned char)s[i]))
       return false;
