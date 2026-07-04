@@ -1404,13 +1404,33 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
         }
 
         if (op.type == TOKEN_COMPARE) {
-          int l_w, r_w;
-          bool l_s, r_s, l_f, r_f;
-          bool left_num = get_numeric_info(left_t, &l_w, &l_s, &l_f);
-          bool right_num = get_numeric_info(right_t, &r_w, &r_s, &r_f);
-          bool ptr_ok = (left_t.ptr_depth == right_t.ptr_depth &&
-                         left_t.array_dimens == right_t.array_dimens);
-          if (!(left_num && right_num) && !ptr_ok) {
+          bool left_null = (left_t.name.len == 4 &&
+                            strncmp(left_t.name.start, "null", 4) == 0);
+          bool right_null = (right_t.name.len == 4 &&
+                             strncmp(right_t.name.start, "null", 4) == 0);
+          bool left_ptr = (left_t.ptr_depth > 0 || left_t.array_dimens > 0);
+          bool right_ptr = (right_t.ptr_depth > 0 || right_t.array_dimens > 0);
+
+          bool valid_compare = false;
+          if (left_null && right_null) {
+            valid_compare = true;
+          } else if (left_null && right_ptr) {
+            valid_compare = true;
+          } else if (right_null && left_ptr) {
+            valid_compare = true;
+          } else {
+            int l_w, r_w;
+            bool l_s, r_s, l_f, r_f;
+            bool left_num = get_numeric_info(left_t, &l_w, &l_s, &l_f);
+            bool right_num = get_numeric_info(right_t, &r_w, &r_s, &r_f);
+            bool ptr_ok = (left_t.ptr_depth == right_t.ptr_depth &&
+                           left_t.array_dimens == right_t.array_dimens);
+            if ((left_num && right_num) || ptr_ok) {
+              valid_compare = true;
+            }
+          }
+
+          if (!valid_compare) {
             sem_report(ctx, DIAG_ERROR, op,
                        "Cannot compare non‑numeric types '%.*s' and '%.*s'",
                        left_t.name.len, left_t.name.start, right_t.name.len,
