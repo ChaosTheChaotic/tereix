@@ -2806,16 +2806,7 @@ DataType parse_type(ParseCtx *ctx) {
       }
     } else if (ctx->curr.len == 1 &&
                (*ctx->curr.start == '*' || *ctx->curr.start == '&')) {
-      switch (*ctx->curr.start) {
-      case '*': {
-        type.ptr_depth++;
-        break;
-      }
-      case '&': {
-        type.ptr_depth--;
-        break;
-      }
-      }
+			type.ptr_depth++;
       adv(ctx);
     } else {
       break;
@@ -2824,16 +2815,7 @@ DataType parse_type(ParseCtx *ctx) {
 
   while (ctx->curr.len == 1 &&
          (*ctx->curr.start == '*' || *ctx->curr.start == '&')) {
-    switch (*ctx->curr.start) {
-    case '*': {
-      type.ptr_depth++;
-      break;
-    }
-    case '&': {
-      type.ptr_depth--;
-      break;
-    }
-    }
+		type.ptr_depth++;
     adv(ctx);
   }
 
