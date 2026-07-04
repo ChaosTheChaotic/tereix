@@ -1256,6 +1256,18 @@ bool parse_step(ParseCtx *ctx) {
         break;
       } else {
         // Indexing
+        while (ctx->op_count > 0 &&
+               (ctx->op_stack[ctx->op_count - 1].op.start == NULL ||
+                *ctx->op_stack[ctx->op_count - 1].op.start != '(')) {
+          OpInfo top_op = ctx->op_stack[ctx->op_count - 1];
+          int top_prec =
+              get_precedence(top_op.op, top_op.is_unary, top_op.is_postfix);
+          if (top_prec >= 14) { // 14 is for '.'
+            apply_op(ctx);
+          } else {
+            break;
+          }
+        }
         adv(ctx);
         AstNode *base = pop_node(ctx);
         AstNode *idx_node = new_node(ctx->arena, AST_INDEX);
