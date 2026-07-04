@@ -1595,17 +1595,29 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_INDEX:
         if (node->as.index.base) {
           DataType base_type = node->as.index.base->eval_type;
-          node->eval_type = node->as.index.base->eval_type;
-          if (node->eval_type.array_dimens > 0) {
+          node->eval_type = base_type;
+
+          if (base_type.array_dimens > 0) {
             node->eval_type.array_dimens--;
-          } else if (node->eval_type.name.len == 3 &&
-                     strncmp(node->eval_type.name.start, "str", 3) == 0) {
+          } else if (base_type.ptr_depth > 0) {
+            node->eval_type.ptr_depth--;
+          } else if (base_type.name.len == 3 &&
+                     strncmp(base_type.name.start, "str", 3) == 0) {
             DataType char_type = create_basic_type("char");
             char_type.is_mut = base_type.is_mut;
             char_type.is_static = base_type.is_static;
             char_type.is_extern = base_type.is_extern;
             char_type.is_threadlocal = base_type.is_threadlocal;
             node->eval_type = char_type;
+          }
+
+          if (node->as.index.index) {
+            DataType idx_type = node->as.index.index->eval_type;
+            if (!is_numeric_type(idx_type)) {
+              sem_report(ctx, DIAG_ERROR, get_expr_token(node->as.index.index),
+                         "Index must be of integer type, got '%.*s'",
+                         idx_type.name.len, idx_type.name.start);
+            }
           }
         }
         break;
