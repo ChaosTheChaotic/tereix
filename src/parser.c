@@ -574,7 +574,7 @@ bool is_type(ParseCtx *ctx) {
     tmp_ctx.lex = &saved_lex;
     Token next = peek_token(&tmp_ctx);
     // If next is a dot this is a member access not a type
-    if (next.type == TOKEN_PUNC && *next.start == '.') {
+    if ((next.type == TOKEN_PUNC || (next.type == TOKEN_OP && next.len == 1)) && *next.start == '.') {
       return false;
     }
     return true;
