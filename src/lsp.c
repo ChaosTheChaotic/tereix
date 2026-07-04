@@ -775,22 +775,28 @@ char *get_comments_above(const char *source, Token target) {
     return NULL;
   }
 
+  // Reverse lines to preserve source order
+  for (size_t i = 0; i < line_count / 2; i++) {
+    const char *tmp = comment_lines[i];
+    comment_lines[i] = comment_lines[line_count - 1 - i];
+    comment_lines[line_count - 1 - i] = tmp;
+  }
+
   size_t total_len = 0;
   for (size_t i = 0; i < line_count; i++) {
     const char *ln_start = comment_lines[i];
-    const char *ln_end = (i == 0) ? line_end : comment_lines[i - 1];
+    // End of line is the start of the next line, or line_end for the last
+    const char *ln_end =
+        (i == line_count - 1) ? line_end : comment_lines[i + 1];
 
-    // Skip leading whitespace
     const char *scan = ln_start;
     while (scan < ln_end && isspace((unsigned char)*scan))
       scan++;
-    // Find and skip "//"
     if (scan + 1 < ln_end && scan[0] == '/' && scan[1] == '/') {
       scan += 2;
       while (scan < ln_end && isspace((unsigned char)*scan))
         scan++;
 
-      // Find end of line (to strip newline and trailing spaces)
       const char *line_end_no_nl = ln_end;
       while (line_end_no_nl > scan &&
              (line_end_no_nl[-1] == '\n' || line_end_no_nl[-1] == '\r'))
@@ -808,11 +814,6 @@ char *get_comments_above(const char *source, Token target) {
     }
   }
 
-  if (total_len == 0) {
-    free(comment_lines);
-    return NULL;
-  }
-
   char *result = malloc(total_len + 1);
   if (!result) {
     free(comment_lines);
@@ -822,7 +823,8 @@ char *get_comments_above(const char *source, Token target) {
   char *out = result;
   for (size_t i = 0; i < line_count; i++) {
     const char *ln_start = comment_lines[i];
-    const char *ln_end = (i == 0) ? line_end : comment_lines[i - 1];
+    const char *ln_end =
+        (i == line_count - 1) ? line_end : comment_lines[i + 1];
 
     const char *scan = ln_start;
     while (scan < ln_end && isspace((unsigned char)*scan))
