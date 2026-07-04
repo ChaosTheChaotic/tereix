@@ -604,14 +604,24 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
             AstNode *func_def = map_get(func_map, mangled, mangled_len);
             bool has_self = false;
+            bool needs_addrof = false;
+            bool needs_deref = false;
+
             if (func_def && func_def->type == AST_FUNC) {
               AstNode *first_param = func_def->as.func_def.params;
               if (first_param) {
                 DataType pt = first_param->as.fn_param.type;
+
                 if (pt.name.len == base_type.len &&
                     strncmp(pt.name.start, base_type.start, pt.name.len) == 0 &&
-                    pt.ptr_depth == 0 && pt.array_dimens == 0) {
+                    pt.array_dimens == 0) {
                   has_self = true;
+
+                  if (pt.ptr_depth > base_eval.ptr_depth) {
+                    needs_addrof = true;
+                  } else if (pt.ptr_depth < base_eval.ptr_depth) {
+                    needs_deref = true;
+                  }
                 }
               }
             }
@@ -619,7 +629,7 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             sb_append_len(sb, mangled, mangled_len);
             sb_append(sb, "(");
 
-            f->aux = (AstNode *)has_self;
+            f->aux = (AstNode *)(uintptr_t)has_self;
             f->aux2 = n->as.func_call.args;
 
             if (has_self) {
@@ -629,8 +639,24 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                 stack = realloc(stack, sizeof(IterFrame) * cap);
                 f = &stack[top - 1];
               }
-              stack[top++] =
-                  (IterFrame){member_node->as.member.base, 0, NULL, NULL, 2};
+
+              AstNode *self_arg = member_node->as.member.base;
+
+              if (needs_addrof) {
+                AstNode *addrof = arena_alloc(arena, sizeof(AstNode));
+                memset(addrof, 0, sizeof(AstNode));
+                addrof->type = AST_ADDR_OF;
+                addrof->as.unop.operand = self_arg;
+                self_arg = addrof;
+              } else if (needs_deref) {
+                AstNode *deref = arena_alloc(arena, sizeof(AstNode));
+                memset(deref, 0, sizeof(AstNode));
+                deref->type = AST_DEREF;
+                deref->as.unop.operand = self_arg;
+                self_arg = deref;
+              }
+
+              stack[top++] = (IterFrame){self_arg, 0, NULL, NULL, 2};
             } else {
               f->step = 2;
               f->aux = f->aux2;
