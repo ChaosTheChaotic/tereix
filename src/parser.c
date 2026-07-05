@@ -567,14 +567,12 @@ bool is_type(ParseCtx *ctx) {
   if (is_builtin_type_kw(ctx, t))
     return true;
 
-  if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
-      strncmp(ctx->curr.start, "self", 4) == 0 && ctx->ag_depth > 0) {
-    LexCtx saved_lex = *ctx->lex;
-    ParseCtx tmp_ctx = *ctx;
-    tmp_ctx.lex = &saved_lex;
-    Token next = peek_token(&tmp_ctx);
+  if (t.type == TOKEN_IDENTIF && t.len == 4 &&
+      strncmp(t.start, "self", 4) == 0 && ctx->ag_depth > 0) {
+    Token next = peek_token(&tmp_parse);
     // If next is a dot this is a member access not a type
-    if ((next.type == TOKEN_PUNC || (next.type == TOKEN_OP && next.len == 1)) && *next.start == '.') {
+    if ((next.type == TOKEN_PUNC || (next.type == TOKEN_OP && next.len == 1)) &&
+        *next.start == '.') {
       return false;
     }
     return true;
