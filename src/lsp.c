@@ -2013,9 +2013,8 @@ bool lsp_worker_loop(void *arg) {
       char *perm_abs = arena_alloc(sem->arena, strlen(curr_abs) + 1);
       strcpy(perm_abs, curr_abs);
       const char *mod_name = extract_mod_name(sem->arena, perm_abs);
-      pthread_mutex_unlock(data->arena_mutex);
-
       mod = new_mod(sem->arena, perm_abs, mod_name, ast);
+      pthread_mutex_unlock(data->arena_mutex);
 
       char uri_buf[8192];
       snprintf(uri_buf, sizeof(uri_buf), "file://%s", perm_abs);
