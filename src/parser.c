@@ -2523,10 +2523,19 @@ bool parse_step(ParseCtx *ctx) {
   }
 
   case STATE_ENUM_MEMBER_DONE: {
-    AstNode *expr = pop_node(ctx);
-    AstNode *enum_member = pop_node(ctx);
+    AstNode *top = ctx->node_stack[ctx->node_count - 1];
 
-    enum_member->as.enum_member.val = expr;
+    // Check if an expression was actually parsed and pushed
+    if (top->type == AST_ENUM_MEMBER) {
+      report_error(ctx, ctx->curr,
+                   "Expected expression after '=' in enum member");
+      top->as.enum_member.val = NULL;
+      pop_node(ctx);
+    } else {
+      AstNode *expr = pop_node(ctx);
+      AstNode *enum_member = pop_node(ctx);
+      enum_member->as.enum_member.val = expr;
+    }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',') {
       adv(ctx);
