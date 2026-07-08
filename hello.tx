@@ -1,7 +1,0 @@
-extern {
-	mut int puts(str s);
-}
-
-u8 main() {
-	puts("Hello, world!");
-}
