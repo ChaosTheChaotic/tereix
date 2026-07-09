@@ -238,25 +238,36 @@ size_t format_type_to_buf(DataType type, char *buf, size_t size) {
 }
 
 void format_func_signature(AstNode *func_node, char *buf, size_t size) {
-  if (!func_node || func_node->type != AST_FUNC || !buf || size == 0) return;
+  if (!func_node || func_node->type != AST_FUNC || !buf || size == 0)
+    return;
   size_t offset = 0;
 
-  #define S_APP(...) do { \
-    if (offset < size - 1) { \
-      int w = snprintf(buf + offset, size - offset, __VA_ARGS__); \
-      if (w > 0) { offset += w; if (offset >= size) offset = size - 1; } \
-    } \
-  } while(0)
+#define S_APP(...)                                                             \
+  do {                                                                         \
+    if (offset < size - 1) {                                                   \
+      int w = snprintf(buf + offset, size - offset, __VA_ARGS__);              \
+      if (w > 0) {                                                             \
+        offset += w;                                                           \
+        if (offset >= size)                                                    \
+          offset = size - 1;                                                   \
+      }                                                                        \
+    }                                                                          \
+  } while (0)
 
-  offset += format_type_to_buf(func_node->as.func_def.ret_type, buf + offset, size - offset);
-  if (offset >= size) offset = size - 1;
+  offset += format_type_to_buf(func_node->as.func_def.ret_type, buf + offset,
+                               size - offset);
+  if (offset >= size)
+    offset = size - 1;
 
-  S_APP(" %.*s(", (int)func_node->as.func_def.fn_name.len, func_node->as.func_def.fn_name.start);
+  S_APP(" %.*s(", (int)func_node->as.func_def.fn_name.len,
+        func_node->as.func_def.fn_name.start);
 
   AstNode *param = func_node->as.func_def.params;
   while (param && offset < size - 1) {
-    offset += format_type_to_buf(param->as.fn_param.type, buf + offset, size - offset);
-    if (offset >= size) offset = size - 1;
+    offset += format_type_to_buf(param->as.fn_param.type, buf + offset,
+                                 size - offset);
+    if (offset >= size)
+      offset = size - 1;
 
     S_APP(" %.*s", (int)param->as.fn_param.id.len, param->as.fn_param.id.start);
 
@@ -266,7 +277,7 @@ void format_func_signature(AstNode *func_node, char *buf, size_t size) {
     param = param->next;
   }
   S_APP(")");
-  #undef S_APP
+#undef S_APP
 }
 
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
@@ -388,8 +399,17 @@ AstNode *find_ident_at_pos(AstNode *root, unsigned int line, int character) {
 
     if (node->next) {
       if (top >= cap - 1) {
-        cap *= 2;
-        stack = realloc(stack, cap * sizeof(AstNode *));
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, cap * sizeof(AstNode *));
+        if (!new_stack) {
+          fprintf(
+              stderr,
+              "OOM encountered whilst reallocating stack during AST lookup.\n");
+          free(stack);
+          return NULL;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = node->next;
     }
@@ -398,8 +418,16 @@ AstNode *find_ident_at_pos(AstNode *root, unsigned int line, int character) {
   do {                                                                         \
     if (n) {                                                                   \
       if (top >= cap - 1) {                                                    \
-        cap *= 2;                                                              \
-        stack = realloc(stack, cap * sizeof(AstNode *));                       \
+        size_t new_cap = cap * 2;                                              \
+        AstNode **new_stack = realloc(stack, cap * sizeof(AstNode *));         \
+        if (!new_stack) {                                                      \
+          fprintf(stderr, "OOM encountered whilst reallocating stack during "  \
+                          "AST lookup.\n");                                    \
+          free(stack);                                                         \
+          return NULL;                                                         \
+        }                                                                      \
+        stack = new_stack;                                                     \
+        cap = new_cap;                                                         \
       }                                                                        \
       stack[top++] = (n);                                                      \
     }                                                                          \
@@ -760,9 +788,13 @@ char *get_comments_above(const char *source, Token target) {
     if (scan + 1 < line_end && scan[0] == '/' && scan[1] == '/') {
       if (line_count + 1 > cap) {
         cap = cap ? cap * 2 : 16;
-        comment_lines = realloc(comment_lines, sizeof(const char *) * cap);
-        if (!comment_lines)
+        const char **new_lines =
+            realloc(comment_lines, sizeof(const char *) * cap);
+        if (!new_lines) {
+          free(comment_lines);
           return NULL;
+        }
+        comment_lines = new_lines;
       }
       comment_lines[line_count++] = line_start;
     } else {
@@ -1071,8 +1103,15 @@ void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
     // Push sibling
     if (node->next) {
       if (top >= cap - 1) {
-        cap *= 2;
-        stack = realloc(stack, cap * sizeof(AstNode *));
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, new_cap * sizeof(AstNode *));
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = node->next;
     }
@@ -1082,8 +1121,15 @@ void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
   do {                                                                         \
     if (n) {                                                                   \
       if (top >= cap - 1) {                                                    \
-        cap *= 2;                                                              \
-        stack = realloc(stack, cap * sizeof(AstNode *));                       \
+        size_t new_cap = cap * 2;                                              \
+        AstNode **new_stack = realloc(stack, new_cap * sizeof(AstNode *));     \
+        if (!new_stack) {                                                      \
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");     \
+          free(stack);                                                         \
+          return;                                                              \
+        }                                                                      \
+        stack = new_stack;                                                     \
+        cap = new_cap;                                                         \
       }                                                                        \
       stack[top++] = (n);                                                      \
     }                                                                          \
@@ -1400,43 +1446,93 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             // Push sibling
             if (node->next) {
               if (top >= cap - 1) {
-                cap *= 2;
-                stack = realloc(stack, cap * sizeof(AstNode *));
+                size_t new_cap = cap * 2;
+                AstNode **new_stack =
+                    realloc(stack, new_cap * sizeof(AstNode *));
+                if (!new_stack) {
+                  fprintf(stderr, "OOM encountered when reallocating stack.\n");
+                  free(stack);
+                  return;
+                }
+                cap = new_cap;
+                stack = new_stack;
               }
               stack[top++] = node->next;
             }
             // Push children
             if (node->type == AST_BLOCK && node->as.block.first_stmt) {
               if (top >= cap - 1) {
-                cap *= 2;
-                stack = realloc(stack, cap * sizeof(AstNode *));
+                size_t new_cap = cap * 2;
+                AstNode **new_stack =
+                    realloc(stack, new_cap * sizeof(AstNode *));
+                if (!new_stack) {
+                  fprintf(stderr, "OOM encountered when reallocating stack.\n");
+                  free(stack);
+                  return;
+                }
+                cap = new_cap;
+                stack = new_stack;
               }
               stack[top++] = node->as.block.first_stmt;
             } else if (node->type == AST_IF) {
               if (node->as.if_check.elseAct) {
                 if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
+                  size_t new_cap = cap * 2;
+                  AstNode **new_stack =
+                      realloc(stack, new_cap * sizeof(AstNode *));
+                  if (!new_stack) {
+                    fprintf(stderr,
+                            "OOM encountered when reallocating stack.\n");
+                    free(stack);
+                    return;
+                  }
+                  cap = new_cap;
+                  stack = new_stack;
                 }
                 stack[top++] = node->as.if_check.elseAct;
               }
               if (node->as.if_check.action) {
                 if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
+                  size_t new_cap = cap * 2;
+                  AstNode **new_stack =
+                      realloc(stack, new_cap * sizeof(AstNode *));
+                  if (!new_stack) {
+                    fprintf(stderr,
+                            "OOM encountered when reallocating stack.\n");
+                    free(stack);
+                    return;
+                  }
+                  cap = new_cap;
+                  stack = new_stack;
                 }
                 stack[top++] = node->as.if_check.action;
               }
             } else if (node->type == AST_WHILE && node->as.while_loop.action) {
               if (top >= cap - 1) {
-                cap *= 2;
-                stack = realloc(stack, cap * sizeof(AstNode *));
+                size_t new_cap = cap * 2;
+                AstNode **new_stack =
+                    realloc(stack, new_cap * sizeof(AstNode *));
+                if (!new_stack) {
+                  fprintf(stderr, "OOM encountered when reallocating stack.\n");
+                  free(stack);
+                  return;
+                }
+                cap = new_cap;
+                stack = new_stack;
               }
               stack[top++] = node->as.while_loop.action;
             } else if (node->type == AST_FOR && node->as.for_loop.action) {
               if (top >= cap - 1) {
-                cap *= 2;
-                stack = realloc(stack, cap * sizeof(AstNode *));
+                size_t new_cap = cap * 2;
+                AstNode **new_stack =
+                    realloc(stack, new_cap * sizeof(AstNode *));
+                if (!new_stack) {
+                  fprintf(stderr, "OOM encountered when reallocating stack.\n");
+                  free(stack);
+                  return;
+                }
+                cap = new_cap;
+                stack = new_stack;
               }
               stack[top++] = node->as.for_loop.action;
             }

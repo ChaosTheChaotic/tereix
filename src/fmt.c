@@ -58,8 +58,15 @@ void collect_type_names(AstNode *root, HashMap *type_set, Arena *arena) {
     // Push children and siblings
     if (node->next) {
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = node->next;
     }
@@ -68,8 +75,15 @@ void collect_type_names(AstNode *root, HashMap *type_set, Arena *arena) {
   do {                                                                         \
     if (n) {                                                                   \
       if (top >= cap) {                                                        \
-        cap *= 2;                                                              \
-        stack = realloc(stack, sizeof(AstNode *) * cap);                       \
+        size_t new_cap = cap * 2;                                              \
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);     \
+        if (!new_stack) {                                                      \
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");     \
+          free(stack);                                                         \
+          return;                                                              \
+        }                                                                      \
+        stack = new_stack;                                                     \
+        cap = new_cap;                                                         \
       }                                                                        \
       stack[top++] = (n);                                                      \
     }                                                                          \
@@ -310,7 +324,7 @@ void print_comments_between(const char *start, const char *end, FILE *out_fp,
 bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
              const char *source_text) {
   if (!root) {
-    fprintf(stderr, "No root AST was passed to fmt_ast");
+    fprintf(stderr, "No root AST was passed to fmt_ast\n");
     return false;
   }
 
@@ -364,8 +378,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
 
     if (n->next) {
       if (ext_top >= ext_cap) {
-        ext_cap *= 2;
-        ext_stack = realloc(ext_stack, sizeof(AstNode *) * ext_cap);
+        size_t new_ext_cap = ext_cap * 2;
+        AstNode **new_ext_stack =
+            realloc(ext_stack, sizeof(AstNode *) * new_ext_cap);
+        if (!new_ext_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating ext_stack.\n");
+          free(ext_stack);
+          return false;
+        }
+        ext_stack = new_ext_stack;
+        ext_cap = new_ext_cap;
       }
       ext_stack[ext_top++] = n->next;
     }
@@ -374,8 +396,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
       AstNode *child = n->as.block.first_stmt;
       if (child) {
         if (ext_top >= ext_cap) {
-          ext_cap *= 2;
-          ext_stack = realloc(ext_stack, sizeof(AstNode *) * ext_cap);
+          size_t new_ext_cap = ext_cap * 2;
+          AstNode **new_ext_stack =
+              realloc(ext_stack, sizeof(AstNode *) * new_ext_cap);
+          if (!new_ext_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating ext_stack.\n");
+            free(ext_stack);
+            return false;
+          }
+          ext_stack = new_ext_stack;
+          ext_cap = new_ext_cap;
         }
         ext_stack[ext_top++] = child;
       }
@@ -508,8 +538,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
             item->step = 5;
 
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] = (FmtStackItem){stmt, next_depth, 0, NULL};
@@ -566,8 +604,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         if (node->as.func_def.block) {
           item->step = 1;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -630,8 +676,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
           FPRINTF_SAFE("%s", " = ");
           item->step = 1;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -701,8 +755,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
             FPRINTF_SAFE("%c", '\t');
 
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] = (FmtStackItem){mem, item->depth + 1, 0, NULL};
@@ -727,8 +789,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         } else {
           item->step = 1;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -746,8 +816,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
           item->aux = arg->next;
           item->step = item->aux ? 4 : 5;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] = (FmtStackItem){arg, item->depth, 0, NULL};
@@ -776,8 +854,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
       if (item->step == 0) {
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -786,8 +872,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE(" %.*s ", node->as.binop.op.len, node->as.binop.op.start);
         item->step = 2;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -807,8 +901,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         }
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -827,8 +929,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE("%s", "if (");
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -837,8 +947,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE("%s", ") ");
         item->step = 2;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -856,8 +974,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
           FPRINTF_SAFE("%s", "else ");
           item->step = 3;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -913,8 +1039,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
           FPRINTF_SAFE("%s", " ");
           item->step = 1;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -941,8 +1075,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
           item->aux = item->aux->next;
           item->step = (item->aux != NULL) ? 2 : 3;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] = (FmtStackItem){elem, item->depth, 0, NULL};
@@ -967,8 +1109,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
           FPRINTF_SAFE("%s", " = ");
           item->step = 1;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -989,8 +1139,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         item->step = 1;
         if (node->as.defer_stmt.contents) {
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] = (FmtStackItem){node->as.defer_stmt.contents,
@@ -1016,8 +1174,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         item->step = 1;
         if (node->as.for_loop.init) {
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -1030,8 +1196,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         item->step = 2;
         if (node->as.for_loop.check) {
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -1042,8 +1216,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         item->step = 3;
         if (node->as.for_loop.inc) {
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -1054,8 +1236,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         item->step = 4;
         if (node->as.for_loop.action) {
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -1075,8 +1265,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE("%s", "while (");
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -1085,8 +1283,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE("%s", ") ");
         item->step = 2;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -1104,8 +1310,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
       if (item->step == 0) {
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -1114,8 +1328,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE("%s", "[");
         item->step = 2;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -1130,8 +1352,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
       if (item->step == 0) {
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -1149,8 +1379,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE("%s", "switch (");
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -1166,8 +1404,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
           for (unsigned int i = 0; i < item->depth + 1; i++)
             FPRINTF_SAFE("%c", '\t');
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] = (FmtStackItem){c, item->depth + 1, 0, NULL};
@@ -1176,8 +1422,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
             FPRINTF_SAFE("%c", '\t');
           FPRINTF_SAFE("%s", "default ");
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] = (FmtStackItem){node->as.switch_stmt.default_case,
@@ -1203,8 +1457,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE("%s", "case (");
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] =
@@ -1214,8 +1476,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         item->step = 2;
         if (node->as.case_stmt.action) {
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] =
@@ -1270,8 +1540,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         FPRINTF_SAFE("%s", ")");
         item->step = 1;
         if (top >= stack_cap) {
-          stack_cap *= 2;
-          stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+          size_t new_stack_cap = stack_cap * 2;
+          FmtStackItem *new_stack =
+              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_stack_cap;
           item = &stack[top - 1];
         }
         stack[top++] = (FmtStackItem){node->as.cast.op, item->depth, 0, NULL};
@@ -1314,8 +1592,16 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
         } else {
           item->step = 1;
           if (top >= stack_cap) {
-            stack_cap *= 2;
-            stack = realloc(stack, sizeof(FmtStackItem) * stack_cap);
+            size_t new_stack_cap = stack_cap * 2;
+            FmtStackItem *new_stack =
+                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return false;
+            }
+            stack = new_stack;
+            stack_cap = new_stack_cap;
             item = &stack[top - 1];
           }
           stack[top++] = (FmtStackItem){node->as.sizeof_expr.target_expr,
@@ -1328,8 +1614,8 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
       break;
     case AST_PARAM:
       break;
-		case AST_ERROR:
-			break;
+    case AST_ERROR:
+      break;
     }
     if (top < old_top) {
       if (node->src_end && node->src_end > last_pos) {
@@ -1578,7 +1864,7 @@ bool fmt_project(const CompileOptions *restrict opts) {
       fprintf(stderr, "No AST found after trying to parse %s\n", abs_path);
       diaglist_free(&diags);
       free((void *)content);
-			continue;
+      continue;
     }
     diaglist_free(&diags);
 

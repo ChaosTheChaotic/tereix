@@ -1,6 +1,6 @@
 #include "ast_serde.h"
-#include "hashutils.h"
 #include "hashmap.h"
+#include "hashutils.h"
 #include <string.h>
 #ifdef ENABLE_AST_COMPRESSION
 #include <zstd.h>
@@ -77,15 +77,24 @@ typedef struct {
   size_t cap;
 } ByteBuffer;
 
-void buf_append(ByteBuffer *buf, const void *data, size_t len) {
+bool buf_append(ByteBuffer *buf, const void *data, size_t len) {
   if (buf->size + len > buf->cap) {
-    buf->cap = (buf->cap == 0) ? 4096 : buf->cap;
-    while (buf->size + len > buf->cap)
-      buf->cap *= 2;
-    buf->data = realloc(buf->data, buf->cap);
+    size_t new_cap = (buf->cap == 0) ? 4096 : buf->cap;
+    while (buf->size + len > new_cap)
+      new_cap *= 2;
+
+    uint8_t *new_data = realloc(buf->data, new_cap);
+    if (!new_data) {
+      fprintf(stderr,
+              "Serialization Error: Out of memory writing to ByteBuffer.\n");
+      return false;
+    }
+    buf->data = new_data;
+    buf->cap = new_cap;
   }
   memcpy(buf->data + buf->size, data, len);
   buf->size += len;
+  return true;
 }
 
 void cache_write_ast(const char *cache_path, AstNode *root,
@@ -104,8 +113,15 @@ void cache_write_ast(const char *cache_path, AstNode *root,
   do {                                                                         \
     if ((n) && ptrmap_put(&map, (n), tail)) {                                  \
       if (tail >= q_cap) {                                                     \
-        q_cap *= 2;                                                            \
-        queue = realloc(queue, q_cap * sizeof(AstNode *));                     \
+        size_t new_q_cap = q_cap * 2;                                          \
+        AstNode **new_queue = realloc(queue, new_q_cap * sizeof(AstNode *));       \
+        if (!new_queue) {                                                      \
+          fprintf(stderr, "Failed to realloc stack during cache write\n");       \
+          free(queue);                                                         \
+          return;                                                              \
+        }                                                                      \
+        queue = new_queue;                                                     \
+        q_cap = new_q_cap;                                                     \
       }                                                                        \
       queue[tail++] = (n);                                                     \
     }                                                                          \
@@ -233,7 +249,11 @@ void cache_write_ast(const char *cache_path, AstNode *root,
   ByteBuffer out_buf = {0};
 
   uint32_t node_count = tail;
-  buf_append(&out_buf, &node_count, sizeof(uint32_t));
+  if (!buf_append(&out_buf, &node_count, sizeof(uint32_t))) {
+    free(queue);
+    free(map.entries);
+    return;
+  }
 
 // Tokens mapping to file offset
 #define P_TOK(tok)                                                             \
@@ -243,8 +263,8 @@ void cache_write_ast(const char *cache_path, AstNode *root,
       (tok).start = (const char *)(size_t)((tok).start - source_base);         \
     } else if ((tok).start) {                                                  \
       bool _found = false;                                                     \
-      for (size_t _k = 0; _k < typelistlen; _k++) {                                        \
-        if (strcmp((tok).start, typelist[_k]) == 0) {                 \
+      for (size_t _k = 0; _k < typelistlen; _k++) {                            \
+        if (strcmp((tok).start, typelist[_k]) == 0) {                          \
           (tok).start = (const char *)(size_t)(0xFFFFFF00 + _k);               \
           _found = true;                                                       \
           break;                                                               \
@@ -479,20 +499,35 @@ void cache_write_ast(const char *cache_path, AstNode *root,
       break;
     }
 
-    buf_append(&out_buf, &flat, sizeof(AstNode));
+    if (!buf_append(&out_buf, &flat, sizeof(AstNode))) {
+      free(queue);
+      free(map.entries);
+      free(out_buf.data);
+      return;
+    }
 
     if (len1 > 0) {
       for (uint32_t d = 0; d < len1; d++) {
         uint32_t idx =
             (dim1 && dim1[d]) ? ptrmap_get(&map, dim1[d]) : 0xFFFFFFFF;
-        buf_append(&out_buf, &idx, sizeof(uint32_t));
+        if (!buf_append(&out_buf, &idx, sizeof(uint32_t))) {
+          free(queue);
+          free(map.entries);
+          free(out_buf.data);
+          return;
+        }
       }
     }
     if (len2 > 0) {
       for (uint32_t d = 0; d < len2; d++) {
         uint32_t idx =
             (dim2 && dim2[d]) ? ptrmap_get(&map, dim2[d]) : 0xFFFFFFFF;
-        buf_append(&out_buf, &idx, sizeof(uint32_t));
+        if (!buf_append(&out_buf, &idx, sizeof(uint32_t))) {
+          free(queue);
+          free(map.entries);
+          free(out_buf.data);
+          return;
+        }
       }
     }
   }
@@ -684,7 +719,6 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       }
     }
   }
-
 
 #define PATCH_STR(tok)                                                         \
   do {                                                                         \
@@ -927,8 +961,15 @@ uint32_t compute_node_hash(AstNode *root) {
     if (frame.state == 0) {
       // push exit frame, then children
       if (top + 32 >= cap) {
-        cap *= 2;
-        stack = realloc(stack, cap * sizeof(HashFrame));
+        size_t new_cap = cap * 2;
+        HashFrame *new_stack = realloc(stack, new_cap * sizeof(HashFrame));
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return 0;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = (HashFrame){n, 1};
 
@@ -1228,7 +1269,7 @@ void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
         AstNode *base = node->as.func_call.caller->as.member.base;
         Token mem_name = node->as.func_call.caller->as.member.name;
 
-				// Format identifs
+        // Format identifs
         if (base->type == AST_IDENTIF) {
           Token base_name = base->as.identif.val;
 
@@ -1314,8 +1355,15 @@ void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
 
     if (node != decl_root && node->next) {
       if (top >= stack_cap - 2) {
-        stack_cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * stack_cap);
+        size_t new_stack_cap = stack_cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_stack_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        stack_cap = new_stack_cap;
       }
       stack[top++] = node->next;
     }
@@ -1324,8 +1372,16 @@ void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
   do {                                                                         \
     if (n) {                                                                   \
       if (top >= stack_cap - 2) {                                              \
-        stack_cap *= 2;                                                        \
-        stack = realloc(stack, sizeof(AstNode *) * stack_cap);                 \
+        size_t new_stack_cap = stack_cap * 2;                                  \
+        AstNode **new_stack =                                                  \
+            realloc(stack, sizeof(AstNode *) * new_stack_cap);                 \
+        if (!new_stack) {                                                      \
+          fprintf(stderr, "OOM whilst reallocating stack.\n");                 \
+          free(stack);                                                         \
+          return;                                                              \
+        }                                                                      \
+        stack_cap = new_stack_cap;                                             \
+        stack = new_stack;                                                     \
       }                                                                        \
       stack[top++] = (n);                                                      \
     }                                                                          \
@@ -1515,131 +1571,144 @@ DeclMetadata *analyze_module_declarations(Arena *arena, AstNode *module_root) {
 }
 
 bool token_match(Token a, Token b) {
-    if (a.len != b.len) return false;
-    if (a.start == b.start) return true;
-    if (!a.start || !b.start) return false;
-    return memcmp(a.start, b.start, a.len) == 0;
+  if (a.len != b.len)
+    return false;
+  if (a.start == b.start)
+    return true;
+  if (!a.start || !b.start)
+    return false;
+  return memcmp(a.start, b.start, a.len) == 0;
 }
 
 DeclMetadata *find_decl_by_name(DeclMetadata *list, Token name) {
-    for (DeclMetadata *curr = list; curr != NULL; curr = curr->next) {
-        if (token_match(curr->name, name)) {
-            return curr;
-        }
+  for (DeclMetadata *curr = list; curr != NULL; curr = curr->next) {
+    if (token_match(curr->name, name)) {
+      return curr;
     }
-    return NULL;
+  }
+  return NULL;
 }
 
-void propagate_declaration_invalidation(DeclMetadata *old_cached_decls, DeclMetadata *new_parsed_decls) {
-    if (!new_parsed_decls) return;
+void propagate_declaration_invalidation(DeclMetadata *old_cached_decls,
+                                        DeclMetadata *new_parsed_decls) {
+  if (!new_parsed_decls)
+    return;
 
-    size_t total_decls = 0;
-    
+  size_t total_decls = 0;
+
+  for (DeclMetadata *n = new_parsed_decls; n != NULL; n = n->next) {
+    total_decls++;
+
+    DeclMetadata *old = find_decl_by_name(old_cached_decls, n->name);
+    if (!old) {
+      // Its a completely new function/struct declaration
+      n->is_dirty = true;
+    } else if (old->node_hash != n->node_hash) {
+      // The signature or internal body expression changed
+      n->is_dirty = true;
+    } else {
+      // Unchanged on its own merits, but pending dependency checks
+      n->is_dirty = false;
+    }
+  }
+
+  DeclMetadata **worklist = malloc(sizeof(DeclMetadata *) * total_decls);
+  size_t wl_top = 0;
+
+  for (DeclMetadata *n = new_parsed_decls; n != NULL; n = n->next) {
+    if (n->is_dirty) {
+      worklist[wl_top++] = n;
+    }
+  }
+
+  while (wl_top > 0) {
+    DeclMetadata *dirty_item = worklist[--wl_top];
+
+    // Scan all other declarations to see if they depend on this newly dirtied
+    // item
     for (DeclMetadata *n = new_parsed_decls; n != NULL; n = n->next) {
-        total_decls++;
-        
-        DeclMetadata *old = find_decl_by_name(old_cached_decls, n->name);
-        if (!old) {
-            // Its a completely new function/struct declaration
-            n->is_dirty = true;
-        } else if (old->node_hash != n->node_hash) {
-            // The signature or internal body expression changed
-            n->is_dirty = true;
-        } else {
-            // Unchanged on its own merits, but pending dependency checks
-            n->is_dirty = false;
+      if (n->is_dirty)
+        continue;
+
+      bool structural_dependency_found = false;
+
+      // Check if n calls the dirty function/method
+      for (DepNode *dep = n->calls_to; dep != NULL; dep = dep->next) {
+        if (token_match(dep->name, dirty_item->name)) {
+          structural_dependency_found = true;
+          break;
         }
-    }
+      }
 
-    DeclMetadata **worklist = malloc(sizeof(DeclMetadata *) * total_decls);
-    size_t wl_top = 0;
-
-    for (DeclMetadata *n = new_parsed_decls; n != NULL; n = n->next) {
-        if (n->is_dirty) {
-            worklist[wl_top++] = n;
+      // Check if n relies on the dirty type (struct, union, enum, etc.)
+      if (!structural_dependency_found) {
+        for (DepNode *dep = n->uses_types; dep != NULL; dep = dep->next) {
+          if (token_match(dep->name, dirty_item->name)) {
+            structural_dependency_found = true;
+            break;
+          }
         }
+      }
+
+      // If a dependency is spotted, mark it dirty and push to track its
+      // downstream callers
+      if (structural_dependency_found) {
+        n->is_dirty = true;
+        worklist[wl_top++] = n;
+      }
     }
+  }
 
-    while (wl_top > 0) {
-        DeclMetadata *dirty_item = worklist[--wl_top];
-
-        // Scan all other declarations to see if they depend on this newly dirtied item
-        for (DeclMetadata *n = new_parsed_decls; n != NULL; n = n->next) {
-            if (n->is_dirty) continue;
-
-            bool structural_dependency_found = false;
-
-            // Check if n calls the dirty function/method
-            for (DepNode *dep = n->calls_to; dep != NULL; dep = dep->next) {
-                if (token_match(dep->name, dirty_item->name)) {
-                    structural_dependency_found = true;
-                    break;
-                }
-            }
-
-            // Check if n relies on the dirty type (struct, union, enum, etc.)
-            if (!structural_dependency_found) {
-                for (DepNode *dep = n->uses_types; dep != NULL; dep = dep->next) {
-                    if (token_match(dep->name, dirty_item->name)) {
-                        structural_dependency_found = true;
-                        break;
-                    }
-                }
-            }
-
-            // If a dependency is spotted, mark it dirty and push to track its downstream callers
-            if (structural_dependency_found) {
-                n->is_dirty = true;
-                worklist[wl_top++] = n;
-            }
-        }
-    }
-
-    free(worklist);
+  free(worklist);
 }
 
-void cache_write_decl_meta(const char *path, DeclMetadata *meta, const char *src_base) {
-    FILE *fp = fopen(path, "wb");
-    if (!fp) return;
+void cache_write_decl_meta(const char *path, DeclMetadata *meta,
+                           const char *src_base) {
+  FILE *fp = fopen(path, "wb");
+  if (!fp)
+    return;
 
-    uint32_t count = 0;
-    for (DeclMetadata *m = meta; m; m = m->next) count++;
-    fwrite(&count, sizeof(uint32_t), 1, fp);
+  uint32_t count = 0;
+  for (DeclMetadata *m = meta; m; m = m->next)
+    count++;
+  fwrite(&count, sizeof(uint32_t), 1, fp);
 
-    for (DeclMetadata *m = meta; m; m = m->next) {
-        // Write Name & Hash
-        fwrite(&m->name.len, sizeof(uint32_t), 1, fp);
-        fwrite(m->name.start, 1, m->name.len, fp);
-        fwrite(&m->node_hash, sizeof(uint32_t), 1, fp);
+  for (DeclMetadata *m = meta; m; m = m->next) {
+    // Write Name & Hash
+    fwrite(&m->name.len, sizeof(uint32_t), 1, fp);
+    fwrite(m->name.start, 1, m->name.len, fp);
+    fwrite(&m->node_hash, sizeof(uint32_t), 1, fp);
 
-        uint32_t start_off = (m->src_start && m->src_start >= src_base)
-                                 ? (uint32_t)(m->src_start - src_base)
-                                 : 0xFFFFFFFF;
-        uint32_t end_off = (m->src_end && m->src_end >= src_base)
-                               ? (uint32_t)(m->src_end - src_base)
-                               : 0xFFFFFFFF;
-        fwrite(&start_off, sizeof(uint32_t), 1, fp);
-        fwrite(&end_off, sizeof(uint32_t), 1, fp);
+    uint32_t start_off = (m->src_start && m->src_start >= src_base)
+                             ? (uint32_t)(m->src_start - src_base)
+                             : 0xFFFFFFFF;
+    uint32_t end_off = (m->src_end && m->src_end >= src_base)
+                           ? (uint32_t)(m->src_end - src_base)
+                           : 0xFFFFFFFF;
+    fwrite(&start_off, sizeof(uint32_t), 1, fp);
+    fwrite(&end_off, sizeof(uint32_t), 1, fp);
 
-        // Write Calls Dependencies
-        uint32_t dep_count = 0;
-        for (DepNode *d = m->calls_to; d; d = d->next) dep_count++;
-        fwrite(&dep_count, sizeof(uint32_t), 1, fp);
-        for (DepNode *d = m->calls_to; d; d = d->next) {
-            fwrite(&d->name.len, sizeof(uint32_t), 1, fp);
-            fwrite(d->name.start, 1, d->name.len, fp);
-        }
-
-        // Write Type Dependencies
-        dep_count = 0;
-        for (DepNode *d = m->uses_types; d; d = d->next) dep_count++;
-        fwrite(&dep_count, sizeof(uint32_t), 1, fp);
-        for (DepNode *d = m->uses_types; d; d = d->next) {
-            fwrite(&d->name.len, sizeof(uint32_t), 1, fp);
-            fwrite(d->name.start, 1, d->name.len, fp);
-        }
+    // Write Calls Dependencies
+    uint32_t dep_count = 0;
+    for (DepNode *d = m->calls_to; d; d = d->next)
+      dep_count++;
+    fwrite(&dep_count, sizeof(uint32_t), 1, fp);
+    for (DepNode *d = m->calls_to; d; d = d->next) {
+      fwrite(&d->name.len, sizeof(uint32_t), 1, fp);
+      fwrite(d->name.start, 1, d->name.len, fp);
     }
-    fclose(fp);
+
+    // Write Type Dependencies
+    dep_count = 0;
+    for (DepNode *d = m->uses_types; d; d = d->next)
+      dep_count++;
+    fwrite(&dep_count, sizeof(uint32_t), 1, fp);
+    for (DepNode *d = m->uses_types; d; d = d->next) {
+      fwrite(&d->name.len, sizeof(uint32_t), 1, fp);
+      fwrite(d->name.start, 1, d->name.len, fp);
+    }
+  }
+  fclose(fp);
 }
 
 DeclMetadata *cache_read_decl_meta(Arena *arena, const char *path,

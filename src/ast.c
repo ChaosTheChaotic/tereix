@@ -211,8 +211,16 @@ void print_ast(AstNode *root) {
 
     if (node->next) {
       if (top >= stack_cap - 5) {
-        stack_cap *= 2;
-        stack = realloc(stack, sizeof(AstPrintItem) * stack_cap);
+        size_t new_cap = stack_cap * 2;
+        AstPrintItem *new_stack =
+            realloc(stack, sizeof(AstPrintItem) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "Error: Out of memory while printing AST.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        stack_cap = new_cap;
       }
       stack[top++] = (AstPrintItem){node->next, item.depth, item.label};
     }
@@ -240,7 +248,7 @@ void print_ast(AstNode *root) {
       }
       printf("FUNC (Return: ");
       if (!print_type_info(node->as.func_def.ret_type, stdout)) {
-        fprintf(stderr, "Failed to print type info, returning early");
+        fprintf(stderr, "Failed to print type info, returning early\n");
         return;
       }
       printf("): %.*s\n", node->as.func_def.fn_name.len,
@@ -263,7 +271,7 @@ void print_ast(AstNode *root) {
     case AST_PARAM:
       printf("PARAM (");
       if (!print_type_info(node->as.fn_param.type, stdout)) {
-        fprintf(stderr, "failed to print type info, returning early");
+        fprintf(stderr, "failed to print type info, returning early\n");
         return;
       }
       printf("): %.*s\n", node->as.fn_param.id.len, node->as.fn_param.id.start);
@@ -272,7 +280,7 @@ void print_ast(AstNode *root) {
     case AST_VAR_DECL:
       printf("VAR_DECL (");
       if (!print_type_info(node->as.var_decl.type, stdout)) {
-        fprintf(stderr, "failed to print type info, returning early");
+        fprintf(stderr, "failed to print type info, returning early\n");
         return;
       }
       printf("): %.*s\n", node->as.var_decl.id.len, node->as.var_decl.id.start);
@@ -520,7 +528,7 @@ void print_ast(AstNode *root) {
     case AST_CAST:
       printf("CAST TO (");
       if (!print_type_info(node->as.cast.target, stdout)) {
-        fprintf(stderr, "Failed to print type info, returning early");
+        fprintf(stderr, "Failed to print type info, returning early\n");
         return;
       }
       printf(")\n");

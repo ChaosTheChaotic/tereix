@@ -4,8 +4,8 @@
 #include "sem_types.h"
 #include "string_builder.h"
 #include "util.h"
-#include <sys/wait.h>
 #include <errno.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 void gen_type(DataType type, StringBuilder *sb) {
@@ -116,23 +116,44 @@ void inject_yield_assignments(AstNode *node, const char *var_name,
       }
       if (*last) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode **) * cap);
+          size_t new_cap = cap * 2;
+          AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = last;
       }
     } else if (n->type == AST_IF) {
       if (n->as.if_check.action) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode **) * cap);
+          size_t new_cap = cap * 2;
+          AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = &n->as.if_check.action;
       }
       if (n->as.if_check.elseAct) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode **) * cap);
+          size_t new_cap = cap * 2;
+          AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = &n->as.if_check.elseAct;
       }
@@ -141,8 +162,15 @@ void inject_yield_assignments(AstNode *node, const char *var_name,
       while (c) {
         if (c->type == AST_CASE && c->as.case_stmt.action) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(AstNode **) * cap);
+            size_t new_cap = cap * 2;
+            AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = &c->as.case_stmt.action;
         }
@@ -150,8 +178,15 @@ void inject_yield_assignments(AstNode *node, const char *var_name,
       }
       if (n->as.switch_stmt.default_case) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode **) * cap);
+          size_t new_cap = cap * 2;
+          AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = &n->as.switch_stmt.default_case;
       }
@@ -249,8 +284,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           f->step = 2;
 
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){stmt, 0, NULL, NULL, 0};
@@ -286,8 +328,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                     "Error: main function must have exactly 2 parameters "
                     "(an integer and a string array). Found %d.\n",
                     param_count);
-						top--;
-						continue;
+            top--;
+            continue;
           }
 
           AstNode *param1 = params;
@@ -309,7 +351,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             fprintf(
                 stderr,
                 "Error: second parameter of main must be str[] or **str.\n");
-            exit(1);
+            top--;
+            continue;
           }
 
           if (n->as.func_def.is_extern)
@@ -331,8 +374,16 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
           if (n->as.func_def.block) {
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(IterFrame) * cap);
+              size_t new_cap = cap * 2;
+              IterFrame *new_stack =
+                  realloc(stack, sizeof(IterFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
               f = &stack[top - 1];
             }
             stack[top++] = (IterFrame){n->as.func_def.block, 0, NULL, NULL, 0};
@@ -375,8 +426,16 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           if (n->as.func_def.block) {
             f->step = 2;
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(IterFrame) * cap);
+              size_t new_cap = cap * 2;
+              IterFrame *new_stack =
+                  realloc(stack, sizeof(IterFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
               f = &stack[top - 1];
             }
             stack[top++] = (IterFrame){n->as.func_def.block, 0, NULL, NULL, 0};
@@ -402,8 +461,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           sb_append(sb, " = ");
           f->step = 1;
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){n->as.var_decl.init, 0, NULL, NULL, 2};
@@ -420,8 +486,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         sb_append(sb, "(");
         f->step = 1;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.binop.left, 0, NULL, NULL, 2};
@@ -431,8 +504,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         sb_append(sb, " ");
         f->step = 2;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.binop.right, 0, NULL, NULL, 2};
@@ -454,8 +534,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         }
         f->step = 1;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.unop.operand, 0, NULL, NULL, 2};
@@ -471,8 +558,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         sb_append(sb, "if (");
         f->step = 1;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.if_check.check, 0, NULL, NULL, 2};
@@ -480,8 +574,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         sb_append(sb, ") ");
         f->step = 2;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.if_check.action, 0, NULL, NULL, 0};
@@ -490,8 +591,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           sb_append(sb, " else ");
           f->step = 3;
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){n->as.if_check.elseAct, 0, NULL, NULL, 0};
@@ -506,8 +614,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         sb_append(sb, "while (");
         f->step = 1;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.while_loop.check, 0, NULL, NULL, 2};
@@ -515,8 +630,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         sb_append(sb, ") ");
         f->step = 2;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.while_loop.action, 0, NULL, NULL, 0};
@@ -529,8 +651,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         f->step = 1;
         if (n->as.for_loop.init) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){n->as.for_loop.init, 0, NULL, NULL, 0};
@@ -541,8 +670,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         f->step = 2;
         if (n->as.for_loop.check) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){n->as.for_loop.check, 0, NULL, NULL, 2};
@@ -552,8 +688,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         f->step = 3;
         if (n->as.for_loop.inc) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){n->as.for_loop.inc, 0, NULL, NULL, 2};
@@ -563,8 +706,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         f->step = 4;
         if (n->as.for_loop.action) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){n->as.for_loop.action, 0, NULL, NULL, 0};
@@ -637,8 +787,17 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             if (has_self) {
               f->step = 1;
               if (top >= cap) {
-                cap *= 2;
-                stack = realloc(stack, sizeof(IterFrame) * cap);
+                size_t new_cap = cap * 2;
+                IterFrame *new_stack =
+                    realloc(stack, sizeof(IterFrame) * new_cap);
+                if (!new_stack) {
+                  fprintf(stderr,
+                          "OOM encountered whilst reallocating stack.\n");
+                  free(stack);
+                  return;
+                }
+                stack = new_stack;
+                cap = new_cap;
                 f = &stack[top - 1];
               }
 
@@ -677,8 +836,16 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             f->aux = f->aux->next;
             f->step = (f->aux != NULL) ? 3 : 4;
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(IterFrame) * cap);
+              size_t new_cap = cap * 2;
+              IterFrame *new_stack =
+                  realloc(stack, sizeof(IterFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
               f = &stack[top - 1];
             }
             stack[top++] = (IterFrame){arg, 0, NULL, NULL, 2};
@@ -726,8 +893,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
 
           f->step = 1;
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){n->as.func_call.caller, 0, NULL, NULL, 2};
@@ -746,8 +920,16 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             f->aux = f->aux->next;
             f->step = (f->aux != NULL) ? 3 : 4;
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(IterFrame) * cap);
+              size_t new_cap = cap * 2;
+              IterFrame *new_stack =
+                  realloc(stack, sizeof(IterFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
               f = &stack[top - 1];
             }
             stack[top++] = (IterFrame){arg, 0, NULL, NULL, 2};
@@ -799,8 +981,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           f->aux = f->aux->next;
           f->step = f->aux ? 2 : 3;
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){elem, 0, NULL, NULL, 2};
@@ -835,8 +1024,16 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
             sb_append(sb, "return ");
             f->step = 1;
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(IterFrame) * cap);
+              size_t new_cap = cap * 2;
+              IterFrame *new_stack =
+                  realloc(stack, sizeof(IterFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
               f = &stack[top - 1];
             }
             stack[top++] = (IterFrame){unwrapped, 0, NULL, NULL, 2};
@@ -872,8 +1069,16 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           if (n->as.ret_stmt.expr) {
             f->step = 1;
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(IterFrame) * cap);
+              size_t new_cap = cap * 2;
+              IterFrame *new_stack =
+                  realloc(stack, sizeof(IterFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
               f = &stack[top - 1];
             }
             stack[top++] = (IterFrame){n->as.ret_stmt.expr, 0, NULL, NULL, 2};
@@ -900,8 +1105,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           f->step = 4;
 
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){stmt, 0, NULL, NULL, 0};
@@ -930,8 +1142,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         sb_append(sb, ")(");
         f->step = 1;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.cast.op, 0, NULL, NULL, 2};
@@ -943,8 +1162,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       if (f->step == 0) {
         f->step = 1;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.member.base, 0, NULL, NULL, 2};
@@ -962,8 +1188,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
       if (f->step == 0) {
         f->step = 1;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.index.base, 0, NULL, NULL, 2};
@@ -971,8 +1204,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         sb_append(sb, "[");
         f->step = 2;
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(IterFrame) * cap);
+          size_t new_cap = cap * 2;
+          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
           f = &stack[top - 1];
         }
         stack[top++] = (IterFrame){n->as.index.index, 0, NULL, NULL, 2};
@@ -1035,8 +1275,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           AstNode *member = f->aux;
           f->aux = f->aux->next;
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){member, 0, NULL, NULL, 0};
@@ -1074,8 +1321,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
           sb_append(sb, " = ");
           f->step = 1;
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (IterFrame){n->as.enum_member.val, 0, NULL, NULL, 2};
@@ -1121,8 +1375,15 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
         } else {
           f->step = 1;
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(IterFrame) * cap);
+            size_t new_cap = cap * 2;
+            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] =
@@ -1193,8 +1454,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
           child->next = after_sue;
 
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){child, sue};
         } else {
@@ -1203,8 +1472,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
             child->is_nested_sue = true;
 
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){child, sue};
           prev_ptr = &child->next;
@@ -1226,8 +1503,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
         AstNode *stmt = n->as.block.first_stmt;
         while (stmt) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){stmt, sue};
           stmt = stmt->next;
@@ -1237,15 +1522,31 @@ void flatten_sues(AstNode *root, Arena *arena) {
       case AST_FUNC:
         if (n->as.func_def.params) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.func_def.params, sue};
         }
         if (n->as.func_def.block) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.func_def.block, sue};
         }
@@ -1274,16 +1575,32 @@ void flatten_sues(AstNode *root, Arena *arena) {
         }
         if (n->as.var_decl.init) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.var_decl.init, sue};
         }
         break;
       case AST_BINOP:
         if (top + 2 >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.binop.right, sue};
         stack[top++] = (FlattenFrame){n->as.binop.left, sue};
@@ -1292,72 +1609,152 @@ void flatten_sues(AstNode *root, Arena *arena) {
       case AST_ADDR_OF:
       case AST_DEREF:
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.unop.operand, sue};
         break;
       case AST_IF:
         if (n->as.if_check.elseAct) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.if_check.elseAct, sue};
         }
         if (n->as.if_check.action) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.if_check.action, sue};
         }
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.if_check.check, sue};
         break;
       case AST_WHILE:
         if (n->as.while_loop.action) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.while_loop.action, sue};
         }
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.while_loop.check, sue};
         break;
       case AST_FOR:
         if (n->as.for_loop.action) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.for_loop.action, sue};
         }
         if (n->as.for_loop.inc) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.for_loop.inc, sue};
         }
         if (n->as.for_loop.check) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.for_loop.check, sue};
         }
         if (n->as.for_loop.init) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.for_loop.init, sue};
         }
@@ -1366,15 +1763,31 @@ void flatten_sues(AstNode *root, Arena *arena) {
         AstNode *arg = n->as.func_call.args;
         while (arg) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){arg, sue};
           arg = arg->next;
         }
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.func_call.caller, sue};
         break;
@@ -1383,8 +1796,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
         AstNode *elem = n->as.array_lit.elements;
         while (elem) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){elem, sue};
           elem = elem->next;
@@ -1393,13 +1814,29 @@ void flatten_sues(AstNode *root, Arena *arena) {
       }
       case AST_INDEX:
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.index.index, sue};
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.index.base, sue};
         break;
@@ -1426,8 +1863,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
         }
 
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.member.base, sue};
         break;
@@ -1435,8 +1880,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
       case AST_RET:
         if (n->as.ret_stmt.expr) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.ret_stmt.expr, sue};
         }
@@ -1444,8 +1897,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
       case AST_DEFER:
         if (n->as.defer_stmt.contents) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.defer_stmt.contents, sue};
         }
@@ -1453,8 +1914,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
       case AST_SWITCH:
         if (n->as.switch_stmt.default_case) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.switch_stmt.default_case, sue};
         }
@@ -1462,30 +1931,62 @@ void flatten_sues(AstNode *root, Arena *arena) {
           AstNode *c = n->as.switch_stmt.cases;
           while (c) {
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(FlattenFrame) * cap);
+              size_t new_cap = cap * 2;
+              FlattenFrame *new_stack =
+                  realloc(stack, sizeof(FlattenFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
             }
             stack[top++] = (FlattenFrame){c, sue};
             c = c->next;
           }
         }
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.switch_stmt.check, sue};
         break;
       case AST_CASE:
         if (n->as.case_stmt.action) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){n->as.case_stmt.action, sue};
         }
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.case_stmt.val, sue};
         break;
@@ -1493,8 +1994,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
         AstNode *stmt = n->as.extern_block.contents;
         while (stmt) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(FlattenFrame) * cap);
+            size_t new_cap = cap * 2;
+            FlattenFrame *new_stack =
+                realloc(stack, sizeof(FlattenFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = (FlattenFrame){stmt, sue};
           stmt = stmt->next;
@@ -1503,8 +2012,16 @@ void flatten_sues(AstNode *root, Arena *arena) {
       }
       case AST_CAST:
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(FlattenFrame) * cap);
+          size_t new_cap = cap * 2;
+          FlattenFrame *new_stack =
+              realloc(stack, sizeof(FlattenFrame) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = (FlattenFrame){n->as.cast.op, sue};
         break;
@@ -1535,15 +2052,22 @@ AstNode *clone_ast(AstNode *root, Arena *arena) {
     AstNode *src = p.src;
     AstNode *dst = p.dst;
 
-// Macro to safely clone and push child nodes without recursion
 #define CLONE_CHILD(child_ptr)                                                 \
   if (src->child_ptr) {                                                        \
     dst->child_ptr = arena_alloc(arena, sizeof(AstNode));                      \
     *dst->child_ptr = *src->child_ptr;                                         \
     dst->child_ptr->next = NULL;                                               \
     if (top >= cap) {                                                          \
-      cap *= 2;                                                                \
-      stack = realloc(stack, sizeof(ClonePair) * cap);                         \
+      size_t new_cap = cap * 2;                                                \
+      ClonePair *new_stack = realloc(stack, sizeof(ClonePair) * new_cap);      \
+      if (!new_stack) {                                                        \
+        fprintf(stderr,                                                        \
+                "OOM encountered whilst enlargig stack in cloning AST.\n");    \
+        free(stack);                                                           \
+        return NULL;                                                           \
+      }                                                                        \
+      stack = new_stack;                                                       \
+      cap = new_cap;                                                           \
     }                                                                          \
     stack[top++] = (ClonePair){src->child_ptr, dst->child_ptr};                \
   }
@@ -1669,8 +2193,16 @@ void lower_defers(AstNode *root, Arena *arena) {
         f->step = 1;
         if (n->as.func_def.block) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            size_t new_cap = cap * 2;
+            LowerFrame *new_stack =
+                realloc(stack, sizeof(LowerFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (LowerFrame){n->as.func_def.block, 0, f->func_base,
@@ -1687,8 +2219,16 @@ void lower_defers(AstNode *root, Arena *arena) {
                                                : n->as.for_loop.action;
         if (body) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            size_t new_cap = cap * 2;
+            LowerFrame *new_stack =
+                realloc(stack, sizeof(LowerFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] =
@@ -1728,8 +2268,16 @@ void lower_defers(AstNode *root, Arena *arena) {
           }
           for (int i = count - 1; i >= 0; i--) {
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(LowerFrame) * cap);
+              size_t new_cap = cap * 2;
+              LowerFrame *new_stack =
+                  realloc(stack, sizeof(LowerFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
               f = &stack[top - 1];
             }
             stack[top++] = (LowerFrame){arr[i], 0, f->func_base, f->loop_base,
@@ -1748,10 +2296,10 @@ void lower_defers(AstNode *root, Arena *arena) {
               clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
           if (!n->as.block.first_stmt) {
             n->as.block.first_stmt = cloned;
-						tail = cloned;
-					} else {
+            tail = cloned;
+          } else {
             tail->next = cloned;
-					}
+          }
           while (tail->next)
             tail = tail->next;
         }
@@ -1799,10 +2347,10 @@ void lower_defers(AstNode *root, Arena *arena) {
               clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
           if (!blk->as.block.first_stmt) {
             blk->as.block.first_stmt = cloned;
-						tail = cloned;
-					} else {
+            tail = cloned;
+          } else {
             tail->next = cloned;
-					}
+          }
           while (tail->next)
             tail = tail->next;
         }
@@ -1834,10 +2382,10 @@ void lower_defers(AstNode *root, Arena *arena) {
               clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
           if (!blk->as.block.first_stmt) {
             blk->as.block.first_stmt = cloned;
-					tail = cloned;
-					} else {
+            tail = cloned;
+          } else {
             tail->next = cloned;
-					}
+          }
           while (tail->next)
             tail = tail->next;
         }
@@ -1865,8 +2413,16 @@ void lower_defers(AstNode *root, Arena *arena) {
         f->step = 1;
         if (n->as.if_check.elseAct) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            size_t new_cap = cap * 2;
+            LowerFrame *new_stack =
+                realloc(stack, sizeof(LowerFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (LowerFrame){n->as.if_check.elseAct, 0, f->func_base,
@@ -1874,8 +2430,16 @@ void lower_defers(AstNode *root, Arena *arena) {
         }
         if (n->as.if_check.action) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            size_t new_cap = cap * 2;
+            LowerFrame *new_stack =
+                realloc(stack, sizeof(LowerFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (LowerFrame){n->as.if_check.action, 0, f->func_base,
@@ -1890,8 +2454,16 @@ void lower_defers(AstNode *root, Arena *arena) {
         f->loop_base = defer_count;
         if (n->as.switch_stmt.default_case) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            size_t new_cap = cap * 2;
+            LowerFrame *new_stack =
+                realloc(stack, sizeof(LowerFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] =
@@ -1901,8 +2473,16 @@ void lower_defers(AstNode *root, Arena *arena) {
         AstNode *c = n->as.switch_stmt.cases;
         while (c) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            size_t new_cap = cap * 2;
+            LowerFrame *new_stack =
+                realloc(stack, sizeof(LowerFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] =
@@ -1917,8 +2497,16 @@ void lower_defers(AstNode *root, Arena *arena) {
         f->step = 1;
         if (n->as.case_stmt.action) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(LowerFrame) * cap);
+            size_t new_cap = cap * 2;
+            LowerFrame *new_stack =
+                realloc(stack, sizeof(LowerFrame) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
             f = &stack[top - 1];
           }
           stack[top++] = (LowerFrame){n->as.case_stmt.action, 0, f->func_base,
@@ -1947,8 +2535,16 @@ void lower_defers(AstNode *root, Arena *arena) {
           }
           for (int i = count - 1; i >= 0; i--) {
             if (top >= cap) {
-              cap *= 2;
-              stack = realloc(stack, sizeof(LowerFrame) * cap);
+              size_t new_cap = cap * 2;
+              LowerFrame *new_stack =
+                  realloc(stack, sizeof(LowerFrame) * new_cap);
+              if (!new_stack) {
+                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+                free(stack);
+                return;
+              }
+              stack = new_stack;
+              cap = new_cap;
               f = &stack[top - 1];
             }
             stack[top++] = (LowerFrame){arr[i], 0, f->func_base, f->loop_base,
@@ -1983,7 +2579,7 @@ bool compile_from_memory(const char *compiler, const char **flags,
   }
 
   if (pid == 0) {
-    close(pipefd[1]); // Close write end
+    close(pipefd[1]);              // Close write end
     dup2(pipefd[0], STDIN_FILENO); // Bind read end to stdin
     close(pipefd[0]);
 
@@ -2160,7 +2756,17 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
 
     char *token = strtok(cmd_copy, " ");
     while (token) {
-      argv = realloc(argv, (argc + 2) * sizeof(char *));
+      char **new_argv = realloc(argv, (argc + 2) * sizeof(char *));
+      if (!new_argv) {
+        fprintf(stderr, "Error: OOM while building compiler arguments.\n");
+        free(cmd_copy);
+        free(argv);
+        sb_free(&cmd);
+        sb_free(&code);
+        map_free_buckets(global_func_map);
+        return false;
+      }
+      argv = new_argv;
       argv[argc++] = token;
       token = strtok(NULL, " ");
     }
@@ -2266,8 +2872,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
                                               : n->as.block.first_stmt;
       while (curr) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = curr;
         curr = curr->next;
@@ -2279,15 +2892,29 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
       RENAME_TOK(n->as.func_def.ret_type.name);
       if (n->as.func_def.params) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.func_def.params;
       }
       if (n->as.func_def.block) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.func_def.block;
       }
@@ -2301,8 +2928,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
       RENAME_TOK(n->as.var_decl.type.name);
       if (n->as.var_decl.init) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.var_decl.init;
       }
@@ -2319,8 +2953,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
                                                 : n->as.enum_def.contents;
       while (child) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = child;
         child = child->next;
@@ -2331,8 +2972,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
       RENAME_TOK(n->as.enum_member.name);
       if (n->as.enum_member.val) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.enum_member.val;
       }
@@ -2343,8 +2991,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
     case AST_CAST:
       RENAME_TOK(n->as.cast.target.name);
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.cast.op;
       break;
@@ -2352,28 +3007,56 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
       AstNode *arg = n->as.func_call.args;
       while (arg) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = arg;
         arg = arg->next;
       }
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.func_call.caller;
       break;
     }
     case AST_BINOP:
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.binop.right;
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.binop.left;
       break;
@@ -2381,92 +3064,183 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
     case AST_ADDR_OF:
     case AST_DEREF:
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.unop.operand;
       break;
     case AST_IF:
       if (n->as.if_check.elseAct) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.if_check.elseAct;
       }
       if (n->as.if_check.action) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.if_check.action;
       }
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.if_check.check;
       break;
     case AST_WHILE:
       if (n->as.while_loop.action) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.while_loop.action;
       }
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.while_loop.check;
       break;
     case AST_FOR:
       if (n->as.for_loop.action) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.for_loop.action;
       }
       if (n->as.for_loop.inc) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.for_loop.inc;
       }
       if (n->as.for_loop.check) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.for_loop.check;
       }
       if (n->as.for_loop.init) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.for_loop.init;
       }
       break;
     case AST_MEMBER:
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.member.base;
       break;
     case AST_INDEX:
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.index.index;
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.index.base;
       break;
@@ -2474,8 +3248,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
       AstNode *elem = n->as.array_lit.elements;
       while (elem) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = elem;
         elem = elem->next;
@@ -2485,8 +3266,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
     case AST_RET:
       if (n->as.ret_stmt.expr) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.ret_stmt.expr;
       }
@@ -2494,8 +3282,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
     case AST_DEFER:
       if (n->as.defer_stmt.contents) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.defer_stmt.contents;
       }
@@ -2503,8 +3298,15 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
     case AST_SWITCH:
       if (n->as.switch_stmt.default_case) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.switch_stmt.default_case;
       }
@@ -2512,30 +3314,58 @@ void mangle_mod_symbols(Arena *arena, Module *mod) {
         AstNode *c = n->as.switch_stmt.cases;
         while (c) {
           if (top >= cap) {
-            cap *= 2;
-            stack = realloc(stack, sizeof(AstNode *) * cap);
+            size_t new_cap = cap * 2;
+            AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+            if (!new_stack) {
+              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+              free(stack);
+              return;
+            }
+            stack = new_stack;
+            cap = new_cap;
           }
           stack[top++] = c;
           c = c->next;
         }
       }
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.switch_stmt.check;
       break;
     case AST_CASE:
       if (n->as.case_stmt.action) {
         if (top >= cap) {
-          cap *= 2;
-          stack = realloc(stack, sizeof(AstNode *) * cap);
+          size_t new_cap = cap * 2;
+          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+          if (!new_stack) {
+            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+            free(stack);
+            return;
+          }
+          stack = new_stack;
+          cap = new_cap;
         }
         stack[top++] = n->as.case_stmt.action;
       }
       if (top >= cap) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * cap);
+        size_t new_cap = cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        cap = new_cap;
       }
       stack[top++] = n->as.case_stmt.val;
       break;

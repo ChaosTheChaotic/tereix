@@ -52,8 +52,15 @@ void extract_dependencies(AstNode *root, void (*callback)(Token callee_name)) {
     // Push sibling to stack first
     if (node->next) {
       if (top >= stack_cap - 2) {
-        stack_cap *= 2;
-        stack = realloc(stack, sizeof(AstNode *) * stack_cap);
+        size_t new_stack_cap = stack_cap * 2;
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_stack_cap);
+        if (!new_stack) {
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
+          free(stack);
+          return;
+        }
+        stack = new_stack;
+        stack_cap = new_stack_cap;
       }
       stack[top++] = node->next;
     }
@@ -62,8 +69,15 @@ void extract_dependencies(AstNode *root, void (*callback)(Token callee_name)) {
   do {                                                                         \
     if (n) {                                                                   \
       if (top >= stack_cap - 2) {                                              \
-        stack_cap *= 2;                                                        \
-        stack = realloc(stack, sizeof(AstNode *) * stack_cap);                 \
+        size_t new_stack_cap = stack_cap * 2;                                  \
+        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_stack_cap);   \
+        if (!new_stack) {                                                      \
+          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");     \
+          free(stack);                                                         \
+          return;                                                              \
+        }                                                                      \
+        stack = new_stack;                                                     \
+        stack_cap = new_stack_cap;                                             \
       }                                                                        \
       stack[top++] = (n);                                                      \
     }                                                                          \
@@ -377,11 +391,10 @@ bool worker_loop(void *arg) {
       if (!ast) {
         pthread_mutex_lock(&sem->mutex);
         for (size_t i = 0; i < diags.count; i++) {
-          Token tok = {
-              .start = NULL,
-              .len = 0,
-              .line = diags.items[i].start_line,
-              .col = diags.items[i].start_char};
+          Token tok = {.start = NULL,
+                       .len = 0,
+                       .line = diags.items[i].start_line,
+                       .col = diags.items[i].start_char};
           sem_report(sem, DIAG_ERROR, tok, "%s", diags.items[i].message);
         }
         pthread_mutex_unlock(&sem->mutex);
@@ -506,7 +519,8 @@ bool worker_loop(void *arg) {
             wl_push(wl, abs_path);
           } else {
             sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
-                       "Module not found: %.*s", (int)path_len, stmt->as.use_stmt.path.start);
+                       "Module not found: %.*s", (int)path_len,
+                       stmt->as.use_stmt.path.start);
           }
         }
       }
@@ -584,7 +598,7 @@ void compile_project(const CompileOptions *restrict opts) {
   }
 #else
   const char *current_path;
-	unsigned int single_thread_error = 0;
+  unsigned int single_thread_error = 0;
   while ((current_path = wl_pop(&pending)) != NULL) {
     const char *abs_path = resolve_alloc(&arena, current_path);
     if (!abs_path || map_get(&sem.mod_cache, abs_path, strlen(abs_path)))
@@ -758,7 +772,8 @@ void compile_project(const CompileOptions *restrict opts) {
             wl_push(wl, abs_path);
           } else {
             sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
-                       "Module not found: %.*s", (int)path_len, stmt->as.use_stmt.path.start);
+                       "Module not found: %.*s", (int)path_len,
+                       stmt->as.use_stmt.path.start);
           }
         }
       }

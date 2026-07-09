@@ -1,6 +1,7 @@
 #include "diag.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 void diaglist_init(DiagList *list, size_t initial_cap) {
   list->items = malloc(initial_cap * sizeof(Diag));
@@ -21,8 +22,15 @@ void diaglist_add(DiagList *list, DiagSeverity sev, const char *message,
                   const char *file, unsigned int line, unsigned int col,
                   unsigned int end_line, unsigned int end_col) {
   if (list->count >= list->cap) {
-    list->cap = (list->cap == 0) ? 32 : list->cap * 2;
-    list->items = realloc(list->items, list->cap * sizeof(Diag));
+    size_t new_cap = (list->cap == 0) ? 32 : list->cap * 2;
+    Diag *new_items = realloc(list->items, new_cap * sizeof(Diag));
+    if (!new_items) {
+      fprintf(stderr, "Fatal: Out of memory while recording diagnostic: %s\n",
+              message);
+      return;
+    }
+    list->items = new_items;
+    list->cap = new_cap;
   }
   // Convert 1 based lexer columns to 0 based LSP offsets
   Diag d = {.severity = sev,

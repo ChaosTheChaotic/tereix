@@ -37,14 +37,14 @@ const char *load_file(const char *path) {
 
     char *file = malloc(sizeof(char) * (fsize + 1));
     if (!file) {
-      fprintf(stderr, "Failed to malloc the file");
+      fprintf(stderr, "Failed to malloc the file\n");
       fclose(fp);
       return NULL;
     }
 
     unsigned long bin = fread(file, sizeof(char), fsize, fp);
     if (bin != (unsigned long)fsize) {
-      fprintf(stderr, "Bytes read into buffer != the size of the file");
+      fprintf(stderr, "Bytes read into buffer != the size of the file\n");
       free(file);
       fclose(fp);
       return NULL;
