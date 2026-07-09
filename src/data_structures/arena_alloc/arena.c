@@ -1,4 +1,5 @@
 #include "arena.h"
+#include "parse_types.h"
 #include <string.h>
 
 // Align the pointer to the nearest 8 bytes
@@ -9,7 +10,7 @@ void *arena_alloc(Arena *arena, size_t size) {
   pthread_mutex_lock(&arena->mutex);
 #endif
 
-	size = align_size(size);
+  size = align_size(size);
 
   ArenaBlock *block = arena->current;
   if (!block || block->used + size > block->capacity) {
@@ -41,6 +42,13 @@ void *arena_alloc(Arena *arena, size_t size) {
 #ifdef ENABLE_THREADS
   pthread_mutex_unlock(&arena->mutex);
 #endif
+  return ptr;
+}
+
+void *arena_alloc_or_panic(Arena *arena, size_t size, jmp_buf env) {
+  void *ptr = arena_alloc(arena, size);
+  if (!ptr)
+    compiler_panic(env, ERR_OOM, "Arena allocation failed");
   return ptr;
 }
 

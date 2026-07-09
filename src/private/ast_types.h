@@ -6,6 +6,7 @@
 #include "types_core.h"
 
 typedef enum {
+	AST_ERROR,
   AST_BINOP,
   AST_UOP,
   AST_ADDR_OF,

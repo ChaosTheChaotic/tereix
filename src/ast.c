@@ -29,6 +29,8 @@ void init_lex_maps(LexCtx *ctx, Arena *arena) {
 
 AstNode *new_node(Arena *arena, ASTN_TYPE type) {
   AstNode *node = arena_alloc(arena, sizeof(AstNode));
+  if (!node)
+    return NULL;
   memset(node, 0, sizeof(AstNode));
   node->type = type;
   return node;
@@ -76,6 +78,22 @@ AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath,
   pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
   pctx.diags = diag_list;
   pctx.curr = next_token(&pctx);
+
+  int panic_status = setjmp(pctx.panic_env);
+  if (panic_status != ERR_NONE) {
+    map_free_buckets(&lex.kw_map);
+    map_free_buckets(&lex.op_map);
+    map_free_buckets(&lex.comp_map);
+    map_free_buckets(&lex.type_kw_map);
+    free(pctx.state_stack);
+    free(pctx.node_stack);
+    free(pctx.op_stack);
+
+    diaglist_add(diag_list, DIAG_ERROR,
+                 "Compiler panicked and aborted parsing.", fpath, 1, 1, 1, 1);
+
+    return NULL;
+  }
 
   AstNode *root = new_node(arena, AST_PROGRAM);
   push_node(&pctx, root);

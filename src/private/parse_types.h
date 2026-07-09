@@ -5,6 +5,7 @@
 #include "lex_types.h"
 #include "types_core.h"
 #include "diag.h"
+#include <setjmp.h>
 
 typedef enum {
   STATE_GLOBAL, // Looking for funcs, structs, global vars
@@ -50,6 +51,13 @@ typedef enum {
   STATE_GROUPING_DONE,
 } ParseState;
 
+typedef enum {
+  ERR_NONE = 0,
+  ERR_OOM,
+  ERR_STACK_UNDERFLOW,
+  ERR_PARSER_PANIC
+} PanicCode;
+
 typedef struct {
   LexCtx *lex;
   Token curr;
@@ -76,6 +84,9 @@ typedef struct {
 
   DiagList *diags;
   bool quiet;
+
+  jmp_buf panic_env;
+  PanicCode panic_code;
 } ParseCtx;
 
 void push_node(ParseCtx *ctx, AstNode *node);
@@ -89,4 +100,5 @@ bool is_compare(LexCtx *ctx, const char *start, unsigned int len);
 bool is_punc(char c);
 Token next_token(ParseCtx *pctx);
 DataType parse_type(ParseCtx *ctx);
+void compiler_panic(jmp_buf env, PanicCode code, const char *msg);
 #endif // !PARSE_TYPES_H

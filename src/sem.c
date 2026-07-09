@@ -1706,6 +1706,10 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
       case AST_SIZEOF:
         node->eval_type = create_basic_type("size");
         break;
+      case AST_ERROR:
+        node->eval_type =
+            create_basic_type("any");
+        break;
       default:
         break;
       }

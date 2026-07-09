@@ -1328,6 +1328,8 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
       break;
     case AST_PARAM:
       break;
+		case AST_ERROR:
+			break;
     }
     if (top < old_top) {
       if (node->src_end && node->src_end > last_pos) {
@@ -1576,7 +1578,7 @@ bool fmt_project(const CompileOptions *restrict opts) {
       fprintf(stderr, "No AST found after trying to parse %s\n", abs_path);
       diaglist_free(&diags);
       free((void *)content);
-      exit(1);
+			continue;
     }
     diaglist_free(&diags);
 

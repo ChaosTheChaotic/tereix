@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <setjmp.h>
 #ifdef ENABLE_THREADS
 #include <pthread.h>
 #endif
@@ -26,5 +27,6 @@ typedef struct {
 
 void *arena_alloc(Arena *arena, size_t size);
 void arena_free_all(Arena *arena);
+void *arena_alloc_or_panic(Arena *arena, size_t size, jmp_buf env);
 
 #endif

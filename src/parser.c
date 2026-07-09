@@ -4,11 +4,17 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-inline AstNode *new_node_with_src(Arena *arena, ASTN_TYPE type, ParseCtx *ctx) {
+void compiler_panic(jmp_buf env, PanicCode code, const char *msg) {
+  fprintf(stderr, "FATAL INTERNAL PANIC: %s\n", msg);
+  longjmp(env, code);
+}
+
+static inline AstNode *new_node_with_src(Arena *arena, ASTN_TYPE type, ParseCtx *ctx) {
   AstNode *n = new_node(arena, type);
-  if (n) {
-    n->src_start = ctx->curr.start;
+  if (!n) {
+    compiler_panic(ctx->panic_env, ERR_OOM, "Failed to allocate AST node");
   }
+  n->src_start = ctx->curr.start;
   return n;
 }
 
@@ -122,10 +128,8 @@ void push_state(ParseCtx *ctx, ParseState state) {
     ParseState *new_stack =
         realloc(ctx->state_stack, sizeof(ParseState) * new_cap);
 
-    if (!new_stack) {
-      fprintf(stderr, "Out of memory: state_stack\n");
-      exit(1);
-    }
+    if (!new_stack)
+      compiler_panic(ctx->panic_env, ERR_OOM, "Out of memory: state_stack");
 
     ctx->state_stack = new_stack;
     ctx->state_cap = new_cap;
@@ -134,10 +138,9 @@ void push_state(ParseCtx *ctx, ParseState state) {
 }
 
 ParseState pop_state(ParseCtx *ctx) {
-  if (ctx->state_count == 0) {
-    fprintf(stderr, "Parser Error: State stack underflow\n");
-    exit(1);
-  }
+  if (ctx->state_count == 0)
+    compiler_panic(ctx->panic_env, ERR_STACK_UNDERFLOW,
+                   "Parser Error: State stack underflow");
   return ctx->state_stack[--ctx->state_count];
 }
 
@@ -256,6 +259,10 @@ Token next_token(ParseCtx *pctx) {
         default:
           report_error(pctx, pctx->curr,
                        "Error: Invalid escape sequence \\%c\n", escape);
+
+          AstNode *err_node = new_node_with_src(pctx->arena, AST_ERROR, pctx);
+          push_node(pctx, err_node);
+
           return (Token){.start = ctx->start,
                          .len = (ctx->curr - ctx->start),
                          .type = TOKEN_UNKNOWN};
@@ -282,6 +289,10 @@ Token next_token(ParseCtx *pctx) {
       report_error(pctx, pctx->curr,
                    "Error: Unterminated string at line %u, col %u col %u\n",
                    ctx->line, ctx->col, ctx->col);
+
+      AstNode *err_node = new_node_with_src(pctx->arena, AST_ERROR, pctx);
+      push_node(pctx, err_node);
+
       return (Token){.start = ctx->start,
                      .len = (ctx->curr - ctx->start),
                      .type = TOKEN_UNKNOWN};
@@ -290,6 +301,10 @@ Token next_token(ParseCtx *pctx) {
           ((ctx->curr - ctx->start) > 3 ||
            (*ctx->curr == '\\' && (ctx->curr - ctx->start > 4)))) {
         report_error(pctx, pctx->curr, "Char literal must contain only 1 char");
+
+        AstNode *err_node = new_node_with_src(pctx->arena, AST_ERROR, pctx);
+        push_node(pctx, err_node);
+
         return (Token){.start = ctx->start,
                        .len = (ctx->curr - ctx->start),
                        .type = TOKEN_UNKNOWN};
@@ -420,9 +435,7 @@ void push_node(ParseCtx *ctx, AstNode *node) {
     size_t new_cap = (ctx->node_cap == 0) ? 32 : ctx->node_cap * 2;
     AstNode **new_stack = realloc(ctx->node_stack, sizeof(AstNode *) * new_cap);
     if (!new_stack) {
-      fprintf(stderr,
-              "No new stack returned after realloc needed for pushing node");
-      exit(1);
+      compiler_panic(ctx->panic_env, ERR_OOM, "Out of memory: node_stack");
     }
     ctx->node_stack = new_stack;
     ctx->node_cap = new_cap;
@@ -432,8 +445,8 @@ void push_node(ParseCtx *ctx, AstNode *node) {
 
 AstNode *pop_node(ParseCtx *ctx) {
   if (ctx->node_count == 0) {
-    fprintf(stderr, "Parser Error: Node stack underflow\n");
-    exit(1);
+    compiler_panic(ctx->panic_env, ERR_STACK_UNDERFLOW,
+                   "Parser Error: Node stack underflow");
   }
   AstNode *node = ctx->node_stack[--ctx->node_count];
   if (node && !node->src_end) {
@@ -447,9 +460,7 @@ void push_op(ParseCtx *ctx, Token op, bool is_unary, bool is_postfix) {
     size_t new_cap = (ctx->op_cap == 0) ? 32 : ctx->op_cap * 2;
     OpInfo *new_stack = realloc(ctx->op_stack, sizeof(OpInfo) * new_cap);
     if (!new_stack) {
-      fprintf(stderr,
-              "No new stack returned after realloc needed for pushing op");
-      exit(1);
+      compiler_panic(ctx->panic_env, ERR_OOM, "Out of memory: op_stack");
     }
     ctx->op_stack = new_stack;
     ctx->op_cap = new_cap;
@@ -466,6 +477,10 @@ void apply_op(ParseCtx *ctx) {
   if (info.is_unary) {
     if (ctx->node_count < 1) {
       report_error(ctx, info.op, "Missing operand for unary operator");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       return;
     }
     AstNode *operand = pop_node(ctx);
@@ -497,6 +512,10 @@ void apply_op(ParseCtx *ctx) {
   } else {
     if (ctx->node_count < 2) {
       report_error(ctx, info.op, "Missing operands for binary operator");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       return;
     }
     AstNode *right = pop_node(ctx);
@@ -505,6 +524,10 @@ void apply_op(ParseCtx *ctx) {
     if (info.op.len == 1 && *info.op.start == '.') {
       if (right->type != AST_IDENTIF && right->type != AST_FUNC_CALL) {
         report_error(ctx, ctx->curr, "Expected identifier after '.'");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         push_node(ctx, left);
         return;
       }
@@ -518,6 +541,10 @@ void apply_op(ParseCtx *ctx) {
           member_name = right->as.func_call.caller->as.identif.val;
         } else {
           report_error(ctx, ctx->curr, "Member call must be an identifier");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           push_node(ctx, left);
           return;
         }
@@ -673,6 +700,10 @@ bool parse_step(ParseCtx *ctx) {
           break;
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after struct name");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -702,6 +733,10 @@ bool parse_step(ParseCtx *ctx) {
           break;
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after union name");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -722,6 +757,10 @@ bool parse_step(ParseCtx *ctx) {
           ctx->ag_depth++;
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after enum");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -752,6 +791,10 @@ bool parse_step(ParseCtx *ctx) {
             } else {
               report_error(ctx, ctx->curr,
                            "Expected identifier after 'as' in use statement");
+
+              AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+              push_node(ctx, err_node);
+
               adv(ctx);
               sync(ctx);
               recover_state(ctx, current_state);
@@ -771,6 +814,10 @@ bool parse_step(ParseCtx *ctx) {
             adv(ctx);
           } else {
             report_error(ctx, ctx->curr, "Expected ';' after use");
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             adv(ctx);
             sync(ctx);
             recover_state(ctx, current_state);
@@ -781,6 +828,10 @@ bool parse_step(ParseCtx *ctx) {
         } else {
           report_error(ctx, ctx->curr,
                        "Expected string literal for module path");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -795,6 +846,10 @@ bool parse_step(ParseCtx *ctx) {
       if (ctx->curr.type != TOKEN_IDENTIF &&
           !is_builtin_type_kw(ctx, ctx->curr)) {
         report_error(ctx, ctx->curr, "Expected identifier after type");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -810,6 +865,10 @@ bool parse_step(ParseCtx *ctx) {
               "Error: 'threadlocal' cannot be applied to function '%.*s' "
               "at line %u, col %u\n",
               name.len, name.start, ctx->lex->line, ctx->lex->col);
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           return false;
         }
         AstNode *fnode = new_node(ctx->arena, AST_FUNC);
@@ -829,6 +888,10 @@ bool parse_step(ParseCtx *ctx) {
           if (!is_type(ctx)) {
             report_error(ctx, ctx->curr,
                          "Expected type in function parameters");
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             adv(ctx);
             sync(ctx);
             recover_state(ctx, current_state);
@@ -843,6 +906,10 @@ bool parse_step(ParseCtx *ctx) {
                 "Using self is not allowed when not within a struct union "
                 "or enum on line %u, col %u",
                 ctx->lex->line, ctx->lex->col);
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             return false;
           } else {
             if (ctx->curr.type != TOKEN_IDENTIF &&
@@ -852,6 +919,10 @@ bool parse_step(ParseCtx *ctx) {
                   "Expected identifier after type in params at line %u, "
                   "col %u\n",
                   ctx->lex->line, ctx->lex->col);
+
+              AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+              push_node(ctx, err_node);
+
               return false;
             }
             p_name = ctx->curr;
@@ -861,6 +932,10 @@ bool parse_step(ParseCtx *ctx) {
           if (p_type.is_async || p_type.is_inline) {
             report_error(ctx, ctx->curr,
                          "Error: Invalid modifier on parameter");
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             adv(ctx);
             sync(ctx);
             recover_state(ctx, current_state);
@@ -891,6 +966,10 @@ bool parse_step(ParseCtx *ctx) {
                 "Error: Function prototype '%.*s' must be marked 'extern' "
                 "at line %u, col %u\n",
                 name.len, name.start, ctx->lex->line, ctx->lex->col);
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             return false;
           }
           adv(ctx);
@@ -944,6 +1023,10 @@ bool parse_step(ParseCtx *ctx) {
       break;
     }
     report_error(ctx, ctx->curr, "Unexpected token in global scope");
+
+    AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+    push_node(ctx, err_node);
+
     adv(ctx);
     sync(ctx);
     recover_state(ctx, current_state);
@@ -963,6 +1046,10 @@ bool parse_step(ParseCtx *ctx) {
           "Parser Error: Unexpected context for expression at line %u, col "
           "%u\n",
           ctx->lex->line, ctx->lex->col);
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       return false;
     }
 
@@ -1046,6 +1133,10 @@ bool parse_step(ParseCtx *ctx) {
             break;
           } else {
             report_error(ctx, ctx->curr, "Expected ')' after cast type");
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             adv(ctx);
             sync(ctx);
             recover_state(ctx, current_state);
@@ -1113,6 +1204,10 @@ bool parse_step(ParseCtx *ctx) {
             break;
           } else {
             report_error(ctx, ctx->curr, "Expected ')' after sizeof type");
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             adv(ctx);
             sync(ctx);
             recover_state(ctx, current_state);
@@ -1130,6 +1225,10 @@ bool parse_step(ParseCtx *ctx) {
         }
       } else {
         report_error(ctx, ctx->curr, "Expected '(' after sizeof");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -1211,6 +1310,10 @@ bool parse_step(ParseCtx *ctx) {
         Token next = peek_token(ctx);
         if (next.type != TOKEN_IDENTIF && next.type != TOKEN_KW) {
           report_error(ctx, ctx->curr, "Expected identifier after '.'");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -1285,6 +1388,10 @@ bool parse_step(ParseCtx *ctx) {
     }
 
     report_error(ctx, ctx->curr, "Unexpected token in expression");
+
+    AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+    push_node(ctx, err_node);
+
     adv(ctx);
     sync(ctx);
     recover_state(ctx, current_state);
@@ -1303,6 +1410,10 @@ bool parse_step(ParseCtx *ctx) {
       push_state(ctx, STATE_IN_EXPR);
     } else {
       report_error(ctx, ctx->curr, "Expected ')' after expression");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1314,6 +1425,10 @@ bool parse_step(ParseCtx *ctx) {
     AstNode *sz_node = ctx->node_stack[ctx->node_count - 1];
     if (sz_node->type == AST_SIZEOF) {
       report_error(ctx, ctx->curr, "Expected expression after sizeof");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       sz_node->as.sizeof_expr.target_expr = NULL;
     } else {
       AstNode *expr = pop_node(ctx);
@@ -1325,6 +1440,10 @@ bool parse_step(ParseCtx *ctx) {
       ctx->expect_operand = false;
     } else {
       report_error(ctx, ctx->curr, "Expected ')' after sizeof expression");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1355,6 +1474,10 @@ bool parse_step(ParseCtx *ctx) {
       ctx->expect_operand = false;
     } else {
       report_error(ctx, ctx->curr, "Expected ']' after index");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1374,6 +1497,10 @@ bool parse_step(ParseCtx *ctx) {
         (ctx->curr.type == TOKEN_PUNC &&
          (*ctx->curr.start == ';' || *ctx->curr.start == '}'))) {
       report_error(ctx, ctx->curr, "Unexpected token in function arguments");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1393,6 +1520,10 @@ bool parse_step(ParseCtx *ctx) {
         (ctx->node_count == 1 ||
          ctx->node_stack[ctx->node_count - 2]->type != AST_ARRAY_LIT)) {
       report_error(ctx, ctx->curr, "Expected expression in array literal");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       // Nothing to append
     } else {
       AstNode *element_expr = pop_node(ctx);
@@ -1414,6 +1545,10 @@ bool parse_step(ParseCtx *ctx) {
       ctx->expect_operand = false;
     } else {
       report_error(ctx, ctx->curr, "Expected ',' or ']' in array literal");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1442,6 +1577,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected '{' to start function body");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1520,6 +1659,10 @@ bool parse_step(ParseCtx *ctx) {
           ctx->ag_depth++;
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after local type name");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -1546,6 +1689,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after if\n");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           return false;
         }
         break;
@@ -1564,6 +1711,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after while\n");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           return false;
         }
         break;
@@ -1635,6 +1786,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after for\n");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           return false;
         }
         break;
@@ -1653,6 +1808,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after switch");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -1669,6 +1828,10 @@ bool parse_step(ParseCtx *ctx) {
             "Error: 'async' cannot be applied to variables at line %u, col "
             "%u\n",
             ctx->lex->line, ctx->lex->col);
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         return false;
       }
       if (type.is_inline) {
@@ -1677,10 +1840,18 @@ bool parse_step(ParseCtx *ctx) {
             "Error: 'inline' cannot be applied to variables at line %u, "
             "col %u\n",
             ctx->lex->line, ctx->lex->col);
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         return false;
       }
       if (ctx->curr.type != TOKEN_IDENTIF) {
         report_error(ctx, ctx->curr, "Expected identifier after type");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -1704,6 +1875,10 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
       } else {
         report_error(ctx, ctx->curr, "Expected ';' or '=' after variable name");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -1738,6 +1913,10 @@ bool parse_step(ParseCtx *ctx) {
       push_state(ctx, STATE_IN_EXPR);
     } else {
       report_error(ctx, ctx->curr, "Unexpected token in block");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1756,6 +1935,10 @@ bool parse_step(ParseCtx *ctx) {
     } else {
       report_error(ctx, ctx->curr,
                    "Expected ';' after for-loop initialization");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1787,6 +1970,10 @@ bool parse_step(ParseCtx *ctx) {
             "Error: 'async' cannot be applied to variables at line %u, col "
             "%u\n",
             ctx->lex->line, ctx->lex->col);
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         return false;
       }
       if (type.is_inline) {
@@ -1795,10 +1982,18 @@ bool parse_step(ParseCtx *ctx) {
             "Error: 'inline' cannot be applied to variables at line %u, "
             "col %u\n",
             ctx->lex->line, ctx->lex->col);
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         return false;
       }
       if (ctx->curr.type != TOKEN_IDENTIF) {
         report_error(ctx, ctx->curr, "Expected identifier after type");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -1828,6 +2023,10 @@ bool parse_step(ParseCtx *ctx) {
             "Expected '=' or ';' after variable declaration in for loop "
             "at line %u, col %u\n",
             ctx->lex->line, ctx->lex->col);
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         return false;
       }
     } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
@@ -1857,6 +2056,10 @@ bool parse_step(ParseCtx *ctx) {
           "Expected ';' after for-loop variable declaration at line %u, "
           "col %u\n",
           ctx->lex->line, ctx->lex->col);
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       return false;
     }
     break;
@@ -1871,6 +2074,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ';' after for-loop condition");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1888,6 +2095,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ')' after for-loop increment");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1900,6 +2111,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected '{' to start for-loop body");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -1924,6 +2139,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ')' after while-condition\n");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       return false;
     }
 
@@ -1933,6 +2152,10 @@ bool parse_step(ParseCtx *ctx) {
       push_node(ctx, body_block);
     } else {
       report_error(ctx, ctx->curr, "Expected '{' for while body\n");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       return false;
     }
     break;
@@ -1960,6 +2183,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ')' after if-condition");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2003,6 +2230,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after else if\n");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           return false;
         }
       } else {
@@ -2017,6 +2248,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after else\n");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           return false;
         }
       }
@@ -2046,6 +2281,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ')' after if-condition");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2089,6 +2328,10 @@ bool parse_step(ParseCtx *ctx) {
           ctx->ag_depth++;
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after nested type name");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -2109,6 +2352,10 @@ bool parse_step(ParseCtx *ctx) {
 
     if (!is_type(ctx)) {
       report_error(ctx, ctx->curr, "Expected type in struct/union definition");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2123,6 +2370,10 @@ bool parse_step(ParseCtx *ctx) {
           "Error: 'async' cannot be applied to struct/union fields at line "
           "%u\n",
           ctx->lex->line);
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       return false;
     }
     if (field_type.is_inline) {
@@ -2131,12 +2382,20 @@ bool parse_step(ParseCtx *ctx) {
           "Error: 'inline' cannot be applied to struct/union fields at "
           "line %u, col %u\n",
           ctx->lex->line, ctx->lex->col);
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       return false;
     }
 
     if (ctx->curr.type != TOKEN_IDENTIF &&
         !is_builtin_type_kw(ctx, ctx->curr)) {
       report_error(ctx, ctx->curr, "Expected field/method identifier");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2152,6 +2411,10 @@ bool parse_step(ParseCtx *ctx) {
             "Error: 'threadlocal' cannot be applied to method '%.*s' at "
             "line %u, col %u\n",
             name.len, name.start, ctx->lex->line, ctx->lex->col);
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         return false;
       }
       AstNode *fnode = new_node(ctx->arena, AST_FUNC);
@@ -2169,6 +2432,10 @@ bool parse_step(ParseCtx *ctx) {
              !(ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')')) {
         if (!is_type(ctx)) {
           report_error(ctx, ctx->curr, "Expected type in function parameters");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -2201,6 +2468,10 @@ bool parse_step(ParseCtx *ctx) {
 
         if (p_type.is_async || p_type.is_inline) {
           report_error(ctx, ctx->curr, "Error: Invalid modifier on parameter");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -2229,6 +2500,10 @@ bool parse_step(ParseCtx *ctx) {
               "Error: Method '%.*s' must be marked 'extern' if no body at "
               "line %u, col %u\n",
               name.len, name.start, ctx->lex->line, ctx->lex->col);
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           return false;
         }
         adv(ctx);
@@ -2257,6 +2532,10 @@ bool parse_step(ParseCtx *ctx) {
         adv(ctx);
       } else {
         report_error(ctx, ctx->curr, "Expected ';' after field declaration");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -2309,6 +2588,10 @@ bool parse_step(ParseCtx *ctx) {
           ctx->ag_depth++;
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after nested type name");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -2354,6 +2637,10 @@ bool parse_step(ParseCtx *ctx) {
     if (is_method) {
       if (!is_type(ctx)) {
         report_error(ctx, ctx->curr, "Expected type in enum method definition");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -2364,12 +2651,20 @@ bool parse_step(ParseCtx *ctx) {
 
       if (field_type.is_async || field_type.is_inline) {
         report_error(ctx, ctx->curr, "Error: Invalid modifier on enum method");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         return false;
       }
 
       if (ctx->curr.type != TOKEN_IDENTIF &&
           !is_builtin_type_kw(ctx, ctx->curr)) {
         report_error(ctx, ctx->curr, "Expected method identifier");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -2383,6 +2678,10 @@ bool parse_step(ParseCtx *ctx) {
         if (field_type.is_threadlocal) {
           report_error(ctx, ctx->curr,
                        "Error: 'threadlocal' cannot be applied to method");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           return false;
         }
 
@@ -2402,6 +2701,10 @@ bool parse_step(ParseCtx *ctx) {
           if (!is_type(ctx)) {
             report_error(ctx, ctx->curr,
                          "Expected type in function parameters");
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             adv(ctx);
             sync(ctx);
             recover_state(ctx, current_state);
@@ -2432,6 +2735,10 @@ bool parse_step(ParseCtx *ctx) {
           if (p_type.is_async || p_type.is_inline) {
             report_error(ctx, ctx->curr,
                          "Error: Invalid modifier on parameter");
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             adv(ctx);
             sync(ctx);
             recover_state(ctx, current_state);
@@ -2459,6 +2766,10 @@ bool parse_step(ParseCtx *ctx) {
           if (!fnode->as.func_def.is_extern) {
             report_error(ctx, ctx->curr,
                          "Error: Method must be extern if no body");
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
             return false;
           }
           adv(ctx);
@@ -2476,6 +2787,10 @@ bool parse_step(ParseCtx *ctx) {
         }
       } else {
         report_error(ctx, ctx->curr, "Expected '(' after method name in enum");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
         adv(ctx);
         sync(ctx);
         recover_state(ctx, current_state);
@@ -2485,6 +2800,10 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type != TOKEN_IDENTIF) {
       report_error(ctx, ctx->curr, "Expected identifier in enum");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2529,6 +2848,10 @@ bool parse_step(ParseCtx *ctx) {
     if (top->type == AST_ENUM_MEMBER) {
       report_error(ctx, ctx->curr,
                    "Expected expression after '=' in enum member");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       top->as.enum_member.val = NULL;
       pop_node(ctx);
     } else {
@@ -2557,6 +2880,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else if (top_node->type != AST_RET) {
       report_error(ctx, ctx->curr, "Expected ';' after return expression");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2569,6 +2896,10 @@ bool parse_step(ParseCtx *ctx) {
     if (top->type == AST_VAR_DECL) {
       report_error(ctx, ctx->curr,
                    "Expected expression after '=' in variable declaration");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       top->as.var_decl.init = NULL;
       pop_node(ctx);
     } else {
@@ -2581,6 +2912,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ';' after variable declaration");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2618,6 +2953,10 @@ bool parse_step(ParseCtx *ctx) {
         (ctx->curr.type == TOKEN_PUNC &&
          (*ctx->curr.start == ';' || *ctx->curr.start == '}'))) {
       report_error(ctx, ctx->curr, "Unexpected token in function arguments");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2653,6 +2992,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ')' after switch condition");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2663,6 +3006,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected '{' to start switch body");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2687,6 +3034,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after case");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -2724,6 +3075,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '{' for default body");
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
           adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
@@ -2734,6 +3089,10 @@ bool parse_step(ParseCtx *ctx) {
     }
 
     report_error(ctx, ctx->curr, "Unexpected token in switch body");
+
+    AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+    push_node(ctx, err_node);
+
     adv(ctx);
     sync(ctx);
     recover_state(ctx, current_state);
@@ -2749,6 +3108,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ')' after case expression");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2762,6 +3125,10 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected '{' to start case body");
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       adv(ctx);
       sync(ctx);
       recover_state(ctx, current_state);
@@ -2813,7 +3180,7 @@ DataType parse_type(ParseCtx *ctx) {
       }
     } else if (ctx->curr.len == 1 &&
                (*ctx->curr.start == '*' || *ctx->curr.start == '&')) {
-			type.ptr_depth++;
+      type.ptr_depth++;
       adv(ctx);
     } else {
       break;
@@ -2822,7 +3189,7 @@ DataType parse_type(ParseCtx *ctx) {
 
   while (ctx->curr.len == 1 &&
          (*ctx->curr.start == '*' || *ctx->curr.start == '&')) {
-		type.ptr_depth++;
+    type.ptr_depth++;
     adv(ctx);
   }
 
@@ -2834,6 +3201,10 @@ DataType parse_type(ParseCtx *ctx) {
           "Error: 'self' type can only be used inside struct/union/enum at "
           "line %u, col %u\n",
           ctx->lex->line, ctx->lex->col);
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
       // Return a dummy type to avoid crashing
       type.name = ctx->curr;
       adv(ctx);
@@ -2872,11 +3243,19 @@ DataType parse_type(ParseCtx *ctx) {
         adv(ctx);
       } else {
         report_error(ctx, ctx->curr, "Expected identifier after '.' in type");
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+
       }
     }
   } else {
     report_error(ctx, ctx->curr, "Expected type name at line %u, col %u\n",
                  ctx->lex->line, ctx->lex->col);
+
+    AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+    push_node(ctx, err_node);
+
   }
 
   while (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '[') {
@@ -2910,6 +3289,10 @@ DataType parse_type(ParseCtx *ctx) {
       report_error(ctx, ctx->curr,
                    "Expected ']' after array dimension at line %u, col %u\n",
                    ctx->lex->line, ctx->lex->col);
+
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
     }
   }
 

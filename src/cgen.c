@@ -286,7 +286,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
                     "Error: main function must have exactly 2 parameters "
                     "(an integer and a string array). Found %d.\n",
                     param_count);
-            exit(1);
+						top--;
+						continue;
           }
 
           AstNode *param1 = params;
@@ -297,7 +298,8 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
               width < 32) {
             fprintf(stderr, "Error: first parameter of main must be a integer "
                             "with at least 32 bits (e.g. i32, i64).\n");
-            exit(1);
+            top--;
+            continue;
           }
 
           AstNode *param2 = param1->next;
