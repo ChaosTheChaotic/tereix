@@ -1,4 +1,5 @@
 #include "ast_serde.h"
+#include "ast_visitor.h"
 #include "hashmap.h"
 #include "hashutils.h"
 #include <string.h>
@@ -1243,241 +1244,131 @@ uint32_t compute_node_hash(AstNode *root) {
   return root->node_hash;
 }
 
+typedef struct {
+  Arena *arena;
+  DeclMetadata *meta;
+  HashMap *alias_map;
+} ExtDeclDepData;
+
+VisitResult ext_decl_dep_enter(AstVisitor *visitor, AstNode *node) {
+  ExtDeclDepData *data = (ExtDeclDepData *)visitor->user_data;
+  Arena *arena = data->arena;
+  DeclMetadata *meta = data->meta;
+  HashMap *alias_map = data->alias_map;
+
+  if (node->type == AST_FUNC_CALL && node->as.func_call.caller) {
+    Token dep_tok = {0};
+
+    if (node->as.func_call.caller->type == AST_IDENTIF) {
+      dep_tok = node->as.func_call.caller->as.identif.val;
+    } else if (node->as.func_call.caller->type == AST_MEMBER) {
+      AstNode *base = node->as.func_call.caller->as.member.base;
+      Token mem_name = node->as.func_call.caller->as.member.name;
+
+      // Format identifs
+      if (base->type == AST_IDENTIF) {
+        Token base_name = base->as.identif.val;
+
+        // Attempt to resolve against local aliases
+        if (alias_map) {
+          Token *real_mod = map_get(alias_map, base_name.start, base_name.len);
+          if (real_mod)
+            base_name = *real_mod;
+        }
+
+        size_t combined_len = base_name.len + 1 + mem_name.len;
+        char *combined = arena_alloc(arena, combined_len + 1);
+        sprintf(combined, "%.*s_%.*s", (int)base_name.len, base_name.start,
+                (int)mem_name.len, mem_name.start);
+
+        dep_tok.start = combined;
+        dep_tok.len = combined_len;
+      } else {
+        dep_tok = mem_name; // Fallback for complex member access
+      }
+    }
+
+    if (dep_tok.start) {
+      DepNode *dep = arena_alloc(arena, sizeof(DepNode));
+      dep->name = dep_tok;
+      dep->next = meta->calls_to;
+      meta->calls_to = dep;
+    }
+  }
+
+  // Extract Type Dependencies
+  if (node->type == AST_VAR_DECL || node->type == AST_PARAM ||
+      node->type == AST_FUNC || node->type == AST_CAST ||
+      node->type == AST_SIZEOF) {
+    DataType *dt = NULL;
+    if (node->type == AST_VAR_DECL)
+      dt = &node->as.var_decl.type;
+    else if (node->type == AST_PARAM)
+      dt = &node->as.fn_param.type;
+    else if (node->type == AST_FUNC)
+      dt = &node->as.func_def.ret_type;
+    else if (node->type == AST_CAST)
+      dt = &node->as.cast.target;
+    else if (node->type == AST_SIZEOF && node->as.sizeof_expr.is_type)
+      dt = &node->as.sizeof_expr.target_type;
+
+    if (dt && dt->is_custom && dt->name.start) {
+      Token dt_name = dt->name;
+      int dot_idx = -1;
+      for (unsigned int i = 0; i < dt_name.len; i++) {
+        if (dt_name.start[i] == '.') {
+          dot_idx = i;
+          break;
+        }
+      }
+
+      if (dot_idx != -1) {
+        Token prefix = {dt_name.start, dot_idx, TOKEN_IDENTIF, 0, 0};
+        Token suffix = {dt_name.start + dot_idx + 1, dt_name.len - dot_idx - 1,
+                        TOKEN_IDENTIF, 0, 0};
+
+        if (alias_map) {
+          Token *real_mod = map_get(alias_map, prefix.start, prefix.len);
+          if (real_mod)
+            prefix = *real_mod;
+        }
+
+        size_t combined_len = prefix.len + 1 + suffix.len;
+        char *combined = arena_alloc(arena, combined_len + 1);
+        sprintf(combined, "%.*s_%.*s", (int)prefix.len, prefix.start,
+                (int)suffix.len, suffix.start);
+        dt_name.start = combined;
+        dt_name.len = combined_len;
+      }
+
+      DepNode *dep = arena_alloc(arena, sizeof(DepNode));
+      dep->name = dt_name;
+      dep->next = meta->uses_types;
+      meta->uses_types = dep;
+    }
+  }
+
+  return VISIT_CONTINUE;
+}
+
 void extract_decl_dependencies(Arena *arena, AstNode *decl_root,
                                DeclMetadata *meta, HashMap *alias_map) {
   if (!decl_root)
     return;
 
-  size_t stack_cap = 1024;
-  AstNode **stack = malloc(sizeof(AstNode *) * stack_cap);
-  size_t top = 0;
+  ExtDeclDepData data = {arena, meta, alias_map};
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = ext_decl_dep_enter;
 
-  stack[top++] = decl_root;
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-  while (top > 0) {
-    AstNode *node = stack[--top];
-    if (!node)
-      continue;
-
-    // Extract function/method calls
-    if (node->type == AST_FUNC_CALL && node->as.func_call.caller) {
-      Token dep_tok = {0};
-
-      if (node->as.func_call.caller->type == AST_IDENTIF) {
-        dep_tok = node->as.func_call.caller->as.identif.val;
-      } else if (node->as.func_call.caller->type == AST_MEMBER) {
-        AstNode *base = node->as.func_call.caller->as.member.base;
-        Token mem_name = node->as.func_call.caller->as.member.name;
-
-        // Format identifs
-        if (base->type == AST_IDENTIF) {
-          Token base_name = base->as.identif.val;
-
-          // Attempt to resolve against local aliases
-          if (alias_map) {
-            Token *real_mod =
-                map_get(alias_map, base_name.start, base_name.len);
-            if (real_mod)
-              base_name = *real_mod;
-          }
-
-          size_t combined_len = base_name.len + 1 + mem_name.len;
-          char *combined = arena_alloc(arena, combined_len + 1);
-          sprintf(combined, "%.*s_%.*s", (int)base_name.len, base_name.start,
-                  (int)mem_name.len, mem_name.start);
-
-          dep_tok.start = combined;
-          dep_tok.len = combined_len;
-        } else {
-          dep_tok = mem_name; // Fallback for complex member access
-        }
-      }
-
-      if (dep_tok.start) {
-        DepNode *dep = arena_alloc(arena, sizeof(DepNode));
-        dep->name = dep_tok;
-        dep->next = meta->calls_to;
-        meta->calls_to = dep;
-      }
-    }
-
-    // Extract Type Dependencies
-    if (node->type == AST_VAR_DECL || node->type == AST_PARAM ||
-        node->type == AST_FUNC || node->type == AST_CAST ||
-        node->type == AST_SIZEOF) {
-      DataType *dt = NULL;
-      if (node->type == AST_VAR_DECL)
-        dt = &node->as.var_decl.type;
-      else if (node->type == AST_PARAM)
-        dt = &node->as.fn_param.type;
-      else if (node->type == AST_FUNC)
-        dt = &node->as.func_def.ret_type;
-      else if (node->type == AST_CAST)
-        dt = &node->as.cast.target;
-      else if (node->type == AST_SIZEOF && node->as.sizeof_expr.is_type)
-        dt = &node->as.sizeof_expr.target_type;
-
-      if (dt && dt->is_custom && dt->name.start) {
-        Token dt_name = dt->name;
-        int dot_idx = -1;
-        for (unsigned int i = 0; i < dt_name.len; i++) {
-          if (dt_name.start[i] == '.') {
-            dot_idx = i;
-            break;
-          }
-        }
-
-        if (dot_idx != -1) {
-          Token prefix = {dt_name.start, dot_idx, TOKEN_IDENTIF, 0, 0};
-          Token suffix = {dt_name.start + dot_idx + 1,
-                          dt_name.len - dot_idx - 1, TOKEN_IDENTIF, 0, 0};
-
-          if (alias_map) {
-            Token *real_mod = map_get(alias_map, prefix.start, prefix.len);
-            if (real_mod)
-              prefix = *real_mod;
-          }
-
-          size_t combined_len = prefix.len + 1 + suffix.len;
-          char *combined = arena_alloc(arena, combined_len + 1);
-          sprintf(combined, "%.*s_%.*s", (int)prefix.len, prefix.start,
-                  (int)suffix.len, suffix.start);
-          dt_name.start = combined;
-          dt_name.len = combined_len;
-        }
-
-        DepNode *dep = arena_alloc(arena, sizeof(DepNode));
-        dep->name = dt_name;
-        dep->next = meta->uses_types;
-        meta->uses_types = dep;
-      }
-    }
-
-    if (node != decl_root && node->next) {
-      if (top >= stack_cap - 2) {
-        size_t new_stack_cap = stack_cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_stack_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        stack_cap = new_stack_cap;
-      }
-      stack[top++] = node->next;
-    }
-
-#define PUSH_CHILD(n)                                                          \
-  do {                                                                         \
-    if (n) {                                                                   \
-      if (top >= stack_cap - 2) {                                              \
-        size_t new_stack_cap = stack_cap * 2;                                  \
-        AstNode **new_stack =                                                  \
-            realloc(stack, sizeof(AstNode *) * new_stack_cap);                 \
-        if (!new_stack) {                                                      \
-          fprintf(stderr, "OOM whilst reallocating stack.\n");                 \
-          free(stack);                                                         \
-          return;                                                              \
-        }                                                                      \
-        stack_cap = new_stack_cap;                                             \
-        stack = new_stack;                                                     \
-      }                                                                        \
-      stack[top++] = (n);                                                      \
-    }                                                                          \
-  } while (0)
-
-    switch (node->type) {
-    case AST_BINOP:
-      PUSH_CHILD(node->as.binop.left);
-      PUSH_CHILD(node->as.binop.right);
-      break;
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF:
-      PUSH_CHILD(node->as.unop.operand);
-      break;
-    case AST_IF:
-      PUSH_CHILD(node->as.if_check.check);
-      PUSH_CHILD(node->as.if_check.action);
-      PUSH_CHILD(node->as.if_check.elseAct);
-      break;
-    case AST_BLOCK:
-    case AST_PROGRAM:
-      PUSH_CHILD(node->as.block.first_stmt);
-      break;
-    case AST_FUNC:
-      PUSH_CHILD(node->as.func_def.block);
-      break;
-    case AST_RET:
-      PUSH_CHILD(node->as.ret_stmt.expr);
-      break;
-    case AST_VAR_DECL:
-      PUSH_CHILD(node->as.var_decl.init);
-      break;
-    case AST_ARRAY_LIT:
-      PUSH_CHILD(node->as.array_lit.elements);
-      break;
-    case AST_STRUCT:
-      PUSH_CHILD(node->as.struct_def.contents);
-      break;
-    case AST_UNION:
-      PUSH_CHILD(node->as.union_def.contents);
-      break;
-    case AST_ENUM:
-      PUSH_CHILD(node->as.enum_def.contents);
-      break;
-    case AST_ENUM_MEMBER:
-      PUSH_CHILD(node->as.enum_member.val);
-      break;
-    case AST_DEFER:
-      PUSH_CHILD(node->as.defer_stmt.contents);
-      break;
-    case AST_FOR:
-      PUSH_CHILD(node->as.for_loop.init);
-      PUSH_CHILD(node->as.for_loop.check);
-      PUSH_CHILD(node->as.for_loop.inc);
-      PUSH_CHILD(node->as.for_loop.action);
-      break;
-    case AST_WHILE:
-      PUSH_CHILD(node->as.while_loop.check);
-      PUSH_CHILD(node->as.while_loop.action);
-      break;
-    case AST_FUNC_CALL:
-      PUSH_CHILD(node->as.func_call.caller);
-      PUSH_CHILD(node->as.func_call.args);
-      break;
-    case AST_INDEX:
-      PUSH_CHILD(node->as.index.base);
-      PUSH_CHILD(node->as.index.index);
-      break;
-    case AST_MEMBER:
-      PUSH_CHILD(node->as.member.base);
-      break;
-    case AST_SWITCH:
-      PUSH_CHILD(node->as.switch_stmt.check);
-      PUSH_CHILD(node->as.switch_stmt.cases);
-      PUSH_CHILD(node->as.switch_stmt.default_case);
-      break;
-    case AST_CASE:
-      PUSH_CHILD(node->as.case_stmt.val);
-      PUSH_CHILD(node->as.case_stmt.action);
-      break;
-    case AST_EXTERN:
-      PUSH_CHILD(node->as.extern_block.contents);
-      break;
-    case AST_CAST:
-      PUSH_CHILD(node->as.cast.op);
-      break;
-    case AST_SIZEOF:
-      PUSH_CHILD(node->as.sizeof_expr.target_expr);
-      break;
-    default:
-      break;
-    }
-#undef PUSH_CHILD
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, decl_root);
+  } else {
+    fprintf(stderr, "OOM encountered during dependency extraction.\n");
   }
-  free(stack);
 }
 
 // Generates the Declaration metadata for an entire module

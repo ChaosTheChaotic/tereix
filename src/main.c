@@ -1,4 +1,5 @@
 #include "ast_serde.h"
+#include "ast_visitor.h"
 #include "c_gen_types.h"
 #include "cli.h"
 #include "fmt.h"
@@ -25,158 +26,44 @@ typedef struct ParseTaskData {
   Arena *arena;
 } ParseTaskData;
 
+typedef struct {
+  void (*callback)(Token callee_name);
+} ExtDepData;
+
+VisitResult extract_dep_enter(AstVisitor *visitor, AstNode *node) {
+  ExtDepData *data = (ExtDepData *)visitor->user_data;
+
+  // Check for explicit Function Calls or Method calls
+  if (node->type == AST_FUNC_CALL && node->as.func_call.caller) {
+    if (node->as.func_call.caller->type == AST_IDENTIF) {
+      data->callback(node->as.func_call.caller->as.identif.val);
+    } else if (node->as.func_call.caller->type == AST_MEMBER) {
+      data->callback(node->as.func_call.caller->as.member.name);
+    }
+  }
+
+  return VISIT_CONTINUE;
+}
+
 void extract_dependencies(AstNode *root, void (*callback)(Token callee_name)) {
   if (!root)
     return;
 
-  size_t stack_cap = 1024;
-  AstNode **stack = malloc(sizeof(AstNode *) * stack_cap);
-  size_t top = 0;
+  ExtDepData data = {callback};
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = extract_dep_enter;
 
-  stack[top++] = root;
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-  while (top > 0) {
-    AstNode *node = stack[--top];
-    if (!node)
-      continue;
-
-    // Check for explicit Function Calls or Method calls
-    if (node->type == AST_FUNC_CALL && node->as.func_call.caller) {
-      if (node->as.func_call.caller->type == AST_IDENTIF) {
-        callback(node->as.func_call.caller->as.identif.val);
-      } else if (node->as.func_call.caller->type == AST_MEMBER) {
-        callback(node->as.func_call.caller->as.member.name);
-      }
-    }
-
-    // Push sibling to stack first
-    if (node->next) {
-      if (top >= stack_cap - 2) {
-        size_t new_stack_cap = stack_cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_stack_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        stack_cap = new_stack_cap;
-      }
-      stack[top++] = node->next;
-    }
-
-#define PUSH_NODE(n)                                                           \
-  do {                                                                         \
-    if (n) {                                                                   \
-      if (top >= stack_cap - 2) {                                              \
-        size_t new_stack_cap = stack_cap * 2;                                  \
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_stack_cap);   \
-        if (!new_stack) {                                                      \
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");     \
-          free(stack);                                                         \
-          return;                                                              \
-        }                                                                      \
-        stack = new_stack;                                                     \
-        stack_cap = new_stack_cap;                                             \
-      }                                                                        \
-      stack[top++] = (n);                                                      \
-    }                                                                          \
-  } while (0)
-
-    // Queue up the children for subsequent loops
-    switch (node->type) {
-    case AST_BINOP:
-      PUSH_NODE(node->as.binop.left);
-      PUSH_NODE(node->as.binop.right);
-      break;
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF:
-      PUSH_NODE(node->as.unop.operand);
-      break;
-    case AST_IF:
-      PUSH_NODE(node->as.if_check.check);
-      PUSH_NODE(node->as.if_check.action);
-      PUSH_NODE(node->as.if_check.elseAct);
-      break;
-    case AST_BLOCK:
-    case AST_PROGRAM:
-      PUSH_NODE(node->as.block.first_stmt);
-      break;
-    case AST_FUNC:
-      PUSH_NODE(node->as.func_def.block);
-      break;
-    case AST_RET:
-      PUSH_NODE(node->as.ret_stmt.expr);
-      break;
-    case AST_VAR_DECL:
-      PUSH_NODE(node->as.var_decl.init);
-      break;
-    case AST_ARRAY_LIT:
-      PUSH_NODE(node->as.array_lit.elements);
-      break;
-    case AST_STRUCT:
-      PUSH_NODE(node->as.struct_def.contents);
-      break;
-    case AST_UNION:
-      PUSH_NODE(node->as.union_def.contents);
-      break;
-    case AST_ENUM:
-      PUSH_NODE(node->as.enum_def.contents);
-      break;
-    case AST_ENUM_MEMBER:
-      PUSH_NODE(node->as.enum_member.val);
-      break;
-    case AST_DEFER:
-      PUSH_NODE(node->as.defer_stmt.contents);
-      break;
-    case AST_FOR:
-      PUSH_NODE(node->as.for_loop.init);
-      PUSH_NODE(node->as.for_loop.check);
-      PUSH_NODE(node->as.for_loop.inc);
-      PUSH_NODE(node->as.for_loop.action);
-      break;
-    case AST_WHILE:
-      PUSH_NODE(node->as.while_loop.check);
-      PUSH_NODE(node->as.while_loop.action);
-      break;
-    case AST_FUNC_CALL:
-      PUSH_NODE(node->as.func_call.caller);
-      PUSH_NODE(node->as.func_call.args);
-      break;
-    case AST_INDEX:
-      PUSH_NODE(node->as.index.base);
-      PUSH_NODE(node->as.index.index);
-      break;
-    case AST_MEMBER:
-      PUSH_NODE(node->as.member.base);
-      break;
-    case AST_SWITCH:
-      PUSH_NODE(node->as.switch_stmt.check);
-      PUSH_NODE(node->as.switch_stmt.cases);
-      PUSH_NODE(node->as.switch_stmt.default_case);
-      break;
-    case AST_CASE:
-      PUSH_NODE(node->as.case_stmt.val);
-      PUSH_NODE(node->as.case_stmt.action);
-      break;
-    case AST_EXTERN:
-      PUSH_NODE(node->as.extern_block.contents);
-      break;
-    case AST_CAST:
-      PUSH_NODE(node->as.cast.op);
-      break;
-    case AST_SIZEOF:
-      PUSH_NODE(node->as.sizeof_expr.target_expr);
-      break;
-    default:
-      break;
-    }
-
-#undef PUSH_NODE
+  // 0 means direct return from setjmp. Non zero means longjmp was called.
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    // Handle OOM explicitly
+    fprintf(stderr, "OOM encountered during dependency extraction.\n");
   }
-
-  free(stack);
 }
 
 void sync_dirty_flags_to_ast(Module *mod) {

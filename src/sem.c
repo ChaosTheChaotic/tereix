@@ -1,3 +1,4 @@
+#include "ast_visitor.h"
 #include "sem_types.h"
 #include "util.h"
 #include <ctype.h>
@@ -482,28 +483,130 @@ void pop_scope(ScopeStack *ss) {
   }
 }
 
+typedef struct {
+  SemCtx *ctx;
+  ScopeStack *ss;
+  Module *mod;
+  Arena *arena;
+} ScopeVisitorData;
+
+VisitResult resolve_scopes_enter(AstVisitor *visitor, AstNode *node) {
+  ScopeVisitorData *data = (ScopeVisitorData *)visitor->user_data;
+  SemCtx *ctx = data->ctx;
+  ScopeStack *ss = data->ss;
+  Module *mod = data->mod;
+  Arena *arena = data->arena;
+
+  switch (node->type) {
+  case AST_PROGRAM:
+  case AST_BLOCK:
+  case AST_FOR:
+    push_scope(ss);
+    break;
+
+  case AST_FUNC: {
+    Sym *func_sym = new_sym(arena, SYM_FUNC, node->as.func_def.fn_name, node,
+                            mod->abs_path);
+    if (!scope_declare(ss, node->as.func_def.fn_name, func_sym)) {
+      sem_report(ctx, DIAG_ERROR, node->as.func_def.fn_name,
+                 "Error: Duplicate function name '%.*s'\n",
+                 node->as.func_def.fn_name.len,
+                 node->as.func_def.fn_name.start);
+    }
+    push_scope(ss);
+    break;
+  }
+
+  case AST_PARAM: {
+    Sym *param_sym =
+        new_sym(arena, SYM_VAR, node->as.fn_param.id, node, mod->abs_path);
+    if (!scope_declare(ss, node->as.fn_param.id, param_sym)) {
+      sem_report(ctx, DIAG_ERROR, node->as.fn_param.id,
+                 "Error: Duplicate parameter name '%.*s'\n",
+                 node->as.fn_param.id.len, node->as.fn_param.id.start);
+    }
+    break;
+  }
+
+  case AST_VAR_DECL: {
+    Sym *var_sym =
+        new_sym(arena, SYM_VAR, node->as.var_decl.id, node, mod->abs_path);
+    if (!scope_declare(ss, node->as.var_decl.id, var_sym)) {
+      sem_report(ctx, DIAG_ERROR, node->as.var_decl.id,
+                 "Error: Variable '%.*s' already declared in this scope.\n",
+                 node->as.var_decl.id.len, node->as.var_decl.id.start);
+    }
+    break;
+  }
+
+  case AST_IDENTIF: {
+    Token id = node->as.identif.val;
+    Sym *found = scope_lookup(ss, id.start, id.len);
+    if (!found) {
+      sem_report(ctx, DIAG_ERROR, id, "Undeclared identifier '%.*s'", id.len,
+                 id.start);
+    } else {
+      node->as.identif.res_sm = found;
+    }
+    break;
+  }
+
+  case AST_STRUCT:
+  case AST_UNION:
+  case AST_ENUM: {
+    SymKind skind = (node->type == AST_STRUCT)  ? SYM_STRUCT
+                    : (node->type == AST_UNION) ? SYM_UNION
+                                                : SYM_ENUM;
+
+    Token name = (node->type == AST_STRUCT)  ? node->as.struct_def.structn
+                 : (node->type == AST_UNION) ? node->as.union_def.unionn
+                                             : node->as.enum_def.enumn;
+
+    Sym *sue_sym = new_sym(arena, skind, name, node, mod->abs_path);
+    scope_declare(ss, name, sue_sym);
+
+    push_scope(ss);
+    Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
+    scope_declare(ss, self_tok, sue_sym);
+    break;
+  }
+  default:
+    break;
+  }
+
+  return VISIT_CONTINUE;
+}
+
+void resolve_scopes_exit(AstVisitor *visitor, AstNode *node) {
+  ScopeVisitorData *data = (ScopeVisitorData *)visitor->user_data;
+  switch (node->type) {
+  case AST_PROGRAM:
+  case AST_BLOCK:
+  case AST_FUNC:
+  case AST_FOR:
+  case AST_STRUCT:
+  case AST_UNION:
+  case AST_ENUM:
+    pop_scope(data->ss);
+    break;
+  default:
+    break;
+  }
+}
+
 void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
   if (!mod || !mod->ast_root)
     return;
 
-  AstNode *root = mod->ast_root;
-
-  size_t stack_cap = 1024;
-  TravItem *stack = malloc(sizeof(TravItem) * stack_cap);
-  size_t top = 0;
-
-  stack[top++] = (TravItem){root, ACTION_VISIT_NODE, false};
-
   push_scope(ss);
 
+  // Load imported module aliases into global scope
   for (size_t i = 0; i < mod->imported_mods.capacity; i++) {
     HashEntry *entry = mod->imported_mods.buckets[i];
     while (entry) {
       Module *imported_mod = (Module *)entry->value;
-
       Token import_tok = {
           .start = entry->key, .len = entry->key_len, .type = TOKEN_IDENTIF};
-
       Sym *import_sym =
           new_sym(arena, SYM_VAR, import_tok, NULL, imported_mod->abs_path);
       import_sym->is_imported_mod = true;
@@ -512,302 +615,22 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
   }
 
-#define PUSH_TRAV(n, act, top_level)                                           \
-  do {                                                                         \
-    if (top >= stack_cap) {                                                    \
-      stack_cap *= 2;                                                          \
-      stack = realloc(stack, sizeof(TravItem) * stack_cap);                    \
-    }                                                                          \
-    stack[top++] = (TravItem){n, act, top_level};                              \
-  } while (0)
+  ScopeVisitorData vdata = {.ctx = ctx, .ss = ss, .mod = mod, .arena = arena};
 
-#define PUSH_LL_REVERSE(head, act, top_level)                                  \
-  do {                                                                         \
-    AstNode *_curr = (head);                                                   \
-    size_t _cnt = 0;                                                           \
-    while (_curr) {                                                            \
-      _cnt++;                                                                  \
-      _curr = _curr->next;                                                     \
-    }                                                                          \
-    if (_cnt > 0) {                                                            \
-      AstNode **_arr = malloc(sizeof(AstNode *) * _cnt);                       \
-      _curr = (head);                                                          \
-      for (size_t _i = 0; _i < _cnt; _i++) {                                   \
-        _arr[_i] = _curr;                                                      \
-        _curr = _curr->next;                                                   \
-      }                                                                        \
-      for (int _i = (int)_cnt - 1; _i >= 0; _i--) {                            \
-        PUSH_TRAV(_arr[_i], act, top_level);                                   \
-      }                                                                        \
-      free(_arr);                                                              \
-    }                                                                          \
-  } while (0)
+  AstVisitor visitor = {.user_data = &vdata,
+                        .enter_node = resolve_scopes_enter,
+                        .exit_node = resolve_scopes_exit};
 
-  while (top > 0) {
-    TravItem item = stack[--top];
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-    if (item.action == ACTION_POP_SCOPE) {
-      pop_scope(ss);
-      continue;
-    }
-
-    AstNode *node = item.node;
-    if (!node)
-      continue;
-
-    switch (node->type) {
-    case AST_PROGRAM: {
-      push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
-      // Flag all root statements as top level
-      PUSH_LL_REVERSE(node->as.block.first_stmt, ACTION_VISIT_NODE, true);
-      break;
-    }
-
-    case AST_BLOCK: {
-      push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
-      PUSH_LL_REVERSE(node->as.block.first_stmt, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_FUNC: {
-      Sym *func_sym = new_sym(arena, SYM_FUNC, node->as.func_def.fn_name, node,
-                              mod->abs_path);
-      if (!scope_declare(ss, node->as.func_def.fn_name, func_sym)) {
-        sem_report(ctx, DIAG_ERROR, node->as.func_def.fn_name,
-                   "Error: Duplicate function name '%.*s'\n",
-                   node->as.func_def.fn_name.len,
-                   node->as.func_def.fn_name.start);
-      }
-
-      // Only traverse body if dirty or if it's nested
-      push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
-
-      if (node->as.func_def.block) {
-        PUSH_TRAV(node->as.func_def.block, ACTION_VISIT_NODE, false);
-      }
-
-      PUSH_LL_REVERSE(node->as.func_def.params, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_PARAM: {
-      Sym *param_sym =
-          new_sym(arena, SYM_VAR, node->as.fn_param.id, node, mod->abs_path);
-      if (!scope_declare(ss, node->as.fn_param.id, param_sym)) {
-        sem_report(ctx, DIAG_ERROR, node->as.fn_param.id,
-                   "Error: Duplicate parameter name '%.*s'\n",
-                   node->as.fn_param.id.len, node->as.fn_param.id.start);
-      }
-      break;
-    }
-
-    case AST_VAR_DECL: {
-      if (node->as.var_decl.init) {
-        PUSH_TRAV(node->as.var_decl.init, ACTION_VISIT_NODE, false);
-      }
-
-      Sym *var_sym =
-          new_sym(arena, SYM_VAR, node->as.var_decl.id, node, mod->abs_path);
-      if (!scope_declare(ss, node->as.var_decl.id, var_sym)) {
-        sem_report(ctx, DIAG_ERROR, node->as.var_decl.id,
-                   "Error: Variable '%.*s' already declared in this scope.\n",
-                   node->as.var_decl.id.len, node->as.var_decl.id.start);
-      }
-      break;
-    }
-
-    case AST_IDENTIF: {
-      Token id = node->as.identif.val;
-      Sym *found = scope_lookup(ss, id.start, id.len);
-      if (!found) {
-        sem_report(ctx, DIAG_ERROR, id, "Undeclared identifier '%.*s'", id.len,
-                   id.start);
-      } else {
-        node->as.identif.res_sm = found;
-      }
-      break;
-    }
-
-    case AST_BINOP: {
-      PUSH_TRAV(node->as.binop.right, ACTION_VISIT_NODE, false);
-      PUSH_TRAV(node->as.binop.left, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF: {
-      if (node->as.unop.operand) {
-        PUSH_TRAV(node->as.unop.operand, ACTION_VISIT_NODE, false);
-      }
-      break;
-    }
-
-    case AST_IF: {
-      if (node->as.if_check.elseAct)
-        PUSH_TRAV(node->as.if_check.elseAct, ACTION_VISIT_NODE, false);
-      if (node->as.if_check.action)
-        PUSH_TRAV(node->as.if_check.action, ACTION_VISIT_NODE, false);
-      if (node->as.if_check.check)
-        PUSH_TRAV(node->as.if_check.check, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_WHILE: {
-      if (node->as.while_loop.action)
-        PUSH_TRAV(node->as.while_loop.action, ACTION_VISIT_NODE, false);
-      if (node->as.while_loop.check)
-        PUSH_TRAV(node->as.while_loop.check, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_FOR: {
-      push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
-
-      if (node->as.for_loop.action)
-        PUSH_TRAV(node->as.for_loop.action, ACTION_VISIT_NODE, false);
-      if (node->as.for_loop.inc)
-        PUSH_TRAV(node->as.for_loop.inc, ACTION_VISIT_NODE, false);
-      if (node->as.for_loop.check)
-        PUSH_TRAV(node->as.for_loop.check, ACTION_VISIT_NODE, false);
-      if (node->as.for_loop.init)
-        PUSH_TRAV(node->as.for_loop.init, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_FUNC_CALL: {
-      PUSH_LL_REVERSE(node->as.func_call.args, ACTION_VISIT_NODE, false);
-      if (node->as.func_call.caller)
-        PUSH_TRAV(node->as.func_call.caller, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_ARRAY_LIT: {
-      PUSH_LL_REVERSE(node->as.array_lit.elements, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_INDEX: {
-      if (node->as.index.index)
-        PUSH_TRAV(node->as.index.index, ACTION_VISIT_NODE, false);
-      if (node->as.index.base)
-        PUSH_TRAV(node->as.index.base, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_MEMBER: {
-      if (node->as.member.base)
-        PUSH_TRAV(node->as.member.base, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_RET: {
-      if (node->as.ret_stmt.expr)
-        PUSH_TRAV(node->as.ret_stmt.expr, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_DEFER: {
-      if (node->as.defer_stmt.contents)
-        PUSH_TRAV(node->as.defer_stmt.contents, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_SWITCH: {
-      if (node->as.switch_stmt.default_case)
-        PUSH_TRAV(node->as.switch_stmt.default_case, ACTION_VISIT_NODE, false);
-      PUSH_LL_REVERSE(node->as.switch_stmt.cases, ACTION_VISIT_NODE, false);
-      if (node->as.switch_stmt.check)
-        PUSH_TRAV(node->as.switch_stmt.check, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_CASE: {
-      if (node->as.case_stmt.action)
-        PUSH_TRAV(node->as.case_stmt.action, ACTION_VISIT_NODE, false);
-      if (node->as.case_stmt.val)
-        PUSH_TRAV(node->as.case_stmt.val, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_STRUCT: {
-      Sym *struct_sym = new_sym(arena, SYM_STRUCT, node->as.struct_def.structn,
-                                node, mod->abs_path);
-      scope_declare(ss, node->as.struct_def.structn, struct_sym);
-
-      push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
-
-      Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
-      scope_declare(ss, self_tok, struct_sym);
-
-      PUSH_LL_REVERSE(node->as.struct_def.contents, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_UNION: {
-      Sym *union_sym = new_sym(arena, SYM_UNION, node->as.union_def.unionn,
-                               node, mod->abs_path);
-      scope_declare(ss, node->as.union_def.unionn, union_sym);
-
-      push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
-
-      Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
-      scope_declare(ss, self_tok, union_sym);
-
-      PUSH_LL_REVERSE(node->as.struct_def.contents, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_ENUM: {
-      Sym *enum_sym = new_sym(arena, SYM_ENUM, node->as.enum_def.enumn, node,
-                              mod->abs_path);
-      scope_declare(ss, node->as.enum_def.enumn, enum_sym);
-
-      push_scope(ss);
-      PUSH_TRAV(NULL, ACTION_POP_SCOPE, false);
-
-      Token self_tok = {.start = "self", .len = 4, .type = TOKEN_IDENTIF};
-      scope_declare(ss, self_tok, enum_sym);
-
-      PUSH_LL_REVERSE(node->as.enum_def.contents, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_EXTERN: {
-      PUSH_LL_REVERSE(node->as.extern_block.contents, ACTION_VISIT_NODE, false);
-      break;
-    }
-
-    case AST_CAST: {
-      if (node->as.cast.op) {
-        PUSH_TRAV(node->as.cast.op, ACTION_VISIT_NODE, false);
-      }
-      break;
-    }
-
-    case AST_SIZEOF: {
-      if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr) {
-        PUSH_TRAV(node->as.sizeof_expr.target_expr, ACTION_VISIT_NODE, false);
-      }
-      break;
-    }
-
-    default:
-      break;
-    }
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, mod->ast_root);
+  } else {
+    fprintf(stderr, "OOM encountered during scope resolution.\n");
   }
 
-#undef PUSH_TRAV
-#undef PUSH_LL_REVERSE
-
   pop_scope(ss);
-  free(stack);
 }
 
 DataType create_basic_type(const char *name_str) {
@@ -939,781 +762,618 @@ DataType common_numeric_type(DataType a, DataType b) {
   return b;
 }
 
+typedef struct {
+  SemCtx *ctx;
+  Arena *arena;
+  AstNode *func_stack[64];
+  int func_top;
+  HashMap exp_map;
+} TCData;
+
+void set_expected(HashMap *map, AstNode *n, DataType *exp) {
+  if (n && exp) {
+    map_set(map, (const char *)&n, sizeof(AstNode *), exp);
+  }
+}
+
+DataType *get_expected(HashMap *map, AstNode *n) {
+  return (DataType *)map_get(map, (const char *)&n, sizeof(AstNode *));
+}
+
+VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
+  TCData *data = visitor->user_data;
+
+  if (n->type == AST_FUNC) {
+    data->func_stack[data->func_top++] = n;
+  }
+
+  bool is_top_level = (data->func_top == 0 ||
+                       (data->func_top == 1 && n == data->func_stack[0]));
+
+  if (is_top_level) {
+    if (!n->is_dirty && (n->type == AST_FUNC || n->type == AST_VAR_DECL ||
+                         n->type == AST_STRUCT || n->type == AST_UNION ||
+                         n->type == AST_ENUM)) {
+      // Clean top level block nodes should skip digging but process synthesis
+      // in exit
+      return VISIT_SKIP_CHILDREN;
+    }
+    if (n->is_dirty) {
+      n->is_dirty = false;
+    }
+  }
+
+  DataType *expected = get_expected(&data->exp_map, n);
+
+  switch (n->type) {
+  case AST_VAR_DECL:
+    set_expected(&data->exp_map, n->as.var_decl.init, &n->as.var_decl.type);
+    break;
+  case AST_BINOP: {
+    DataType *exp = expected;
+    if (n->as.binop.op.type == TOKEN_COMPARE)
+      exp = NULL;
+    set_expected(&data->exp_map, n->as.binop.left, exp);
+    set_expected(&data->exp_map, n->as.binop.right, exp);
+    break;
+  }
+  case AST_UOP:
+  case AST_ADDR_OF:
+  case AST_DEREF: {
+    if (expected) {
+      DataType *inner = arena_alloc(data->arena, sizeof(DataType));
+      *inner = *expected;
+      if (n->type == AST_ADDR_OF)
+        inner->ptr_depth--;
+      else if (n->type == AST_DEREF)
+        inner->ptr_depth++;
+      set_expected(&data->exp_map, n->as.unop.operand, inner);
+    }
+    break;
+  }
+  case AST_IF:
+    set_expected(&data->exp_map, n->as.if_check.check, &EXPECT_BOOL);
+    set_expected(&data->exp_map, n->as.if_check.action, expected);
+    set_expected(&data->exp_map, n->as.if_check.elseAct, expected);
+    break;
+  case AST_WHILE:
+    set_expected(&data->exp_map, n->as.while_loop.check, &EXPECT_BOOL);
+    break;
+  case AST_FOR:
+    set_expected(&data->exp_map, n->as.for_loop.check, &EXPECT_BOOL);
+    break;
+  case AST_FUNC_CALL: {
+    AstNode *fn_decl = NULL;
+    if (n->as.func_call.caller && n->as.func_call.caller->type == AST_IDENTIF &&
+        n->as.func_call.caller->as.identif.res_sm) {
+      fn_decl = n->as.func_call.caller->as.identif.res_sm->decl_node;
+    }
+    AstNode *curr_arg = n->as.func_call.args;
+    AstNode *curr_param = NULL;
+    if (fn_decl && n->as.func_call.caller->type == AST_IDENTIF &&
+        n->as.func_call.caller->as.identif.res_sm->kind == SYM_FUNC) {
+      curr_param = fn_decl->as.func_def.params;
+    }
+    while (curr_arg) {
+      if (curr_param) {
+        set_expected(&data->exp_map, curr_arg, &curr_param->as.fn_param.type);
+        curr_param = curr_param->next;
+      }
+      curr_arg = curr_arg->next;
+    }
+    break;
+  }
+  case AST_CAST:
+    set_expected(&data->exp_map, n->as.cast.op, &n->as.cast.target);
+    break;
+  case AST_RET: {
+    AstNode *curr_func =
+        (data->func_top > 0) ? data->func_stack[data->func_top - 1] : NULL;
+    if (curr_func && n->as.ret_stmt.expr) {
+      set_expected(&data->exp_map, n->as.ret_stmt.expr,
+                   &curr_func->as.func_def.ret_type);
+    }
+    break;
+  }
+  case AST_ARRAY_LIT: {
+    AstNode *curr = n->as.array_lit.elements;
+    while (curr) {
+      set_expected(&data->exp_map, curr, expected);
+      curr = curr->next;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+
+  return VISIT_CONTINUE;
+}
+
+void tc_exit(AstVisitor *visitor, AstNode *n) {
+  TCData *data = visitor->user_data;
+  DataType *expected = get_expected(&data->exp_map, n);
+  SemCtx *ctx = data->ctx;
+  AstNode *curr_func =
+      (data->func_top > 0) ? data->func_stack[data->func_top - 1] : NULL;
+
+  switch (n->type) {
+  case AST_NUM_LIT: {
+    if (expected) {
+      n->eval_type = *expected;
+    } else {
+      const char *val_str = n->as.num_lit.val.start;
+      int len = n->as.num_lit.val.len;
+
+      bool is_float = false;
+      for (int i = 0; i < len; i++) {
+        if (val_str[i] == '.') {
+          is_float = true;
+          break;
+        }
+      }
+
+      if (is_float) {
+        n->eval_type = create_basic_type("f32");
+      } else {
+        char buf[64] = {0};
+        int copy_len = len < 63 ? len : 63;
+        strncpy(buf, val_str, copy_len);
+
+        long long val = strtoll(buf, NULL, 0);
+
+        if (val >= -128 && val <= 127)
+          n->eval_type = create_basic_type("i8");
+        else if (val >= -32768 && val <= 32767)
+          n->eval_type = create_basic_type("i16");
+        else if (val >= -2147483648LL && val <= 2147483647LL)
+          n->eval_type = create_basic_type("i32");
+        else
+          n->eval_type = create_basic_type("i64");
+      }
+    }
+    break;
+  }
+  case AST_STR_LIT:
+    n->eval_type = create_basic_type("str");
+    break;
+  case AST_BOOL_LIT:
+    n->eval_type = create_basic_type("bool");
+    break;
+  case AST_CHAR_LIT:
+    n->eval_type = create_basic_type("char");
+    break;
+  case AST_NULL_LIT:
+    n->eval_type = create_basic_type("null");
+    break;
+  case AST_IDENTIF:
+    if (n->as.identif.res_sm) {
+      Sym *sym = n->as.identif.res_sm;
+      if (sym->kind == SYM_VAR && sym->decl_node) {
+        if (sym->decl_node->type == AST_PARAM)
+          n->eval_type = sym->decl_node->as.fn_param.type;
+        else
+          n->eval_type = sym->decl_node->as.var_decl.type;
+      } else if (sym->kind == SYM_FUNC && sym->decl_node) {
+        n->eval_type = sym->decl_node->as.func_def.ret_type;
+      } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
+                 sym->kind == SYM_ENUM) {
+        n->eval_type = create_basic_type("");
+        n->eval_type.name = sym->name;
+        n->eval_type.is_custom = true;
+      }
+    }
+    break;
+  case AST_VAR_DECL:
+    if (n->as.var_decl.init) {
+      if (!is_type_compatible(n->as.var_decl.type,
+                              n->as.var_decl.init->eval_type, false)) {
+        sem_report(ctx, DIAG_WARNING, n->as.var_decl.id,
+                   "Incompatible assignment for variable '%.*s'",
+                   n->as.var_decl.id.len, n->as.var_decl.id.start);
+      }
+    }
+    break;
+  case AST_BINOP: {
+    if (!n->as.binop.left || !n->as.binop.right)
+      break;
+
+    AstNode *left = n->as.binop.left;
+    AstNode *right = n->as.binop.right;
+
+    DataType left_t = left->eval_type;
+    DataType right_t = right->eval_type;
+
+    bool left_lit = (left->type == AST_NUM_LIT);
+    bool right_lit = (right->type == AST_NUM_LIT);
+
+    if (left_lit && is_numeric_type(right_t)) {
+      long long val = parse_num_lit(left);
+      if (fits_in_type(val, right_t)) {
+        left->eval_type = right_t;
+        left_t = right_t;
+      } else {
+        sem_report(ctx, DIAG_ERROR, left->as.num_lit.val,
+                   "Integer literal %lld does not fit in type '%.*s'", val,
+                   (int)right_t.name.len, right_t.name.start);
+        left->eval_type = right_t;
+        left_t = right_t;
+      }
+    } else if (right_lit && is_numeric_type(left_t)) {
+      long long val = parse_num_lit(right);
+      if (fits_in_type(val, left_t)) {
+        right->eval_type = left_t;
+        right_t = left_t;
+      } else {
+        sem_report(ctx, DIAG_ERROR, right->as.num_lit.val,
+                   "Integer literal %lld does not fit in type '%.*s'", val,
+                   (int)left_t.name.len, left_t.name.start);
+        right->eval_type = left_t;
+        right_t = left_t;
+      }
+    }
+
+    if (left_lit && right_lit) {
+      if (is_numeric_type(left_t) && is_numeric_type(right_t)) {
+        if (expected && is_numeric_type(*expected)) {
+          long long lval = parse_num_lit(left);
+          long long rval = parse_num_lit(right);
+          if (fits_in_type(lval, *expected) && fits_in_type(rval, *expected)) {
+            left->eval_type = *expected;
+            right->eval_type = *expected;
+            left_t = *expected;
+            right_t = *expected;
+          } else {
+            DataType common = common_numeric_type(left_t, right_t);
+            left->eval_type = common;
+            right->eval_type = common;
+            left_t = common;
+            right_t = common;
+          }
+        } else {
+          DataType common = common_numeric_type(left_t, right_t);
+          left->eval_type = common;
+          right->eval_type = common;
+          left_t = common;
+          right_t = common;
+        }
+      }
+    }
+
+    bool is_assign = false;
+    Token op = n->as.binop.op;
+    if (op.type == TOKEN_ASSIGN) {
+      is_assign = true;
+    } else if (op.len == 2) {
+      const char *s = op.start;
+      if ((s[0] == '+' || s[0] == '-' || s[0] == '*' || s[0] == '/' ||
+           s[0] == '%' || s[0] == '&' || s[0] == '|' || s[0] == '^') &&
+          s[1] == '=') {
+        is_assign = true;
+      }
+    } else if (op.len == 3) {
+      const char *s = op.start;
+      if ((s[0] == '<' && s[1] == '<' && s[2] == '=') ||
+          (s[0] == '>' && s[1] == '>' && s[2] == '=')) {
+        is_assign = true;
+      }
+    }
+
+    if (is_assign && !left_t.is_mut) {
+      Token err_tok = get_expr_token(left);
+      if (err_tok.len == 0)
+        err_tok = op;
+      sem_report(ctx, DIAG_ERROR, err_tok,
+                 "Cannot mutate immutable variable '%.*s'", err_tok.len,
+                 err_tok.start);
+    }
+
+    if (op.start[0] == '/' && right->type == AST_NUM_LIT) {
+      if (atof(right->as.num_lit.val.start) == 0.0) {
+        sem_report(ctx, DIAG_ERROR, right->as.num_lit.val, "Division by zero.");
+      }
+    }
+
+    if (op.type == TOKEN_COMPARE) {
+      bool left_null =
+          (left_t.name.len == 4 && strncmp(left_t.name.start, "null", 4) == 0);
+      bool right_null = (right_t.name.len == 4 &&
+                         strncmp(right_t.name.start, "null", 4) == 0);
+      bool left_ptr = (left_t.ptr_depth > 0 || left_t.array_dimens > 0);
+      bool right_ptr = (right_t.ptr_depth > 0 || right_t.array_dimens > 0);
+
+      bool valid_compare = false;
+      if (left_null && right_null) {
+        valid_compare = true;
+      } else if (left_null && right_ptr) {
+        valid_compare = true;
+      } else if (right_null && left_ptr) {
+        valid_compare = true;
+      } else {
+        int l_w, r_w;
+        bool l_s, r_s, l_f, r_f;
+        bool left_num = get_numeric_info(left_t, &l_w, &l_s, &l_f);
+        bool right_num = get_numeric_info(right_t, &r_w, &r_s, &r_f);
+        bool ptr_ok = (left_t.ptr_depth == right_t.ptr_depth &&
+                       left_t.array_dimens == right_t.array_dimens);
+        if ((left_num && right_num) || ptr_ok) {
+          valid_compare = true;
+        }
+      }
+
+      if (!valid_compare) {
+        sem_report(ctx, DIAG_ERROR, op,
+                   "Cannot compare non‑numeric types '%.*s' and '%.*s'",
+                   left_t.name.len, left_t.name.start, right_t.name.len,
+                   right_t.name.start);
+      }
+      n->eval_type = EXPECT_BOOL;
+    } else {
+      bool left_is_ptr =
+          left_t.ptr_depth > 0 ||
+          (left_t.name.len == 3 && strncmp(left_t.name.start, "str", 3) == 0 &&
+           left_t.ptr_depth == 0);
+      bool right_is_ptr = right_t.ptr_depth > 0 ||
+                          (right_t.name.len == 3 &&
+                           strncmp(right_t.name.start, "str", 3) == 0 &&
+                           right_t.ptr_depth == 0);
+
+      bool is_ptr_arithmetic = false;
+      if ((op.len == 1 && (op.start[0] == '+' || op.start[0] == '-')) ||
+          (op.len == 2 && ((op.start[0] == '+' && op.start[1] == '=') ||
+                           (op.start[0] == '-' && op.start[1] == '=')))) {
+        if ((left_is_ptr && is_numeric_type(right_t)) ||
+            (right_is_ptr && is_numeric_type(left_t))) {
+          is_ptr_arithmetic = true;
+        }
+      }
+
+      if (!is_ptr_arithmetic && !is_type_compatible(left_t, right_t, false) &&
+          !is_type_compatible(right_t, left_t, false)) {
+        sem_report(ctx, DIAG_WARNING, op,
+                   "Incompatible operands '%.*s' and '%.*s' for '%.*s'",
+                   left_t.name.len, left_t.name.start, right_t.name.len,
+                   right_t.name.start, op.len, op.start);
+      }
+
+      if (expected) {
+        n->eval_type = *expected;
+      } else {
+        if (is_ptr_arithmetic) {
+          n->eval_type = left_is_ptr ? left_t : right_t;
+        } else if (is_numeric_type(left_t) && is_numeric_type(right_t)) {
+          int l_w = 0, r_w = 0;
+          bool l_s, r_s, l_f, r_f;
+          get_numeric_info(left_t, &l_w, &l_s, &l_f);
+          get_numeric_info(right_t, &r_w, &r_s, &r_f);
+          n->eval_type = (l_w >= r_w) ? left_t : right_t;
+        } else {
+          n->eval_type = left_t;
+        }
+      }
+    }
+    break;
+  }
+  case AST_CAST:
+    if (!is_type_compatible(n->as.cast.target, n->as.cast.op->eval_type,
+                            true)) {
+      sem_report(ctx, DIAG_ERROR, n->as.cast.target.name,
+                 "Type Error at %u:%u: Invalid explicit cast.\n",
+                 n->as.cast.target.name.line, n->as.cast.target.name.col);
+    }
+    n->eval_type = n->as.cast.target;
+    break;
+  case AST_RET:
+    if (curr_func && n->as.ret_stmt.expr) {
+      if (!is_type_compatible(curr_func->as.func_def.ret_type,
+                              n->as.ret_stmt.expr->eval_type, false)) {
+        sem_report(ctx, DIAG_ERROR, n->as.ret_stmt.ret_kw,
+                   "Type Error at %u:%u: Function return type mismatch.\n",
+                   n->as.ret_stmt.ret_kw.line, n->as.ret_stmt.ret_kw.col);
+      }
+    }
+    break;
+  case AST_FUNC_CALL:
+    if (n->as.func_call.caller && n->as.func_call.caller->type == AST_IDENTIF &&
+        n->as.func_call.caller->as.identif.res_sm &&
+        n->as.func_call.caller->as.identif.res_sm->decl_node) {
+
+      Sym *sym = n->as.func_call.caller->as.identif.res_sm;
+
+      if (sym->kind == SYM_FUNC) {
+        n->eval_type = sym->decl_node->as.func_def.ret_type;
+      } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION) {
+        n->eval_type.name = sym->name;
+        n->eval_type.is_custom = true;
+      } else {
+        n->eval_type = create_basic_type("any");
+      }
+
+      if (sym->kind == SYM_FUNC) {
+        AstNode *func_decl = sym->decl_node;
+        AstNode *param = func_decl->as.func_def.params;
+        AstNode *arg = n->as.func_call.args;
+
+        int arg_count = 0, param_count = 0;
+        for (AstNode *a = arg; a; a = a->next)
+          arg_count++;
+        for (AstNode *p = param; p; p = p->next)
+          param_count++;
+
+        if (arg_count != param_count) {
+          sem_report(ctx, DIAG_ERROR, n->as.func_call.caller->as.identif.val,
+                     "Function '%.*s' expects %d argument(s), got %d",
+                     n->as.func_call.caller->as.identif.val.len,
+                     n->as.func_call.caller->as.identif.val.start, param_count,
+                     arg_count);
+        } else {
+          param = func_decl->as.func_def.params;
+          arg = n->as.func_call.args;
+          while (arg && param) {
+            DataType expected_t = param->as.fn_param.type;
+            DataType actual_t = arg->eval_type;
+            if (!is_type_compatible(expected_t, actual_t, false)) {
+              Token err_tok = get_expr_token(arg);
+              if (err_tok.len == 0)
+                err_tok = n->as.func_call.caller->as.identif.val;
+              sem_report(ctx, DIAG_ERROR, err_tok,
+                         "Argument type mismatch: expected '%.*s', got '%.*s'",
+                         expected_t.name.len, expected_t.name.start,
+                         actual_t.name.len, actual_t.name.start);
+            }
+            arg = arg->next;
+            param = param->next;
+          }
+        }
+      }
+    } else if (n->as.func_call.caller->type == AST_MEMBER) {
+      n->eval_type = create_basic_type("any");
+    }
+    break;
+  case AST_ARRAY_LIT:
+    if (expected) {
+      n->eval_type = *expected;
+    } else if (n->as.array_lit.elements) {
+      n->eval_type = n->as.array_lit.elements->eval_type;
+      n->eval_type.array_dimens++;
+    }
+    break;
+  case AST_BLOCK: {
+    AstNode *last = n->as.block.first_stmt;
+    while (last && last->next) {
+      last = last->next;
+    }
+    if (last) {
+      n->eval_type = last->eval_type;
+    }
+    break;
+  }
+  case AST_IF:
+    if (n->as.if_check.action) {
+      n->eval_type = n->as.if_check.action->eval_type;
+    }
+    break;
+  case AST_INDEX:
+    if (n->as.index.base) {
+      DataType base_type = n->as.index.base->eval_type;
+      n->eval_type = base_type;
+
+      if (base_type.array_dimens > 0) {
+        n->eval_type.array_dimens--;
+      } else if (base_type.ptr_depth > 0) {
+        n->eval_type.ptr_depth--;
+      } else if (base_type.name.len == 3 &&
+                 strncmp(base_type.name.start, "str", 3) == 0) {
+        DataType char_type = create_basic_type("char");
+        char_type.is_mut = base_type.is_mut;
+        char_type.is_static = base_type.is_static;
+        char_type.is_extern = base_type.is_extern;
+        char_type.is_threadlocal = base_type.is_threadlocal;
+        n->eval_type = char_type;
+      }
+
+      if (n->as.index.index) {
+        DataType idx_type = n->as.index.index->eval_type;
+        if (!is_numeric_type(idx_type)) {
+          sem_report(ctx, DIAG_ERROR, get_expr_token(n->as.index.index),
+                     "Index must be of integer type, got '%.*s'",
+                     idx_type.name.len, idx_type.name.start);
+        }
+      }
+    }
+    break;
+  case AST_ADDR_OF:
+    if (n->as.unop.operand) {
+      n->eval_type = n->as.unop.operand->eval_type;
+      n->eval_type.ptr_depth++;
+    }
+    break;
+  case AST_DEREF:
+    if (n->as.unop.operand) {
+      DataType base_type = n->as.unop.operand->eval_type;
+
+      if (base_type.ptr_depth == 0 && base_type.array_dimens == 0 &&
+          base_type.name.len == 3 &&
+          strncmp(base_type.name.start, "str", 3) == 0) {
+
+        DataType char_type = create_basic_type("char");
+        char_type.is_mut = base_type.is_mut;
+        char_type.is_static = base_type.is_static;
+        char_type.is_extern = base_type.is_extern;
+        char_type.is_threadlocal = base_type.is_threadlocal;
+        n->eval_type = char_type;
+
+      } else {
+        n->eval_type = base_type;
+        n->eval_type.ptr_depth--;
+      }
+    }
+    break;
+  case AST_UOP:
+    if (n->as.unop.operand) {
+      n->eval_type = n->as.unop.operand->eval_type;
+    }
+    Token op_tok = n->as.unop.op;
+    if (op_tok.len == 2 && (strncmp(op_tok.start, "++", 2) == 0 ||
+                            strncmp(op_tok.start, "--", 2) == 0)) {
+      if (!n->eval_type.is_mut) {
+        Token err_tok = get_expr_token(n->as.unop.operand);
+        if (err_tok.len == 0)
+          err_tok = op_tok;
+        sem_report(ctx, DIAG_ERROR, err_tok,
+                   "Cannot mutate immutable variable '%.*s' using '%.*s'",
+                   err_tok.len, err_tok.start, op_tok.len, op_tok.start);
+      }
+    }
+    break;
+  case AST_MEMBER: {
+    if (n->as.member.base) {
+      DataType base_t = n->as.member.base->eval_type;
+      if (base_t.name.len > 0) {
+        n->as.member.type = base_t.name;
+      }
+      n->eval_type = create_basic_type("any");
+      n->eval_type.is_mut = base_t.is_mut;
+    }
+    break;
+  }
+  case AST_SIZEOF:
+    n->eval_type = create_basic_type("size");
+    break;
+  case AST_ERROR:
+    n->eval_type = create_basic_type("any");
+    break;
+  default:
+    break;
+  }
+
+  if (n->type == AST_FUNC) {
+    data->func_top--;
+  }
+}
+
 void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
   if (!root)
     return;
 
-  size_t cap = 1024;
-  TCItem *stack = malloc(sizeof(TCItem) * cap);
-  size_t top = 0;
+  TCData data = {0};
+  data.ctx = ctx;
+  data.arena = arena;
+  map_init(&data.exp_map, arena, 2048);
 
-  stack[top++] = (TCItem){root, TC_VISIT_CHILDREN, NULL, NULL, false};
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = tc_enter;
+  visitor.exit_node = tc_exit;
 
-  while (top > 0) {
-    TCItem item = stack[--top];
-    AstNode *node = item.node;
-    if (!node)
-      continue;
-    DataType *expected = item.expected;
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-    if (item.state == TC_VISIT_CHILDREN) {
-
-      if (item.is_top_level && !node->is_dirty &&
-          (node->type == AST_FUNC || node->type == AST_VAR_DECL ||
-           node->type == AST_STRUCT || node->type == AST_UNION ||
-           node->type == AST_ENUM)) {
-
-        // Still push EVAL_NODE so the parent registers it, but skip children
-        stack[top++] =
-            (TCItem){node, TC_EVAL_NODE, expected, item.curr_func, false};
-        continue;
-      }
-
-      if (item.is_top_level && node->is_dirty)
-        node->is_dirty = false;
-
-      if (top >= cap - 32) {
-        cap *= 2;
-        stack = realloc(stack, sizeof(TCItem) * cap);
-      }
-
-      stack[top++] =
-          (TCItem){node, TC_EVAL_NODE, expected, item.curr_func, false};
-
-      switch (node->type) {
-      case AST_PROGRAM: {
-        AstNode *curr = node->as.block.first_stmt;
-        size_t count = 0;
-        while (curr) {
-          count++;
-          curr = curr->next;
-        }
-        if (count > 0) {
-          AstNode **arr = malloc(sizeof(AstNode *) * count);
-          curr = node->as.block.first_stmt;
-          for (size_t i = 0; i < count; i++) {
-            arr[i] = curr;
-            curr = curr->next;
-          }
-          for (int i = count - 1; i >= 0; i--) {
-            stack[top++] =
-                (TCItem){arr[i], TC_VISIT_CHILDREN, NULL, item.curr_func, true};
-          }
-          free(arr);
-        }
-        break;
-      }
-      case AST_BLOCK: {
-        AstNode *curr = node->as.block.first_stmt;
-        size_t count = 0;
-        while (curr) {
-          count++;
-          curr = curr->next;
-        }
-        if (count > 0) {
-          AstNode **arr = malloc(sizeof(AstNode *) * count);
-          curr = node->as.block.first_stmt;
-          for (size_t i = 0; i < count; i++) {
-            arr[i] = curr;
-            curr = curr->next;
-          }
-          for (int i = count - 1; i >= 0; i--) {
-            DataType *exp = (i == 0) ? item.expected : NULL;
-            stack[top++] =
-                (TCItem){arr[i], TC_VISIT_CHILDREN, exp, item.curr_func, false};
-          }
-          free(arr);
-        }
-        break;
-      }
-      case AST_FUNC:
-        if (node->as.func_def.block) {
-          stack[top++] = (TCItem){node->as.func_def.block, TC_VISIT_CHILDREN,
-                                  NULL, node, false};
-        }
-        break;
-      case AST_VAR_DECL:
-        stack[top++] = (TCItem){node->as.var_decl.init, TC_VISIT_CHILDREN,
-                                &node->as.var_decl.type, item.curr_func, false};
-        break;
-      case AST_BINOP: {
-        DataType *operand_expected = item.expected;
-
-        if (node->as.binop.op.type && node->as.binop.op.type == TOKEN_COMPARE) {
-          operand_expected = NULL;
-        }
-
-        stack[top++] = (TCItem){node->as.binop.right, TC_VISIT_CHILDREN,
-                                operand_expected, item.curr_func, false};
-        stack[top++] = (TCItem){node->as.binop.left, TC_VISIT_CHILDREN,
-                                operand_expected, item.curr_func, false};
-        break;
-      }
-      case AST_UOP:
-      case AST_ADDR_OF:
-      case AST_DEREF: {
-        DataType *inner = NULL;
-        if (item.expected) {
-          inner = arena_alloc(arena, sizeof(DataType));
-          *inner = *item.expected;
-          if (node->type == AST_ADDR_OF) {
-            inner->ptr_depth--;
-          } else if (node->type == AST_DEREF) {
-            inner->ptr_depth++;
-          }
-        }
-        stack[top++] = (TCItem){node->as.unop.operand, TC_VISIT_CHILDREN, inner,
-                                item.curr_func, false};
-        break;
-      }
-      case AST_IF:
-        if (node->as.if_check.elseAct)
-          stack[top++] = (TCItem){node->as.if_check.elseAct, TC_VISIT_CHILDREN,
-                                  item.expected, item.curr_func, false};
-        if (node->as.if_check.action)
-          stack[top++] = (TCItem){node->as.if_check.action, TC_VISIT_CHILDREN,
-                                  item.expected, item.curr_func, false};
-        stack[top++] = (TCItem){node->as.if_check.check, TC_VISIT_CHILDREN,
-                                &EXPECT_BOOL, item.curr_func, false};
-        break;
-      case AST_WHILE:
-        if (node->as.while_loop.action)
-          stack[top++] = (TCItem){node->as.while_loop.action, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
-        stack[top++] = (TCItem){node->as.while_loop.check, TC_VISIT_CHILDREN,
-                                &EXPECT_BOOL, item.curr_func, false};
-        break;
-      case AST_FOR:
-        if (node->as.for_loop.action)
-          stack[top++] = (TCItem){node->as.for_loop.action, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
-        if (node->as.for_loop.inc)
-          stack[top++] = (TCItem){node->as.for_loop.inc, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
-        stack[top++] = (TCItem){node->as.for_loop.check, TC_VISIT_CHILDREN,
-                                &EXPECT_BOOL, item.curr_func, false};
-        if (node->as.for_loop.init)
-          stack[top++] = (TCItem){node->as.for_loop.init, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
-        break;
-      case AST_FUNC_CALL: {
-        AstNode *fn_decl = NULL;
-        if (node->as.func_call.caller &&
-            node->as.func_call.caller->type == AST_IDENTIF &&
-            node->as.func_call.caller->as.identif.res_sm) {
-          fn_decl = node->as.func_call.caller->as.identif.res_sm->decl_node;
-        }
-
-        int arg_count = 0;
-        AstNode *temp = node->as.func_call.args;
-        while (temp) {
-          arg_count++;
-          temp = temp->next;
-        }
-
-        if (arg_count > 0) {
-          AstNode **args = malloc(sizeof(AstNode *) * arg_count);
-          AstNode **params = malloc(sizeof(AstNode *) * arg_count);
-
-          AstNode *curr_arg = node->as.func_call.args;
-          AstNode *curr_param = NULL;
-          if (fn_decl && node->as.func_call.caller->type == AST_IDENTIF &&
-              node->as.func_call.caller->as.identif.res_sm->kind == SYM_FUNC) {
-            curr_param = fn_decl->as.func_def.params;
-          }
-
-          for (int i = 0; i < arg_count; i++) {
-            args[i] = curr_arg;
-            params[i] = curr_param;
-            curr_arg = curr_arg->next;
-            if (curr_param)
-              curr_param = curr_param->next;
-          }
-
-          for (int i = arg_count - 1; i >= 0; i--) {
-            DataType *p_type = params[i] ? &params[i]->as.fn_param.type : NULL;
-            stack[top++] = (TCItem){args[i], TC_VISIT_CHILDREN, p_type,
-                                    item.curr_func, false};
-          }
-          free(args);
-          free(params);
-        }
-        stack[top++] = (TCItem){node->as.func_call.caller, TC_VISIT_CHILDREN,
-                                NULL, item.curr_func, false};
-        break;
-      }
-      case AST_CAST:
-        if (node->as.cast.op)
-          stack[top++] = (TCItem){node->as.cast.op, TC_VISIT_CHILDREN,
-                                  &node->as.cast.target, item.curr_func, false};
-        break;
-      case AST_RET:
-        if (item.curr_func && node->as.ret_stmt.expr) {
-          stack[top++] = (TCItem){node->as.ret_stmt.expr, TC_VISIT_CHILDREN,
-                                  &item.curr_func->as.func_def.ret_type,
-                                  item.curr_func, false};
-        }
-        break;
-      case AST_INDEX:
-        if (node->as.index.index)
-          stack[top++] = (TCItem){node->as.index.index, TC_VISIT_CHILDREN, NULL,
-                                  item.curr_func, false};
-        if (node->as.index.base)
-          stack[top++] = (TCItem){node->as.index.base, TC_VISIT_CHILDREN, NULL,
-                                  item.curr_func, false};
-        break;
-
-      case AST_MEMBER:
-        if (node->as.member.base)
-          stack[top++] = (TCItem){node->as.member.base, TC_VISIT_CHILDREN, NULL,
-                                  item.curr_func, false};
-        break;
-
-      case AST_ARRAY_LIT: {
-        AstNode *curr = node->as.array_lit.elements;
-        while (curr) {
-          stack[top++] = (TCItem){curr, TC_VISIT_CHILDREN, item.expected,
-                                  item.curr_func, false};
-          curr = curr->next;
-        }
-        break;
-      }
-
-      case AST_SWITCH:
-        if (node->as.switch_stmt.default_case)
-          stack[top++] =
-              (TCItem){node->as.switch_stmt.default_case, TC_VISIT_CHILDREN,
-                       NULL, item.curr_func, false};
-        if (node->as.switch_stmt.cases) {
-          AstNode *c = node->as.switch_stmt.cases;
-          while (c) {
-            stack[top++] =
-                (TCItem){c, TC_VISIT_CHILDREN, NULL, item.curr_func, false};
-            c = c->next;
-          }
-        }
-        if (node->as.switch_stmt.check)
-          stack[top++] = (TCItem){node->as.switch_stmt.check, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
-        break;
-
-      case AST_CASE:
-        if (node->as.case_stmt.action)
-          stack[top++] = (TCItem){node->as.case_stmt.action, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
-        if (node->as.case_stmt.val)
-          stack[top++] = (TCItem){node->as.case_stmt.val, TC_VISIT_CHILDREN,
-                                  NULL, item.curr_func, false};
-        break;
-
-      case AST_DEFER:
-        if (node->as.defer_stmt.contents)
-          stack[top++] =
-              (TCItem){node->as.defer_stmt.contents, TC_VISIT_CHILDREN, NULL,
-                       item.curr_func, false};
-        break;
-
-      case AST_EXTERN: {
-        AstNode *curr = node->as.extern_block.contents;
-        while (curr) {
-          stack[top++] =
-              (TCItem){curr, TC_VISIT_CHILDREN, NULL, item.curr_func, false};
-          curr = curr->next;
-        }
-        break;
-      }
-      case AST_STRUCT:
-      case AST_UNION:
-      case AST_ENUM: {
-        AstNode *curr =
-            (node->type == AST_STRUCT)  ? node->as.struct_def.contents
-            : (node->type == AST_UNION) ? node->as.union_def.contents
-                                        : node->as.enum_def.contents;
-        while (curr) {
-          stack[top++] =
-              (TCItem){curr, TC_VISIT_CHILDREN, NULL, item.curr_func, false};
-          curr = curr->next;
-        }
-        break;
-      }
-      case AST_SIZEOF:
-        if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr) {
-          stack[top++] =
-              (TCItem){node->as.sizeof_expr.target_expr, TC_VISIT_CHILDREN,
-                       NULL, item.curr_func, false};
-        }
-        break;
-      default:
-        break;
-      }
-    } else {
-      switch (node->type) {
-      case AST_NUM_LIT: {
-        if (expected) {
-          node->eval_type = *expected;
-        } else {
-          const char *val_str = node->as.num_lit.val.start;
-          int len = node->as.num_lit.val.len;
-
-          bool is_float = false;
-          for (int i = 0; i < len; i++) {
-            if (val_str[i] == '.') {
-              is_float = true;
-              break;
-            }
-          }
-
-          if (is_float) {
-            node->eval_type = create_basic_type("f32");
-          } else {
-            char buf[64] = {0};
-            int copy_len = len < 63 ? len : 63;
-            strncpy(buf, val_str, copy_len);
-
-            long long val = strtoll(buf, NULL, 0);
-
-            if (val >= -128 && val <= 127)
-              node->eval_type = create_basic_type("i8");
-            else if (val >= -32768 && val <= 32767)
-              node->eval_type = create_basic_type("i16");
-            else if (val >= -2147483648LL && val <= 2147483647LL)
-              node->eval_type = create_basic_type("i32");
-            else
-              node->eval_type = create_basic_type("i64");
-          }
-        }
-        break;
-      }
-      case AST_STR_LIT:
-        node->eval_type = create_basic_type("str");
-        break;
-      case AST_BOOL_LIT:
-        node->eval_type = create_basic_type("bool");
-        break;
-      case AST_CHAR_LIT:
-        node->eval_type = create_basic_type("char");
-        break;
-      case AST_NULL_LIT:
-        node->eval_type = create_basic_type("null");
-        break;
-      case AST_IDENTIF:
-        if (node->as.identif.res_sm) {
-          Sym *sym = node->as.identif.res_sm;
-          if (sym->kind == SYM_VAR && sym->decl_node) {
-            if (sym->decl_node->type == AST_PARAM)
-              node->eval_type = sym->decl_node->as.fn_param.type;
-            else
-              node->eval_type = sym->decl_node->as.var_decl.type;
-          } else if (sym->kind == SYM_FUNC && sym->decl_node) {
-            node->eval_type = sym->decl_node->as.func_def.ret_type;
-          } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
-                     sym->kind == SYM_ENUM) {
-            node->eval_type = create_basic_type("");
-            node->eval_type.name = sym->name;
-            node->eval_type.is_custom = true;
-          }
-        }
-        break;
-      case AST_VAR_DECL:
-        if (node->as.var_decl.init) {
-          if (!is_type_compatible(node->as.var_decl.type,
-                                  node->as.var_decl.init->eval_type, false)) {
-            sem_report(ctx, DIAG_WARNING, node->as.var_decl.id,
-                       "Incompatible assignment for variable '%.*s'",
-                       node->as.var_decl.id.len, node->as.var_decl.id.start);
-          }
-        }
-        break;
-      case AST_BINOP: {
-        if (!node->as.binop.left || !node->as.binop.right)
-          break;
-
-        AstNode *left = node->as.binop.left;
-        AstNode *right = node->as.binop.right;
-
-        DataType left_t = left->eval_type;
-        DataType right_t = right->eval_type;
-
-        bool left_lit = (left->type == AST_NUM_LIT);
-        bool right_lit = (right->type == AST_NUM_LIT);
-
-        if (left_lit && is_numeric_type(right_t)) {
-          long long val = parse_num_lit(left);
-          if (fits_in_type(val, right_t)) {
-            left->eval_type = right_t;
-            left_t = right_t;
-          } else {
-            sem_report(ctx, DIAG_ERROR, left->as.num_lit.val,
-                       "Integer literal %lld does not fit in type '%.*s'", val,
-                       (int)right_t.name.len, right_t.name.start);
-            left->eval_type = right_t;
-            left_t = right_t;
-          }
-        } else if (right_lit && is_numeric_type(left_t)) {
-          long long val = parse_num_lit(right);
-          if (fits_in_type(val, left_t)) {
-            right->eval_type = left_t;
-            right_t = left_t;
-          } else {
-            sem_report(ctx, DIAG_ERROR, right->as.num_lit.val,
-                       "Integer literal %lld does not fit in type '%.*s'", val,
-                       (int)left_t.name.len, left_t.name.start);
-            right->eval_type = left_t;
-            right_t = left_t;
-          }
-        }
-
-        // If both are numeric literals, choose a common type
-        if (left_lit && right_lit) {
-          if (is_numeric_type(left_t) && is_numeric_type(right_t)) {
-            if (item.expected && is_numeric_type(*item.expected)) {
-              long long lval = parse_num_lit(left);
-              long long rval = parse_num_lit(right);
-              if (fits_in_type(lval, *item.expected) &&
-                  fits_in_type(rval, *item.expected)) {
-                left->eval_type = *item.expected;
-                right->eval_type = *item.expected;
-                left_t = *item.expected;
-                right_t = *item.expected;
-              } else {
-                DataType common = common_numeric_type(left_t, right_t);
-                left->eval_type = common;
-                right->eval_type = common;
-                left_t = common;
-                right_t = common;
-              }
-            } else {
-              DataType common = common_numeric_type(left_t, right_t);
-              left->eval_type = common;
-              right->eval_type = common;
-              left_t = common;
-              right_t = common;
-            }
-          }
-        }
-
-        bool is_assign = false;
-        Token op = node->as.binop.op;
-        if (op.type == TOKEN_ASSIGN) {
-          is_assign = true;
-        } else if (op.len == 2) {
-          const char *s = op.start;
-          if ((s[0] == '+' || s[0] == '-' || s[0] == '*' || s[0] == '/' ||
-               s[0] == '%' || s[0] == '&' || s[0] == '|' || s[0] == '^') &&
-              s[1] == '=') {
-            is_assign = true;
-          }
-        } else if (op.len == 3) {
-          const char *s = op.start;
-          if ((s[0] == '<' && s[1] == '<' && s[2] == '=') ||
-              (s[0] == '>' && s[1] == '>' && s[2] == '=')) {
-            is_assign = true;
-          }
-        }
-
-        if (is_assign && !left_t.is_mut) {
-          Token err_tok = get_expr_token(left);
-          if (err_tok.len == 0)
-            err_tok = op;
-          sem_report(ctx, DIAG_ERROR, err_tok,
-                     "Cannot mutate immutable variable '%.*s'", err_tok.len,
-                     err_tok.start);
-        }
-
-        if (op.start[0] == '/' && right->type == AST_NUM_LIT) {
-          if (atof(right->as.num_lit.val.start) == 0.0) {
-            sem_report(ctx, DIAG_ERROR, right->as.num_lit.val,
-                       "Division by zero.");
-          }
-        }
-
-        if (op.type == TOKEN_COMPARE) {
-          bool left_null = (left_t.name.len == 4 &&
-                            strncmp(left_t.name.start, "null", 4) == 0);
-          bool right_null = (right_t.name.len == 4 &&
-                             strncmp(right_t.name.start, "null", 4) == 0);
-          bool left_ptr = (left_t.ptr_depth > 0 || left_t.array_dimens > 0);
-          bool right_ptr = (right_t.ptr_depth > 0 || right_t.array_dimens > 0);
-
-          bool valid_compare = false;
-          if (left_null && right_null) {
-            valid_compare = true;
-          } else if (left_null && right_ptr) {
-            valid_compare = true;
-          } else if (right_null && left_ptr) {
-            valid_compare = true;
-          } else {
-            int l_w, r_w;
-            bool l_s, r_s, l_f, r_f;
-            bool left_num = get_numeric_info(left_t, &l_w, &l_s, &l_f);
-            bool right_num = get_numeric_info(right_t, &r_w, &r_s, &r_f);
-            bool ptr_ok = (left_t.ptr_depth == right_t.ptr_depth &&
-                           left_t.array_dimens == right_t.array_dimens);
-            if ((left_num && right_num) || ptr_ok) {
-              valid_compare = true;
-            }
-          }
-
-          if (!valid_compare) {
-            sem_report(ctx, DIAG_ERROR, op,
-                       "Cannot compare non‑numeric types '%.*s' and '%.*s'",
-                       left_t.name.len, left_t.name.start, right_t.name.len,
-                       right_t.name.start);
-          }
-          node->eval_type = EXPECT_BOOL;
-        } else {
-          bool left_is_ptr = left_t.ptr_depth > 0 ||
-                             (left_t.name.len == 3 &&
-                              strncmp(left_t.name.start, "str", 3) == 0 &&
-                              left_t.ptr_depth == 0);
-          bool right_is_ptr = right_t.ptr_depth > 0 ||
-                              (right_t.name.len == 3 &&
-                               strncmp(right_t.name.start, "str", 3) == 0 &&
-                               right_t.ptr_depth == 0);
-
-          bool is_ptr_arithmetic = false;
-          if ((op.len == 1 && (op.start[0] == '+' || op.start[0] == '-')) ||
-              (op.len == 2 && ((op.start[0] == '+' && op.start[1] == '=') ||
-                               (op.start[0] == '-' && op.start[1] == '=')))) {
-            if ((left_is_ptr && is_numeric_type(right_t)) ||
-                (right_is_ptr && is_numeric_type(left_t))) {
-              is_ptr_arithmetic = true;
-            }
-          }
-
-          // Bypass warning if it is pointer arithmetic
-          if (!is_ptr_arithmetic &&
-              !is_type_compatible(left_t, right_t, false) &&
-              !is_type_compatible(right_t, left_t, false)) {
-            sem_report(ctx, DIAG_WARNING, op,
-                       "Incompatible operands '%.*s' and '%.*s' for '%.*s'",
-                       left_t.name.len, left_t.name.start, right_t.name.len,
-                       right_t.name.start, op.len, op.start);
-          }
-
-          if (item.expected) {
-            node->eval_type = *item.expected;
-          } else {
-            // Assign the pointer type as the result for pointer arithmetic
-            if (is_ptr_arithmetic) {
-              node->eval_type = left_is_ptr ? left_t : right_t;
-            } else if (is_numeric_type(left_t) && is_numeric_type(right_t)) {
-              int l_w = 0, r_w = 0;
-              bool l_s, r_s, l_f, r_f;
-              get_numeric_info(left_t, &l_w, &l_s, &l_f);
-              get_numeric_info(right_t, &r_w, &r_s, &r_f);
-              node->eval_type = (l_w >= r_w) ? left_t : right_t;
-            } else {
-              node->eval_type = left_t;
-            }
-          }
-        }
-        break;
-      }
-      case AST_CAST:
-        if (!is_type_compatible(node->as.cast.target,
-                                node->as.cast.op->eval_type, true)) {
-          sem_report(ctx, DIAG_ERROR, node->as.cast.target.name,
-                     "Type Error at %u:%u: Invalid explicit cast.\n",
-                     node->as.cast.target.name.line,
-                     node->as.cast.target.name.col);
-        }
-        node->eval_type = node->as.cast.target;
-        break;
-      case AST_RET:
-        if (item.curr_func && node->as.ret_stmt.expr) {
-          if (!is_type_compatible(item.curr_func->as.func_def.ret_type,
-                                  node->as.ret_stmt.expr->eval_type, false)) {
-            sem_report(ctx, DIAG_ERROR, node->as.ret_stmt.ret_kw,
-                       "Type Error at %u:%u: Function return type mismatch.\n",
-                       node->as.ret_stmt.ret_kw.line,
-                       node->as.ret_stmt.ret_kw.col);
-          }
-        }
-        break;
-      case AST_FUNC_CALL:
-        if (node->as.func_call.caller &&
-            node->as.func_call.caller->type == AST_IDENTIF &&
-            node->as.func_call.caller->as.identif.res_sm &&
-            node->as.func_call.caller->as.identif.res_sm->decl_node) {
-
-          Sym *sym = node->as.func_call.caller->as.identif.res_sm;
-
-          if (sym->kind == SYM_FUNC) {
-            node->eval_type = sym->decl_node->as.func_def.ret_type;
-          } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION) {
-            node->eval_type.name = sym->name;
-            node->eval_type.is_custom = true;
-          } else {
-            node->eval_type = create_basic_type("any");
-          }
-          if (sym->kind == SYM_FUNC) {
-            AstNode *func_decl = sym->decl_node;
-            AstNode *param = func_decl->as.func_def.params;
-            AstNode *arg = node->as.func_call.args;
-
-            // Count arguments and parameters
-            int arg_count = 0, param_count = 0;
-            for (AstNode *a = arg; a; a = a->next)
-              arg_count++;
-            for (AstNode *p = param; p; p = p->next)
-              param_count++;
-
-            if (arg_count != param_count) {
-              sem_report(ctx, DIAG_ERROR,
-                         node->as.func_call.caller->as.identif.val,
-                         "Function '%.*s' expects %d argument(s), got %d",
-                         node->as.func_call.caller->as.identif.val.len,
-                         node->as.func_call.caller->as.identif.val.start,
-                         param_count, arg_count);
-            } else {
-              // Check each argument type against the corresponding parameter
-              param = func_decl->as.func_def.params;
-              arg = node->as.func_call.args;
-              while (arg && param) {
-                DataType expected = param->as.fn_param.type;
-                DataType actual = arg->eval_type;
-                if (!is_type_compatible(expected, actual, false)) {
-                  Token err_tok = get_expr_token(arg);
-                  if (err_tok.len == 0)
-                    err_tok = node->as.func_call.caller->as.identif.val;
-                  sem_report(
-                      ctx, DIAG_ERROR, err_tok,
-                      "Argument type mismatch: expected '%.*s', got '%.*s'",
-                      expected.name.len, expected.name.start, actual.name.len,
-                      actual.name.start);
-                }
-                arg = arg->next;
-                param = param->next;
-              }
-            }
-          }
-        } else if (node->as.func_call.caller->type == AST_MEMBER) {
-          node->eval_type = create_basic_type("any");
-        }
-        break;
-      case AST_ARRAY_LIT:
-        if (item.expected) {
-          node->eval_type = *item.expected;
-        } else if (node->as.array_lit.elements) {
-          node->eval_type = node->as.array_lit.elements->eval_type;
-          node->eval_type.array_dimens++;
-        }
-        break;
-      case AST_BLOCK: {
-        AstNode *last = node->as.block.first_stmt;
-        while (last && last->next) {
-          last = last->next;
-        }
-        if (last) {
-          node->eval_type = last->eval_type;
-        }
-        break;
-      }
-      case AST_IF:
-        if (node->as.if_check.action) {
-          node->eval_type = node->as.if_check.action->eval_type;
-        }
-        break;
-
-      case AST_INDEX:
-        if (node->as.index.base) {
-          DataType base_type = node->as.index.base->eval_type;
-          node->eval_type = base_type;
-
-          if (base_type.array_dimens > 0) {
-            node->eval_type.array_dimens--;
-          } else if (base_type.ptr_depth > 0) {
-            node->eval_type.ptr_depth--;
-          } else if (base_type.name.len == 3 &&
-                     strncmp(base_type.name.start, "str", 3) == 0) {
-            DataType char_type = create_basic_type("char");
-            char_type.is_mut = base_type.is_mut;
-            char_type.is_static = base_type.is_static;
-            char_type.is_extern = base_type.is_extern;
-            char_type.is_threadlocal = base_type.is_threadlocal;
-            node->eval_type = char_type;
-          }
-
-          if (node->as.index.index) {
-            DataType idx_type = node->as.index.index->eval_type;
-            if (!is_numeric_type(idx_type)) {
-              sem_report(ctx, DIAG_ERROR, get_expr_token(node->as.index.index),
-                         "Index must be of integer type, got '%.*s'",
-                         idx_type.name.len, idx_type.name.start);
-            }
-          }
-        }
-        break;
-
-      case AST_ADDR_OF:
-        if (node->as.unop.operand) {
-          node->eval_type = node->as.unop.operand->eval_type;
-          node->eval_type.ptr_depth++;
-        }
-        break;
-
-      case AST_DEREF:
-        if (node->as.unop.operand) {
-          DataType base_type = node->as.unop.operand->eval_type;
-
-          if (base_type.ptr_depth == 0 && base_type.array_dimens == 0 &&
-              base_type.name.len == 3 &&
-              strncmp(base_type.name.start, "str", 3) == 0) {
-
-            DataType char_type = create_basic_type("char");
-            char_type.is_mut = base_type.is_mut;
-            char_type.is_static = base_type.is_static;
-            char_type.is_extern = base_type.is_extern;
-            char_type.is_threadlocal = base_type.is_threadlocal;
-            node->eval_type = char_type;
-
-          } else {
-            node->eval_type = base_type;
-            node->eval_type.ptr_depth--;
-          }
-        }
-        break;
-
-      case AST_UOP:
-        if (node->as.unop.operand) {
-          node->eval_type = node->as.unop.operand->eval_type;
-        }
-        Token op = node->as.unop.op;
-        if (op.len == 2 && (strncmp(op.start, "++", 2) == 0 ||
-                            strncmp(op.start, "--", 2) == 0)) {
-          if (!node->eval_type.is_mut) {
-            Token err_tok = get_expr_token(node->as.unop.operand);
-            if (err_tok.len == 0)
-              err_tok = op;
-            sem_report(ctx, DIAG_ERROR, err_tok,
-                       "Cannot mutate immutable variable '%.*s' using '%.*s'",
-                       err_tok.len, err_tok.start, op.len, op.start);
-          }
-        }
-        break;
-      case AST_MEMBER: {
-        if (node->as.member.base) {
-          DataType base_t = node->as.member.base->eval_type;
-          if (base_t.name.len > 0) {
-            node->as.member.type = base_t.name;
-          }
-          node->eval_type = create_basic_type("any");
-          node->eval_type.is_mut = base_t.is_mut;
-        }
-        break;
-      }
-      case AST_SIZEOF:
-        node->eval_type = create_basic_type("size");
-        break;
-      case AST_ERROR:
-        node->eval_type =
-            create_basic_type("any");
-        break;
-      default:
-        break;
-      }
-    }
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "OOM encountered during type checking.\n");
   }
-  free(stack);
+
+  map_free_buckets(&data.exp_map);
 }

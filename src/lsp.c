@@ -1,6 +1,7 @@
 #include "lsp.h"
 #include "arena.h"
 #include "ast_types.h"
+#include "ast_visitor.h"
 #include "diag.h"
 #include "hashutils.h"
 #include "sem_types.h"
@@ -353,174 +354,69 @@ Token get_decl_token(AstNode *node) {
     return t;
   }
 }
+typedef struct {
+  unsigned int target_line;
+  int character;
+  AstNode *found;
+} FindIdentData;
+
+VisitResult find_ident_enter(AstVisitor *visitor, AstNode *node) {
+  FindIdentData *data = (FindIdentData *)visitor->user_data;
+
+  Token t = {0};
+  bool check_token = false;
+
+  if (node->type == AST_IDENTIF) {
+    t = node->as.identif.val;
+    check_token = true;
+  } else if (node->type == AST_MEMBER) {
+    t = node->as.member.name;
+    check_token = true;
+  } else if (node->type == AST_USE) {
+    Token start = node->as.use_stmt.use_kw;
+    Token end = node->as.use_stmt.semicln;
+    if (end.len == 0)
+      end = node->as.use_stmt.path;
+
+    if (start.line == data->target_line &&
+        data->character >= (int)start.col - 1 &&
+        data->character <= (int)(end.col - 1 + end.len)) {
+      data->found = node;
+      return VISIT_ABORT;
+    }
+  }
+
+  if (check_token && t.line == data->target_line &&
+      data->character >= (int)t.col - 1 &&
+      data->character <= (int)(t.col - 1 + t.len)) {
+    data->found = node;
+    return VISIT_ABORT;
+  }
+
+  return VISIT_CONTINUE;
+}
 
 AstNode *find_ident_at_pos(AstNode *root, unsigned int line, int character) {
   if (!root)
     return NULL;
 
-  size_t cap = 1024;
-  AstNode **stack = malloc(sizeof(AstNode *) * cap);
-  size_t top = 0;
-  stack[top++] = root;
+  // Line is 0 indexed from the LSP, but 1 indexed in the Token struct
+  FindIdentData data = {line + 1, character, NULL};
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = find_ident_enter;
 
-  AstNode *found = NULL;
-  unsigned int target_line = line + 1;
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-  while (top > 0) {
-    AstNode *node = stack[--top];
-    if (!node)
-      continue;
-
-    if (node->type == AST_IDENTIF) {
-      Token t = node->as.identif.val;
-      if (t.line == target_line && character >= (int)t.col - 1 &&
-          character <= (int)(t.col - 1 + t.len)) {
-        found = node;
-        break;
-      }
-    } else if (node->type == AST_MEMBER) {
-      Token t = node->as.member.name;
-      if (t.line == target_line && character >= (int)t.col - 1 &&
-          character <= (int)(t.col - 1 + t.len)) {
-        found = node;
-        break;
-      }
-    } else if (node->type == AST_USE) {
-      Token start = node->as.use_stmt.use_kw;
-      Token end = node->as.use_stmt.semicln;
-      if (end.len == 0)
-        end = node->as.use_stmt.path;
-      if (start.line == target_line && character >= (int)start.col - 1 &&
-          character <= (int)(end.col - 1 + end.len)) {
-        found = node;
-        break;
-      }
-    }
-
-    if (node->next) {
-      if (top >= cap - 1) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, cap * sizeof(AstNode *));
-        if (!new_stack) {
-          fprintf(
-              stderr,
-              "OOM encountered whilst reallocating stack during AST lookup.\n");
-          free(stack);
-          return NULL;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = node->next;
-    }
-
-#define PUSH_CHILD(n)                                                          \
-  do {                                                                         \
-    if (n) {                                                                   \
-      if (top >= cap - 1) {                                                    \
-        size_t new_cap = cap * 2;                                              \
-        AstNode **new_stack = realloc(stack, cap * sizeof(AstNode *));         \
-        if (!new_stack) {                                                      \
-          fprintf(stderr, "OOM encountered whilst reallocating stack during "  \
-                          "AST lookup.\n");                                    \
-          free(stack);                                                         \
-          return NULL;                                                         \
-        }                                                                      \
-        stack = new_stack;                                                     \
-        cap = new_cap;                                                         \
-      }                                                                        \
-      stack[top++] = (n);                                                      \
-    }                                                                          \
-  } while (0)
-
-    switch (node->type) {
-    case AST_PROGRAM:
-    case AST_BLOCK:
-      PUSH_CHILD(node->as.block.first_stmt);
-      break;
-    case AST_FUNC:
-      PUSH_CHILD(node->as.func_def.params);
-      PUSH_CHILD(node->as.func_def.block);
-      break;
-    case AST_VAR_DECL:
-      PUSH_CHILD(node->as.var_decl.init);
-      break;
-    case AST_BINOP:
-      PUSH_CHILD(node->as.binop.left);
-      PUSH_CHILD(node->as.binop.right);
-      break;
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF:
-      PUSH_CHILD(node->as.unop.operand);
-      break;
-    case AST_IF:
-      PUSH_CHILD(node->as.if_check.check);
-      PUSH_CHILD(node->as.if_check.action);
-      PUSH_CHILD(node->as.if_check.elseAct);
-      break;
-    case AST_WHILE:
-      PUSH_CHILD(node->as.while_loop.check);
-      PUSH_CHILD(node->as.while_loop.action);
-      break;
-    case AST_FOR:
-      PUSH_CHILD(node->as.for_loop.init);
-      PUSH_CHILD(node->as.for_loop.check);
-      PUSH_CHILD(node->as.for_loop.inc);
-      PUSH_CHILD(node->as.for_loop.action);
-      break;
-    case AST_FUNC_CALL:
-      PUSH_CHILD(node->as.func_call.caller);
-      PUSH_CHILD(node->as.func_call.args);
-      break;
-    case AST_INDEX:
-      PUSH_CHILD(node->as.index.base);
-      PUSH_CHILD(node->as.index.index);
-      break;
-    case AST_MEMBER:
-      PUSH_CHILD(node->as.member.base);
-      break;
-    case AST_ARRAY_LIT:
-      PUSH_CHILD(node->as.array_lit.elements);
-      break;
-    case AST_STRUCT:
-      PUSH_CHILD(node->as.struct_def.contents);
-      break;
-    case AST_UNION:
-      PUSH_CHILD(node->as.union_def.contents);
-      break;
-    case AST_ENUM:
-      PUSH_CHILD(node->as.enum_def.contents);
-      break;
-    case AST_CAST:
-      PUSH_CHILD(node->as.cast.op);
-      break;
-    case AST_RET:
-      PUSH_CHILD(node->as.ret_stmt.expr);
-      break;
-    case AST_SWITCH:
-      PUSH_CHILD(node->as.switch_stmt.check);
-      PUSH_CHILD(node->as.switch_stmt.cases);
-      PUSH_CHILD(node->as.switch_stmt.default_case);
-      break;
-    case AST_CASE:
-      PUSH_CHILD(node->as.case_stmt.val);
-      PUSH_CHILD(node->as.case_stmt.action);
-      break;
-    case AST_DEFER:
-      PUSH_CHILD(node->as.defer_stmt.contents);
-      break;
-    case AST_EXTERN:
-      PUSH_CHILD(node->as.extern_block.contents);
-      break;
-    default:
-      break;
-    }
-#undef PUSH_CHILD
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "OOM encountered during AST lookup.\n");
+    return NULL;
   }
 
-  free(stack);
-  return found;
+  return data.found;
 }
 
 typedef struct {

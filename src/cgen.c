@@ -1,4 +1,5 @@
 #include "arena.h"
+#include "ast_visitor.h"
 #include "c_gen_types.h"
 #include "hashutils.h"
 #include "sem_types.h"
@@ -1401,637 +1402,135 @@ void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
   free(stack);
 }
 
+typedef struct {
+  Arena *arena;
+  Token sue_stack[256];
+  int sue_top;
+} FlattenData;
+
+VisitResult flatten_enter(AstVisitor *visitor, AstNode *n) {
+  FlattenData *data = visitor->user_data;
+  Token sue =
+      data->sue_top > 0 ? data->sue_stack[data->sue_top - 1] : (Token){0};
+
+  if (n->type == AST_STRUCT || n->type == AST_UNION || n->type == AST_ENUM) {
+    Token my_sue = (n->type == AST_STRUCT)  ? n->as.struct_def.structn
+                   : (n->type == AST_UNION) ? n->as.union_def.unionn
+                                            : n->as.enum_def.enumn;
+    if (sue.len > 0)
+      n->is_nested_sue = true;
+    data->sue_stack[data->sue_top++] = my_sue;
+  } else if (n->type == AST_IDENTIF) {
+    if (n->as.identif.val.len == 4 &&
+        strncmp(n->as.identif.val.start, "self", 4) == 0 && sue.len > 0) {
+      n->as.identif.val = sue;
+      if (!n->as.identif.res_sm) {
+        n->as.identif.res_sm = arena_alloc(data->arena, sizeof(Sym));
+      }
+      n->as.identif.res_sm->kind = SYM_STRUCT;
+    }
+  } else if (n->type == AST_PARAM) {
+    if (n->as.fn_param.id.len == 4 &&
+        (n->as.fn_param.id.start == NULL ||
+         strncmp(n->as.fn_param.id.start, "self", 4) == 0) &&
+        sue.len > 0) {
+      n->as.fn_param.id = sue;
+      n->as.fn_param.type.name = sue;
+    }
+  } else if (n->type == AST_VAR_DECL) {
+    if (n->as.var_decl.id.len == 4 &&
+        (n->as.var_decl.id.start == NULL ||
+         strncmp(n->as.var_decl.id.start, "self", 4) == 0) &&
+        sue.len > 0)
+      n->as.var_decl.id = sue;
+    if (sue.len > 0) {
+      DataType *ft = &n->as.var_decl.type;
+      if (ft->name.len == sue.len &&
+          strncmp(ft->name.start, sue.start, sue.len) == 0 &&
+          ft->ptr_depth == 0 && ft->array_dimens == 0)
+        ft->ptr_depth = 1;
+    }
+  } else if (n->type == AST_MEMBER) {
+    AstNode *base = n->as.member.base;
+    if (base && base->type == AST_IDENTIF && base->as.identif.res_sm &&
+        base->as.identif.res_sm->is_imported_mod) {
+      Token mod_name = base->as.identif.val;
+      Token mem_name = n->as.member.name;
+      size_t new_len = mod_name.len + 1 + mem_name.len;
+      char *new_name = arena_alloc(data->arena, new_len + 1);
+      sprintf(new_name, "%.*s_%.*s", (int)mod_name.len, mod_name.start,
+              (int)mem_name.len, mem_name.start);
+      n->type = AST_IDENTIF;
+      n->as.identif.val.start = new_name;
+      n->as.identif.val.len = new_len;
+      n->as.identif.res_sm = NULL;
+    }
+  }
+
+  return VISIT_CONTINUE;
+}
+
+void flatten_exit(AstVisitor *visitor, AstNode *n) {
+  FlattenData *data = visitor->user_data;
+
+  if (n->type == AST_STRUCT || n->type == AST_UNION || n->type == AST_ENUM) {
+    Token sue = data->sue_stack[--data->sue_top]; // Pop context
+
+    AstNode **prev_ptr = (n->type == AST_STRUCT)  ? &n->as.struct_def.contents
+                         : (n->type == AST_UNION) ? &n->as.union_def.contents
+                                                  : &n->as.enum_def.contents;
+
+    while (*prev_ptr) {
+      AstNode *child = *prev_ptr;
+      if (child->type == AST_FUNC) {
+        Token old_name = child->as.func_def.fn_name;
+        if (sue.len > 0 && old_name.len > 0) {
+          size_t new_len = sue.len + 1 + old_name.len;
+          char *new_name = arena_alloc(data->arena, new_len + 1);
+          memcpy(new_name, sue.start, sue.len);
+          new_name[sue.len] = '_';
+          memcpy(new_name + sue.len + 1, old_name.start, old_name.len);
+          new_name[new_len] = '\0';
+          child->as.func_def.fn_name.start = new_name;
+          child->as.func_def.fn_name.len = new_len;
+        }
+
+        // Hoist function
+        *prev_ptr = child->next;
+        child->next = NULL;
+
+        AstNode *after_sue = n->next;
+        n->next = child;
+        child->next = after_sue;
+      } else {
+        if (child->type == AST_STRUCT || child->type == AST_UNION ||
+            child->type == AST_ENUM) {
+          child->is_nested_sue = true;
+        }
+        prev_ptr = &child->next;
+      }
+    }
+  }
+}
+
 void flatten_sues(AstNode *root, Arena *arena) {
   if (!root || root->type != AST_PROGRAM)
     return;
 
-  size_t cap = 1024;
-  FlattenFrame *stack = malloc(sizeof(FlattenFrame) * cap);
-  size_t top = 0;
+  FlattenData data = {arena, {{0}}, 0};
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = flatten_enter;
+  visitor.exit_node = flatten_exit;
 
-  stack[top++] = (FlattenFrame){root, (Token){0}};
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-  while (top > 0) {
-    FlattenFrame frame = stack[--top];
-    AstNode *n = frame.node;
-    Token sue = frame.sue;
-
-    if (!n)
-      continue;
-
-    if (n->type == AST_STRUCT || n->type == AST_UNION || n->type == AST_ENUM) {
-      sue = (n->type == AST_STRUCT)  ? n->as.struct_def.structn
-            : (n->type == AST_UNION) ? n->as.union_def.unionn
-                                     : n->as.enum_def.enumn;
-
-      if (frame.sue.len > 0)
-        n->is_nested_sue = true;
-
-      AstNode **prev_ptr = (n->type == AST_STRUCT)  ? &n->as.struct_def.contents
-                           : (n->type == AST_UNION) ? &n->as.union_def.contents
-                                                    : &n->as.enum_def.contents;
-
-      while (*prev_ptr) {
-        AstNode *child = *prev_ptr;
-        if (child->type == AST_FUNC) {
-          Token old_name = child->as.func_def.fn_name;
-          if (sue.len > 0 && old_name.len > 0) {
-            size_t new_len = sue.len + 1 + old_name.len;
-            char *new_name = arena_alloc(arena, new_len + 1);
-            memcpy(new_name, sue.start, sue.len);
-            new_name[sue.len] = '_';
-            memcpy(new_name + sue.len + 1, old_name.start, old_name.len);
-            new_name[new_len] = '\0';
-            child->as.func_def.fn_name.start = new_name;
-            child->as.func_def.fn_name.len = new_len;
-          }
-
-          *prev_ptr = child->next;
-          child->next = NULL;
-
-          AstNode *after_sue = n->next;
-          n->next = child;
-          child->next = after_sue;
-
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){child, sue};
-        } else {
-          if (child->type == AST_STRUCT || child->type == AST_UNION ||
-              child->type == AST_ENUM)
-            child->is_nested_sue = true;
-
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){child, sue};
-          prev_ptr = &child->next;
-        }
-      }
-    } else if (n->type == AST_IDENTIF) {
-      if (n->as.identif.val.len == 4 &&
-          strncmp(n->as.identif.val.start, "self", 4) == 0 && sue.len > 0) {
-        n->as.identif.val = sue;
-        if (!n->as.identif.res_sm) {
-          n->as.identif.res_sm = arena_alloc(arena, sizeof(Sym));
-        }
-        n->as.identif.res_sm->kind = SYM_STRUCT;
-      }
-    } else {
-      switch (n->type) {
-      case AST_PROGRAM:
-      case AST_BLOCK: {
-        AstNode *stmt = n->as.block.first_stmt;
-        while (stmt) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){stmt, sue};
-          stmt = stmt->next;
-        }
-        break;
-      }
-      case AST_FUNC:
-        if (n->as.func_def.params) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.func_def.params, sue};
-        }
-        if (n->as.func_def.block) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.func_def.block, sue};
-        }
-        break;
-      case AST_PARAM:
-        if (n->as.fn_param.id.len == 4 &&
-            (n->as.fn_param.id.start == NULL ||
-             strncmp(n->as.fn_param.id.start, "self", 4) == 0) &&
-            sue.len > 0) {
-          n->as.fn_param.id = sue;
-          n->as.fn_param.type.name = sue;
-        }
-        break;
-      case AST_VAR_DECL:
-        if (n->as.var_decl.id.len == 4 &&
-            (n->as.var_decl.id.start == NULL ||
-             strncmp(n->as.var_decl.id.start, "self", 4) == 0) &&
-            sue.len > 0)
-          n->as.var_decl.id = sue;
-        if (sue.len > 0) {
-          DataType *ft = &n->as.var_decl.type;
-          if (ft->name.len == sue.len &&
-              strncmp(ft->name.start, sue.start, sue.len) == 0 &&
-              ft->ptr_depth == 0 && ft->array_dimens == 0)
-            ft->ptr_depth = 1;
-        }
-        if (n->as.var_decl.init) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.var_decl.init, sue};
-        }
-        break;
-      case AST_BINOP:
-        if (top + 2 >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.binop.right, sue};
-        stack[top++] = (FlattenFrame){n->as.binop.left, sue};
-        break;
-      case AST_UOP:
-      case AST_ADDR_OF:
-      case AST_DEREF:
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.unop.operand, sue};
-        break;
-      case AST_IF:
-        if (n->as.if_check.elseAct) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.if_check.elseAct, sue};
-        }
-        if (n->as.if_check.action) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.if_check.action, sue};
-        }
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.if_check.check, sue};
-        break;
-      case AST_WHILE:
-        if (n->as.while_loop.action) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.while_loop.action, sue};
-        }
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.while_loop.check, sue};
-        break;
-      case AST_FOR:
-        if (n->as.for_loop.action) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.for_loop.action, sue};
-        }
-        if (n->as.for_loop.inc) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.for_loop.inc, sue};
-        }
-        if (n->as.for_loop.check) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.for_loop.check, sue};
-        }
-        if (n->as.for_loop.init) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.for_loop.init, sue};
-        }
-        break;
-      case AST_FUNC_CALL: {
-        AstNode *arg = n->as.func_call.args;
-        while (arg) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){arg, sue};
-          arg = arg->next;
-        }
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.func_call.caller, sue};
-        break;
-      }
-      case AST_ARRAY_LIT: {
-        AstNode *elem = n->as.array_lit.elements;
-        while (elem) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){elem, sue};
-          elem = elem->next;
-        }
-        break;
-      }
-      case AST_INDEX:
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.index.index, sue};
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.index.base, sue};
-        break;
-      case AST_MEMBER: {
-        AstNode *base = n->as.member.base;
-
-        if (base && base->type == AST_IDENTIF && base->as.identif.res_sm &&
-            base->as.identif.res_sm->is_imported_mod) {
-
-          Token mod_name = base->as.identif.val;
-          Token mem_name = n->as.member.name;
-
-          size_t new_len = mod_name.len + 1 + mem_name.len;
-          char *new_name = arena_alloc(arena, new_len + 1);
-          sprintf(new_name, "%.*s_%.*s", mod_name.len, mod_name.start,
-                  mem_name.len, mem_name.start);
-
-          n->type = AST_IDENTIF;
-          n->as.identif.val.start = new_name;
-          n->as.identif.val.len = new_len;
-          n->as.identif.res_sm = NULL;
-
-          break;
-        }
-
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.member.base, sue};
-        break;
-      }
-      case AST_RET:
-        if (n->as.ret_stmt.expr) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.ret_stmt.expr, sue};
-        }
-        break;
-      case AST_DEFER:
-        if (n->as.defer_stmt.contents) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.defer_stmt.contents, sue};
-        }
-        break;
-      case AST_SWITCH:
-        if (n->as.switch_stmt.default_case) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.switch_stmt.default_case, sue};
-        }
-        {
-          AstNode *c = n->as.switch_stmt.cases;
-          while (c) {
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              FlattenFrame *new_stack =
-                  realloc(stack, sizeof(FlattenFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-            }
-            stack[top++] = (FlattenFrame){c, sue};
-            c = c->next;
-          }
-        }
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.switch_stmt.check, sue};
-        break;
-      case AST_CASE:
-        if (n->as.case_stmt.action) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){n->as.case_stmt.action, sue};
-        }
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.case_stmt.val, sue};
-        break;
-      case AST_EXTERN: {
-        AstNode *stmt = n->as.extern_block.contents;
-        while (stmt) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            FlattenFrame *new_stack =
-                realloc(stack, sizeof(FlattenFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = (FlattenFrame){stmt, sue};
-          stmt = stmt->next;
-        }
-        break;
-      }
-      case AST_CAST:
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          FlattenFrame *new_stack =
-              realloc(stack, sizeof(FlattenFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = (FlattenFrame){n->as.cast.op, sue};
-        break;
-      default:
-        break;
-      }
-    }
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "OOM encountered whilst flattening SUEs.\n");
   }
-
-  free(stack);
 }
 
 AstNode *clone_ast(AstNode *root, Arena *arena) {

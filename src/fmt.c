@@ -1,6 +1,7 @@
 #include "fmt.h"
 #include "arena.h"
 #include "ast_types.h"
+#include "ast_visitor.h"
 #include "diag.h"
 #include "hashmap.h"
 #include "util.h"
@@ -14,169 +15,50 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+typedef struct {
+  HashMap *type_set;
+  Arena *arena;
+} CollectTypeData;
+
+VisitResult collect_type_enter(AstVisitor *visitor, AstNode *node) {
+  CollectTypeData *data = (CollectTypeData *)visitor->user_data;
+  Token name = {0};
+
+  if (node->type == AST_STRUCT) {
+    name = node->as.struct_def.structn;
+  } else if (node->type == AST_UNION) {
+    name = node->as.union_def.unionn;
+  } else if (node->type == AST_ENUM) {
+    name = node->as.enum_def.enumn;
+  }
+
+  if (name.len > 0) {
+    char *type_name = arena_alloc(data->arena, name.len + 1);
+    memcpy(type_name, name.start, name.len);
+    type_name[name.len] = '\0';
+    map_set(data->type_set, type_name, name.len, (void *)(uintptr_t)1);
+  }
+
+  return VISIT_CONTINUE;
+}
+
 void collect_type_names(AstNode *root, HashMap *type_set, Arena *arena) {
   if (!root)
     return;
 
-  size_t cap = 1024;
-  AstNode **stack = malloc(sizeof(AstNode *) * cap);
-  size_t top = 0;
-  stack[top++] = root;
+  CollectTypeData data = {type_set, arena};
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = collect_type_enter;
 
-  while (top > 0) {
-    AstNode *node = stack[--top];
-    if (!node)
-      continue;
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-    // Record type names
-    if (node->type == AST_STRUCT) {
-      Token name = node->as.struct_def.structn;
-      if (name.len > 0) {
-        char *type_name = arena_alloc(arena, name.len + 1);
-        memcpy(type_name, name.start, name.len);
-        type_name[name.len] = '\0';
-        map_set(type_set, type_name, name.len, (void *)(uintptr_t)1);
-      }
-    } else if (node->type == AST_UNION) {
-      Token name = node->as.union_def.unionn;
-      if (name.len > 0) {
-        char *type_name = arena_alloc(arena, name.len + 1);
-        memcpy(type_name, name.start, name.len);
-        type_name[name.len] = '\0';
-        map_set(type_set, type_name, name.len, (void *)(uintptr_t)1);
-      }
-    } else if (node->type == AST_ENUM) {
-      Token name = node->as.enum_def.enumn;
-      if (name.len > 0) {
-        char *type_name = arena_alloc(arena, name.len + 1);
-        memcpy(type_name, name.start, name.len);
-        type_name[name.len] = '\0';
-        map_set(type_set, type_name, name.len, (void *)(uintptr_t)1);
-      }
-    }
-
-    // Push children and siblings
-    if (node->next) {
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = node->next;
-    }
-
-#define PUSH_CHILD(n)                                                          \
-  do {                                                                         \
-    if (n) {                                                                   \
-      if (top >= cap) {                                                        \
-        size_t new_cap = cap * 2;                                              \
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);     \
-        if (!new_stack) {                                                      \
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");     \
-          free(stack);                                                         \
-          return;                                                              \
-        }                                                                      \
-        stack = new_stack;                                                     \
-        cap = new_cap;                                                         \
-      }                                                                        \
-      stack[top++] = (n);                                                      \
-    }                                                                          \
-  } while (0)
-
-    switch (node->type) {
-    case AST_PROGRAM:
-    case AST_BLOCK:
-      PUSH_CHILD(node->as.block.first_stmt);
-      break;
-    case AST_FUNC:
-      PUSH_CHILD(node->as.func_def.params);
-      PUSH_CHILD(node->as.func_def.block);
-      break;
-    case AST_VAR_DECL:
-      PUSH_CHILD(node->as.var_decl.init);
-      break;
-    case AST_BINOP:
-      PUSH_CHILD(node->as.binop.left);
-      PUSH_CHILD(node->as.binop.right);
-      break;
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF:
-      PUSH_CHILD(node->as.unop.operand);
-      break;
-    case AST_IF:
-      PUSH_CHILD(node->as.if_check.check);
-      PUSH_CHILD(node->as.if_check.action);
-      PUSH_CHILD(node->as.if_check.elseAct);
-      break;
-    case AST_WHILE:
-      PUSH_CHILD(node->as.while_loop.check);
-      PUSH_CHILD(node->as.while_loop.action);
-      break;
-    case AST_FOR:
-      PUSH_CHILD(node->as.for_loop.init);
-      PUSH_CHILD(node->as.for_loop.check);
-      PUSH_CHILD(node->as.for_loop.inc);
-      PUSH_CHILD(node->as.for_loop.action);
-      break;
-    case AST_FUNC_CALL:
-      PUSH_CHILD(node->as.func_call.caller);
-      PUSH_CHILD(node->as.func_call.args);
-      break;
-    case AST_INDEX:
-      PUSH_CHILD(node->as.index.base);
-      PUSH_CHILD(node->as.index.index);
-      break;
-    case AST_MEMBER:
-      PUSH_CHILD(node->as.member.base);
-      break;
-    case AST_ARRAY_LIT:
-      PUSH_CHILD(node->as.array_lit.elements);
-      break;
-    case AST_STRUCT:
-    case AST_UNION:
-    case AST_ENUM:
-      PUSH_CHILD((node->type == AST_STRUCT)  ? node->as.struct_def.contents
-                 : (node->type == AST_UNION) ? node->as.union_def.contents
-                                             : node->as.enum_def.contents);
-      break;
-    case AST_CAST:
-      PUSH_CHILD(node->as.cast.op);
-      break;
-    case AST_RET:
-      PUSH_CHILD(node->as.ret_stmt.expr);
-      break;
-    case AST_SWITCH:
-      PUSH_CHILD(node->as.switch_stmt.check);
-      PUSH_CHILD(node->as.switch_stmt.cases);
-      PUSH_CHILD(node->as.switch_stmt.default_case);
-      break;
-    case AST_CASE:
-      PUSH_CHILD(node->as.case_stmt.val);
-      PUSH_CHILD(node->as.case_stmt.action);
-      break;
-    case AST_DEFER:
-      PUSH_CHILD(node->as.defer_stmt.contents);
-      break;
-    case AST_EXTERN:
-      PUSH_CHILD(node->as.extern_block.contents);
-      break;
-    case AST_SIZEOF:
-      if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr)
-        PUSH_CHILD(node->as.sizeof_expr.target_expr);
-      break;
-    default:
-      break;
-    }
-#undef PUSH_CHILD
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "OOM encountered whilst collecting type names.\n");
   }
-  free(stack);
 }
 
 bool is_builtin_type_name(const char *start, size_t len) {
