@@ -770,9 +770,11 @@ typedef struct {
   HashMap exp_map;
 } TCData;
 
-void set_expected(HashMap *map, AstNode *n, DataType *exp) {
+void set_expected(HashMap *map, AstNode *n, DataType *exp, Arena *arena) {
   if (n && exp) {
-    map_set(map, (const char *)&n, sizeof(AstNode *), exp);
+    AstNode **key_ptr = arena_alloc(arena, sizeof(AstNode *));
+    *key_ptr = n;
+    map_set(map, (const char *)key_ptr, sizeof(AstNode *), exp);
   }
 }
 
@@ -807,14 +809,14 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
 
   switch (n->type) {
   case AST_VAR_DECL:
-    set_expected(&data->exp_map, n->as.var_decl.init, &n->as.var_decl.type);
+    set_expected(&data->exp_map, n->as.var_decl.init, &n->as.var_decl.type, data->arena);
     break;
   case AST_BINOP: {
     DataType *exp = expected;
     if (n->as.binop.op.type == TOKEN_COMPARE)
       exp = NULL;
-    set_expected(&data->exp_map, n->as.binop.left, exp);
-    set_expected(&data->exp_map, n->as.binop.right, exp);
+    set_expected(&data->exp_map, n->as.binop.left, exp, data->arena);
+    set_expected(&data->exp_map, n->as.binop.right, exp, data->arena);
     break;
   }
   case AST_UOP:
@@ -827,20 +829,20 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
         inner->ptr_depth--;
       else if (n->type == AST_DEREF)
         inner->ptr_depth++;
-      set_expected(&data->exp_map, n->as.unop.operand, inner);
+      set_expected(&data->exp_map, n->as.unop.operand, inner, data->arena);
     }
     break;
   }
   case AST_IF:
-    set_expected(&data->exp_map, n->as.if_check.check, &EXPECT_BOOL);
-    set_expected(&data->exp_map, n->as.if_check.action, expected);
-    set_expected(&data->exp_map, n->as.if_check.elseAct, expected);
+    set_expected(&data->exp_map, n->as.if_check.check, &EXPECT_BOOL, data->arena);
+    set_expected(&data->exp_map, n->as.if_check.action, expected, data->arena);
+    set_expected(&data->exp_map, n->as.if_check.elseAct, expected, data->arena);
     break;
   case AST_WHILE:
-    set_expected(&data->exp_map, n->as.while_loop.check, &EXPECT_BOOL);
+    set_expected(&data->exp_map, n->as.while_loop.check, &EXPECT_BOOL, data->arena);
     break;
   case AST_FOR:
-    set_expected(&data->exp_map, n->as.for_loop.check, &EXPECT_BOOL);
+    set_expected(&data->exp_map, n->as.for_loop.check, &EXPECT_BOOL, data->arena);
     break;
   case AST_FUNC_CALL: {
     AstNode *fn_decl = NULL;
@@ -856,7 +858,7 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
     }
     while (curr_arg) {
       if (curr_param) {
-        set_expected(&data->exp_map, curr_arg, &curr_param->as.fn_param.type);
+        set_expected(&data->exp_map, curr_arg, &curr_param->as.fn_param.type, data->arena);
         curr_param = curr_param->next;
       }
       curr_arg = curr_arg->next;
@@ -864,21 +866,21 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
     break;
   }
   case AST_CAST:
-    set_expected(&data->exp_map, n->as.cast.op, &n->as.cast.target);
+    set_expected(&data->exp_map, n->as.cast.op, &n->as.cast.target, data->arena);
     break;
   case AST_RET: {
     AstNode *curr_func =
         (data->func_top > 0) ? data->func_stack[data->func_top - 1] : NULL;
     if (curr_func && n->as.ret_stmt.expr) {
       set_expected(&data->exp_map, n->as.ret_stmt.expr,
-                   &curr_func->as.func_def.ret_type);
+                   &curr_func->as.func_def.ret_type, data->arena);
     }
     break;
   }
   case AST_ARRAY_LIT: {
     AstNode *curr = n->as.array_lit.elements;
     while (curr) {
-      set_expected(&data->exp_map, curr, expected);
+      set_expected(&data->exp_map, curr, expected, data->arena);
       curr = curr->next;
     }
     break;
