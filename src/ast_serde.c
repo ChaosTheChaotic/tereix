@@ -938,309 +938,182 @@ inline uint32_t hash_datatype(uint32_t hash, DataType dt) {
   return hash;
 }
 
-uint32_t compute_node_hash(AstNode *root) {
-  if (!root)
-    return 0;
-
-  typedef struct {
-    AstNode *node;
-    int state; // 0 = enter, 1 = exit
-  } HashFrame;
-
-  size_t cap = 1024;
-  HashFrame *stack = malloc(cap * sizeof(HashFrame));
-  size_t top = 0;
-  stack[top++] = (HashFrame){root, 0};
-
-  while (top > 0) {
-    HashFrame frame = stack[--top];
-    AstNode *n = frame.node;
-
-    if (n->node_hash)
-      continue; // already computed
-
-    if (frame.state == 0) {
-      // push exit frame, then children
-      if (top + 32 >= cap) {
-        size_t new_cap = cap * 2;
-        HashFrame *new_stack = realloc(stack, new_cap * sizeof(HashFrame));
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return 0;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = (HashFrame){n, 1};
-
-#define PUSH_CHILD(c)                                                          \
-  if (c && !c->node_hash)                                                      \
-  stack[top++] = (HashFrame){c, 0}
-
-      switch (n->type) {
-      case AST_BINOP:
-        PUSH_CHILD(n->as.binop.left);
-        PUSH_CHILD(n->as.binop.right);
-        break;
-      case AST_UOP:
-      case AST_ADDR_OF:
-      case AST_DEREF:
-        PUSH_CHILD(n->as.unop.operand);
-        break;
-      case AST_ARRAY_LIT:
-        for (AstNode *e = n->as.array_lit.elements; e; e = e->next)
-          PUSH_CHILD(e);
-        break;
-      case AST_VAR_DECL:
-        PUSH_CHILD(n->as.var_decl.init);
-        break;
-      case AST_IF:
-        PUSH_CHILD(n->as.if_check.check);
-        PUSH_CHILD(n->as.if_check.action);
-        PUSH_CHILD(n->as.if_check.elseAct);
-        break;
-      case AST_STRUCT:
-      case AST_UNION:
-        for (AstNode *c = (n->type == AST_STRUCT) ? n->as.struct_def.contents
-                                                  : n->as.union_def.contents;
-             c; c = c->next)
-          PUSH_CHILD(c);
-        break;
-      case AST_ENUM:
-        for (AstNode *c = n->as.enum_def.contents; c; c = c->next)
-          PUSH_CHILD(c);
-        break;
-      case AST_ENUM_MEMBER:
-        PUSH_CHILD(n->as.enum_member.val);
-        break;
-      case AST_DEFER:
-        PUSH_CHILD(n->as.defer_stmt.contents);
-        break;
-      case AST_FOR:
-        PUSH_CHILD(n->as.for_loop.init);
-        PUSH_CHILD(n->as.for_loop.check);
-        PUSH_CHILD(n->as.for_loop.inc);
-        PUSH_CHILD(n->as.for_loop.action);
-        break;
-      case AST_WHILE:
-        PUSH_CHILD(n->as.while_loop.check);
-        PUSH_CHILD(n->as.while_loop.action);
-        break;
-      case AST_FUNC:
-        for (AstNode *p = n->as.func_def.params; p; p = p->next)
-          PUSH_CHILD(p);
-        PUSH_CHILD(n->as.func_def.block);
-        break;
-      case AST_PARAM: // no children
-        break;
-      case AST_RET:
-        PUSH_CHILD(n->as.ret_stmt.expr);
-        break;
-      case AST_BLOCK:
-      case AST_PROGRAM:
-        for (AstNode *s = n->as.block.first_stmt; s; s = s->next)
-          PUSH_CHILD(s);
-        break;
-      case AST_FUNC_CALL:
-        PUSH_CHILD(n->as.func_call.caller);
-        for (AstNode *a = n->as.func_call.args; a; a = a->next)
-          PUSH_CHILD(a);
-        break;
-      case AST_INDEX:
-        PUSH_CHILD(n->as.index.base);
-        PUSH_CHILD(n->as.index.index);
-        break;
-      case AST_MEMBER:
-        PUSH_CHILD(n->as.member.base);
-        break;
-      case AST_SWITCH:
-        PUSH_CHILD(n->as.switch_stmt.check);
-        for (AstNode *c = n->as.switch_stmt.cases; c; c = c->next)
-          PUSH_CHILD(c);
-        PUSH_CHILD(n->as.switch_stmt.default_case);
-        break;
-      case AST_CASE:
-        PUSH_CHILD(n->as.case_stmt.val);
-        PUSH_CHILD(n->as.case_stmt.action);
-        break;
-      case AST_EXTERN:
-        for (AstNode *c = n->as.extern_block.contents; c; c = c->next)
-          PUSH_CHILD(c);
-        break;
-      case AST_CAST:
-        PUSH_CHILD(n->as.cast.op);
-        break;
-      case AST_SIZEOF:
-        if (!n->as.sizeof_expr.is_type)
-          PUSH_CHILD(n->as.sizeof_expr.target_expr);
-        break;
-      default: // literals, identifiers, use, break, continue, null
-        break;
-      }
-#undef PUSH_CHILD
-    } else {
-      // Compute hash from children
-      uint32_t hash = combine_hash(2166136261u, n->type);
-
-      switch (n->type) {
-      case AST_BINOP:
-        hash = hash_token(hash, n->as.binop.op);
-        hash = combine_hash(hash, n->as.binop.left->node_hash);
-        hash = combine_hash(hash, n->as.binop.right->node_hash);
-        break;
-      case AST_UOP:
-      case AST_ADDR_OF:
-      case AST_DEREF:
-        hash = hash_token(hash, n->as.unop.op);
-        hash = combine_hash(hash, n->as.unop.is_postfix);
-        hash = combine_hash(hash, n->as.unop.operand->node_hash);
-        break;
-      case AST_ARRAY_LIT:
-        for (AstNode *e = n->as.array_lit.elements; e; e = e->next)
-          hash = combine_hash(hash, e->node_hash);
-        break;
-      case AST_VAR_DECL:
-        hash = hash_token(hash, n->as.var_decl.id);
-        hash = hash_datatype(hash, n->as.var_decl.type);
-        if (n->as.var_decl.init)
-          hash = combine_hash(hash, n->as.var_decl.init->node_hash);
-        break;
-      case AST_IF:
-        hash = combine_hash(hash, n->as.if_check.check->node_hash);
-        hash = combine_hash(hash, n->as.if_check.action->node_hash);
-        if (n->as.if_check.elseAct)
-          hash = combine_hash(hash, n->as.if_check.elseAct->node_hash);
-        break;
-      case AST_STRUCT:
-        hash = hash_token(hash, n->as.struct_def.structn);
-        hash = combine_hash(hash, n->as.struct_def.is_extern);
-        for (AstNode *c = n->as.struct_def.contents; c; c = c->next)
-          hash = combine_hash(hash, c->node_hash);
-        break;
-      case AST_UNION:
-        hash = hash_token(hash, n->as.union_def.unionn);
-        hash = combine_hash(hash, n->as.union_def.is_extern);
-        for (AstNode *c = n->as.union_def.contents; c; c = c->next)
-          hash = combine_hash(hash, c->node_hash);
-        break;
-      case AST_ENUM:
-        hash = hash_token(hash, n->as.enum_def.enumn);
-        for (AstNode *c = n->as.enum_def.contents; c; c = c->next)
-          hash = combine_hash(hash, c->node_hash);
-        break;
-      case AST_ENUM_MEMBER:
-        hash = hash_token(hash, n->as.enum_member.name);
-        if (n->as.enum_member.val)
-          hash = combine_hash(hash, n->as.enum_member.val->node_hash);
-        break;
-      case AST_DEFER:
-        hash = combine_hash(hash, n->as.defer_stmt.contents->node_hash);
-        break;
-      case AST_FOR:
-        if (n->as.for_loop.init)
-          hash = combine_hash(hash, n->as.for_loop.init->node_hash);
-        if (n->as.for_loop.check)
-          hash = combine_hash(hash, n->as.for_loop.check->node_hash);
-        if (n->as.for_loop.inc)
-          hash = combine_hash(hash, n->as.for_loop.inc->node_hash);
-        if (n->as.for_loop.action)
-          hash = combine_hash(hash, n->as.for_loop.action->node_hash);
-        break;
-      case AST_WHILE:
-        if (n->as.while_loop.check)
-          hash = combine_hash(hash, n->as.while_loop.check->node_hash);
-        if (n->as.while_loop.action)
-          hash = combine_hash(hash, n->as.while_loop.action->node_hash);
-        break;
-      case AST_FUNC:
-        hash = hash_token(hash, n->as.func_def.fn_name);
-        hash = hash_datatype(hash, n->as.func_def.ret_type);
-        hash = combine_hash(hash, n->as.func_def.is_extern);
-        hash = combine_hash(hash, n->as.func_def.is_async);
-        hash = combine_hash(hash, n->as.func_def.is_inline);
-        for (AstNode *p = n->as.func_def.params; p; p = p->next)
-          hash = combine_hash(hash, p->node_hash);
-        if (n->as.func_def.block)
-          hash = combine_hash(hash, n->as.func_def.block->node_hash);
-        break;
-      case AST_PARAM:
-        hash = hash_token(hash, n->as.fn_param.id);
-        hash = hash_datatype(hash, n->as.fn_param.type);
-        break;
-      case AST_RET:
-        if (n->as.ret_stmt.expr)
-          hash = combine_hash(hash, n->as.ret_stmt.expr->node_hash);
-        break;
-      case AST_BLOCK:
-      case AST_PROGRAM:
-        for (AstNode *s = n->as.block.first_stmt; s; s = s->next)
-          hash = combine_hash(hash, s->node_hash);
-        break;
-      case AST_FUNC_CALL:
-        if (n->as.func_call.caller)
-          hash = combine_hash(hash, n->as.func_call.caller->node_hash);
-        for (AstNode *a = n->as.func_call.args; a; a = a->next)
-          hash = combine_hash(hash, a->node_hash);
-        break;
-      case AST_INDEX:
-        hash = combine_hash(hash, n->as.index.base->node_hash);
-        hash = combine_hash(hash, n->as.index.index->node_hash);
-        break;
-      case AST_MEMBER:
-        hash = hash_token(hash, n->as.member.name);
-        hash = combine_hash(hash, n->as.member.base->node_hash);
-        break;
-      case AST_SWITCH:
-        hash = combine_hash(hash, n->as.switch_stmt.check->node_hash);
-        for (AstNode *c = n->as.switch_stmt.cases; c; c = c->next)
-          hash = combine_hash(hash, c->node_hash);
-        if (n->as.switch_stmt.default_case)
-          hash = combine_hash(hash, n->as.switch_stmt.default_case->node_hash);
-        break;
-      case AST_CASE:
-        if (n->as.case_stmt.val)
-          hash = combine_hash(hash, n->as.case_stmt.val->node_hash);
-        if (n->as.case_stmt.action)
-          hash = combine_hash(hash, n->as.case_stmt.action->node_hash);
-        break;
-      case AST_EXTERN:
-        for (AstNode *c = n->as.extern_block.contents; c; c = c->next)
-          hash = combine_hash(hash, c->node_hash);
-        break;
-      case AST_USE:
-        hash = hash_token(hash, n->as.use_stmt.path);
-        if (n->as.use_stmt.alias.start)
-          hash = hash_token(hash, n->as.use_stmt.alias);
-        break;
-      case AST_CAST:
-        hash = hash_datatype(hash, n->as.cast.target);
-        if (n->as.cast.op)
-          hash = combine_hash(hash, n->as.cast.op->node_hash);
-        break;
-      case AST_SIZEOF:
-        if (n->as.sizeof_expr.is_type)
-          hash = hash_datatype(hash, n->as.sizeof_expr.target_type);
-        else if (n->as.sizeof_expr.target_expr)
-          hash = combine_hash(hash, n->as.sizeof_expr.target_expr->node_hash);
-        break;
-      case AST_IDENTIF:
-      case AST_NUM_LIT:
-      case AST_STR_LIT:
-      case AST_CHAR_LIT:
-      case AST_BOOL_LIT:
-      case AST_NULL_LIT:
-      case AST_BREAK:
-      case AST_CONTINUE:
-        hash = hash_token(hash, n->as.identif.val);
-        break;
-      default:
-        break;
-      }
-      n->node_hash = hash;
-    }
+VisitResult compute_hash_enter(AstVisitor *visitor, AstNode *n) {
+	(void)visitor; // Unused
+  // If the hash is already computed skip traversing its children
+  if (n->node_hash) {
+    return VISIT_SKIP_CHILDREN;
   }
-  free(stack);
+  return VISIT_CONTINUE;
+}
+
+void compute_hash_exit(AstVisitor *visitor, AstNode *n) {
+	(void)visitor; // Unused
+  // ast_traverse still calls exit_node even if VISIT_SKIP_CHILDREN was returned so stop recomputing
+  if (n->node_hash) return;
+
+  uint32_t hash = combine_hash(2166136261u, n->type);
+
+  switch (n->type) {
+  case AST_BINOP:
+    hash = hash_token(hash, n->as.binop.op);
+    if (n->as.binop.left) hash = combine_hash(hash, n->as.binop.left->node_hash);
+    if (n->as.binop.right) hash = combine_hash(hash, n->as.binop.right->node_hash);
+    break;
+  case AST_UOP:
+  case AST_ADDR_OF:
+  case AST_DEREF:
+    hash = hash_token(hash, n->as.unop.op);
+    hash = combine_hash(hash, n->as.unop.is_postfix);
+    if (n->as.unop.operand) hash = combine_hash(hash, n->as.unop.operand->node_hash);
+    break;
+  case AST_ARRAY_LIT:
+    for (AstNode *e = n->as.array_lit.elements; e; e = e->next)
+      hash = combine_hash(hash, e->node_hash);
+    break;
+  case AST_VAR_DECL:
+    hash = hash_token(hash, n->as.var_decl.id);
+    hash = hash_datatype(hash, n->as.var_decl.type);
+    if (n->as.var_decl.init)
+      hash = combine_hash(hash, n->as.var_decl.init->node_hash);
+    break;
+  case AST_IF:
+    if (n->as.if_check.check) hash = combine_hash(hash, n->as.if_check.check->node_hash);
+    if (n->as.if_check.action) hash = combine_hash(hash, n->as.if_check.action->node_hash);
+    if (n->as.if_check.elseAct) hash = combine_hash(hash, n->as.if_check.elseAct->node_hash);
+    break;
+  case AST_STRUCT:
+    hash = hash_token(hash, n->as.struct_def.structn);
+    hash = combine_hash(hash, n->as.struct_def.is_extern);
+    for (AstNode *c = n->as.struct_def.contents; c; c = c->next)
+      hash = combine_hash(hash, c->node_hash);
+    break;
+  case AST_UNION:
+    hash = hash_token(hash, n->as.union_def.unionn);
+    hash = combine_hash(hash, n->as.union_def.is_extern);
+    for (AstNode *c = n->as.union_def.contents; c; c = c->next)
+      hash = combine_hash(hash, c->node_hash);
+    break;
+  case AST_ENUM:
+    hash = hash_token(hash, n->as.enum_def.enumn);
+    for (AstNode *c = n->as.enum_def.contents; c; c = c->next)
+      hash = combine_hash(hash, c->node_hash);
+    break;
+  case AST_ENUM_MEMBER:
+    hash = hash_token(hash, n->as.enum_member.name);
+    if (n->as.enum_member.val) hash = combine_hash(hash, n->as.enum_member.val->node_hash);
+    break;
+  case AST_DEFER:
+    if (n->as.defer_stmt.contents) hash = combine_hash(hash, n->as.defer_stmt.contents->node_hash);
+    break;
+  case AST_FOR:
+    if (n->as.for_loop.init) hash = combine_hash(hash, n->as.for_loop.init->node_hash);
+    if (n->as.for_loop.check) hash = combine_hash(hash, n->as.for_loop.check->node_hash);
+    if (n->as.for_loop.inc) hash = combine_hash(hash, n->as.for_loop.inc->node_hash);
+    if (n->as.for_loop.action) hash = combine_hash(hash, n->as.for_loop.action->node_hash);
+    break;
+  case AST_WHILE:
+    if (n->as.while_loop.check) hash = combine_hash(hash, n->as.while_loop.check->node_hash);
+    if (n->as.while_loop.action) hash = combine_hash(hash, n->as.while_loop.action->node_hash);
+    break;
+  case AST_FUNC:
+    hash = hash_token(hash, n->as.func_def.fn_name);
+    hash = hash_datatype(hash, n->as.func_def.ret_type);
+    hash = combine_hash(hash, n->as.func_def.is_extern);
+    hash = combine_hash(hash, n->as.func_def.is_async);
+    hash = combine_hash(hash, n->as.func_def.is_inline);
+    for (AstNode *p = n->as.func_def.params; p; p = p->next)
+      hash = combine_hash(hash, p->node_hash);
+    if (n->as.func_def.block) hash = combine_hash(hash, n->as.func_def.block->node_hash);
+    break;
+  case AST_PARAM:
+    hash = hash_token(hash, n->as.fn_param.id);
+    hash = hash_datatype(hash, n->as.fn_param.type);
+    break;
+  case AST_RET:
+    if (n->as.ret_stmt.expr) hash = combine_hash(hash, n->as.ret_stmt.expr->node_hash);
+    break;
+  case AST_BLOCK:
+  case AST_PROGRAM:
+    for (AstNode *s = n->as.block.first_stmt; s; s = s->next)
+      hash = combine_hash(hash, s->node_hash);
+    break;
+  case AST_FUNC_CALL:
+    if (n->as.func_call.caller) hash = combine_hash(hash, n->as.func_call.caller->node_hash);
+    for (AstNode *a = n->as.func_call.args; a; a = a->next)
+      hash = combine_hash(hash, a->node_hash);
+    break;
+  case AST_INDEX:
+    if (n->as.index.base) hash = combine_hash(hash, n->as.index.base->node_hash);
+    if (n->as.index.index) hash = combine_hash(hash, n->as.index.index->node_hash);
+    break;
+  case AST_MEMBER:
+    hash = hash_token(hash, n->as.member.name);
+    if (n->as.member.base) hash = combine_hash(hash, n->as.member.base->node_hash);
+    break;
+  case AST_SWITCH:
+    if (n->as.switch_stmt.check) hash = combine_hash(hash, n->as.switch_stmt.check->node_hash);
+    for (AstNode *c = n->as.switch_stmt.cases; c; c = c->next)
+      hash = combine_hash(hash, c->node_hash);
+    if (n->as.switch_stmt.default_case)
+      hash = combine_hash(hash, n->as.switch_stmt.default_case->node_hash);
+    break;
+  case AST_CASE:
+    if (n->as.case_stmt.val) hash = combine_hash(hash, n->as.case_stmt.val->node_hash);
+    if (n->as.case_stmt.action) hash = combine_hash(hash, n->as.case_stmt.action->node_hash);
+    break;
+  case AST_EXTERN:
+    for (AstNode *c = n->as.extern_block.contents; c; c = c->next)
+      hash = combine_hash(hash, c->node_hash);
+    break;
+  case AST_USE:
+    hash = hash_token(hash, n->as.use_stmt.path);
+    if (n->as.use_stmt.alias.start)
+      hash = hash_token(hash, n->as.use_stmt.alias);
+    break;
+  case AST_CAST:
+    hash = hash_datatype(hash, n->as.cast.target);
+    if (n->as.cast.op) hash = combine_hash(hash, n->as.cast.op->node_hash);
+    break;
+  case AST_SIZEOF:
+    if (n->as.sizeof_expr.is_type)
+      hash = hash_datatype(hash, n->as.sizeof_expr.target_type);
+    else if (n->as.sizeof_expr.target_expr)
+      hash = combine_hash(hash, n->as.sizeof_expr.target_expr->node_hash);
+    break;
+  case AST_IDENTIF:
+  case AST_NUM_LIT:
+  case AST_STR_LIT:
+  case AST_CHAR_LIT:
+  case AST_BOOL_LIT:
+  case AST_NULL_LIT:
+  case AST_BREAK:
+  case AST_CONTINUE:
+    hash = hash_token(hash, n->as.identif.val);
+    break;
+  default:
+    break;
+  }
+  
+  n->node_hash = hash;
+}
+
+uint32_t compute_node_hash(AstNode *root) {
+  if (!root) return 0;
+
+  AstVisitor visitor = {0};
+  visitor.enter_node = compute_hash_enter;
+  visitor.exit_node  = compute_hash_exit;
+
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
+
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "OOM encountered during hash computation.\n");
+  }
+
   return root->node_hash;
 }
 

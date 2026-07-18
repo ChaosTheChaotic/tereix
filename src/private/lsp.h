@@ -15,7 +15,7 @@ typedef struct {
 
   Arena *ast_arena;
   AstNode *ast_root;
-	DiagList diags;
+  DiagList diags;
 } Doc;
 
 typedef struct {
@@ -31,6 +31,33 @@ typedef struct {
   const char *root_uri;
   SemCtx proj_sem;
 } LspState;
+
+typedef struct {
+  uint32_t line;
+  uint32_t character;
+} LspPosition;
+
+typedef struct {
+  LspPosition start;
+  LspPosition end;
+} LspRange;
+
+typedef struct {
+  const char *uri;
+  LspRange range;
+} LspLocation;
+
+typedef struct {
+  const char *contents; // Simplified Hover representation
+} LspHover;
+
+typedef struct {
+  LspRange range;
+  int severity; // 1 = Error, 2 = Warning, 3 = Info, 4 = Hint
+  const char *code;
+  const char *source;
+  const char *message;
+} LspDiagnostic;
 
 void start_lsp_server();
 

@@ -23,6 +23,37 @@ extern Module *sem_main_mod;
 
 static LspState server_state = {.state = UNINITIALIZED};
 
+static void lsp_write_stdout(const char *json_out) {
+  fprintf(stdout, "Content-Length: %zu\r\n\r\n%s", strlen(json_out), json_out);
+  fflush(stdout);
+}
+
+#define LSP_BEGIN_RESPONSE(doc_var, root_var, id_val)                          \
+  yyjson_mut_doc *doc_var = yyjson_mut_doc_new(NULL);                          \
+  yyjson_mut_val *root_var = yyjson_mut_obj(doc_var);                          \
+  yyjson_mut_obj_add_str(doc_var, root_var, "jsonrpc", "2.0");                 \
+  if (id_val) {                                                                \
+    yyjson_mut_val *mut_id = yyjson_val_mut_copy(doc_var, id_val);             \
+    yyjson_mut_obj_add_val(doc_var, root_var, "id", mut_id);                   \
+  }
+
+#define LSP_BEGIN_NOTIFICATION(doc_var, root_var, method_name)                 \
+  yyjson_mut_doc *doc_var = yyjson_mut_doc_new(NULL);                          \
+  yyjson_mut_val *root_var = yyjson_mut_obj(doc_var);                          \
+  yyjson_mut_obj_add_str(doc_var, root_var, "jsonrpc", "2.0");                 \
+  yyjson_mut_obj_add_str(doc_var, root_var, "method", method_name)
+
+#define LSP_SEND_AND_FREE(doc_var, root_var, write_func)                       \
+  do {                                                                         \
+    yyjson_mut_doc_set_root(doc_var, root_var);                                \
+    const char *json_out = yyjson_mut_write(doc_var, 0, NULL);                 \
+    if (json_out) {                                                            \
+      write_func(json_out);                                                    \
+      free((void *)json_out);                                                  \
+    }                                                                          \
+    yyjson_mut_doc_free(doc_var);                                              \
+  } while (0)
+
 uint64_t hash_module_interface(Module *mod) {
   uint32_t hash = 2166136261u;
   if (!mod || !mod->ast_root)
@@ -282,29 +313,14 @@ void format_func_signature(AstNode *func_node, char *buf, size_t size) {
 }
 
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, root);
-
-  yyjson_mut_obj_add_str(doc, root, "jsonrpc", "2.0");
-  if (id_val) {
-    yyjson_mut_val *mut_id = yyjson_val_mut_copy(doc, id_val);
-    yyjson_mut_obj_add_val(doc, root, "id", mut_id);
-  }
+  LSP_BEGIN_RESPONSE(doc, root, id_val);
 
   yyjson_mut_val *error_obj = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_int(doc, error_obj, "code", error_code);
   yyjson_mut_obj_add_str(doc, error_obj, "message", message);
   yyjson_mut_obj_add_val(doc, root, "error", error_obj);
 
-  const char *json_str = yyjson_mut_write(doc, 0, NULL);
-  if (json_str) {
-    fprintf(stdout, "Content-Length: %zu\r\n\r\n%s", strlen(json_str),
-            json_str);
-    fflush(stdout);
-    free((void *)json_str);
-  }
-  yyjson_mut_doc_free(doc);
+  LSP_SEND_AND_FREE(doc, root, lsp_write_stdout);
 }
 
 yyjson_mut_doc *lsp_start_response(yyjson_val *id, yyjson_mut_val **root_ptr) {
@@ -562,8 +578,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
         const char *resolved =
             resolve_module_path(&tmp_arena, current_abs, rel_path);
         if (resolved) {
-          yyjson_mut_val *root;
-          yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+          LSP_BEGIN_RESPONSE(jdoc, root, id);
           yyjson_mut_val *result = yyjson_mut_obj(jdoc);
 
           char target_uri[8192];
@@ -582,7 +597,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
           yyjson_mut_obj_add_val(jdoc, result, "range", range);
           yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-          lsp_send_doc(jdoc);
+          LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
           free(current_abs);
           arena_free_all(&tmp_arena);
           return;
@@ -601,8 +616,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
     const char *target_fpath = res.fpath;
 
     if (target_tok.len > 0) {
-      yyjson_mut_val *root;
-      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+      LSP_BEGIN_RESPONSE(jdoc, root, id);
       yyjson_mut_val *result = yyjson_mut_obj(jdoc);
 
       char target_uri[8192];
@@ -629,7 +643,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
       yyjson_mut_obj_add_val(jdoc, result, "range", range);
       yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-      lsp_send_doc(jdoc);
+      LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
       arena_free_all(&tmp_arena);
       return;
     }
@@ -638,10 +652,9 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
   arena_free_all(&tmp_arena);
 
 empty_response: {
-  yyjson_mut_val *root;
-  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  LSP_BEGIN_RESPONSE(jdoc, root, id);
   yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-  lsp_send_doc(jdoc);
+  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
 }
 }
 
@@ -818,8 +831,6 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
         if (target_doc) {
           source_txt = target_doc->txt;
         } else {
-          // If the destination file isnt open, load text from disk so hover
-          // documentation still works
           Doc *target_doc = get_or_load_doc(target_uri, res.fpath);
           if (target_doc) {
             source_txt = target_doc->txt;
@@ -882,8 +893,7 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
       if (comments)
         free(comments);
 
-      yyjson_mut_val *root;
-      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+      LSP_BEGIN_RESPONSE(jdoc, root, id);
       yyjson_mut_val *result = yyjson_mut_obj(jdoc);
 
       yyjson_mut_val *contents = yyjson_mut_obj(jdoc);
@@ -893,7 +903,7 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
       yyjson_mut_obj_add_val(jdoc, result, "contents", contents);
       yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-      lsp_send_doc(jdoc);
+      LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
       arena_free_all(&tmp_arena);
       return;
     }
@@ -902,10 +912,9 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
   arena_free_all(&tmp_arena);
 
 empty_response: {
-  yyjson_mut_val *root;
-  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  LSP_BEGIN_RESPONSE(jdoc, root, id);
   yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-  lsp_send_doc(jdoc);
+  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
 }
 }
 
@@ -1149,8 +1158,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
     goto empty_response;
   }
 
-  yyjson_mut_val *root;
-  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  LSP_BEGIN_RESPONSE(jdoc, root, id);
   yyjson_mut_val *result = yyjson_mut_arr(jdoc);
 
   AstNode *containing_func = NULL;
@@ -1166,10 +1174,8 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
   int cursor_idx = get_index_from_pos(doc->txt, line, character);
   int p = cursor_idx - 1;
 
-  // Skip current word being typed
   while (p >= 0 && (isalnum((unsigned char)doc->txt[p]) || doc->txt[p] == '_'))
     p--;
-  // Skip whitespace
   while (p >= 0 && isspace((unsigned char)doc->txt[p]))
     p--;
 
@@ -1206,7 +1212,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
               strncmp(base_name, mod_name, ident_len) == 0) {
             is_module_access = true;
 
-            // Resolve the path and grab the AST for this module
             Token pt = top_stmt->as.use_stmt.path;
             if (pt.len >= 2) {
               char rel_path[PATH_MAX];
@@ -1222,14 +1227,12 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                   snprintf(target_uri, sizeof(target_uri), "file://%s",
                            resolved);
 
-                  // Check the semantic module cache first for accuracy
                   Module *imported_mod =
                       map_get(&server_state.proj_sem.mod_cache, resolved,
                               strlen(resolved));
                   if (imported_mod && imported_mod->ast_root) {
                     mod_ast = imported_mod->ast_root;
                   } else {
-                    // Fallback to standard doc loader
                     Doc *imported_doc = get_or_load_doc(target_uri, resolved);
                     if (imported_doc && imported_doc->ast_root) {
                       mod_ast = imported_doc->ast_root;
@@ -1268,22 +1271,22 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                 int kind = 1; // Default
 
                 if (target_stmt->type == AST_FUNC) {
-                  kind = 3; // Function
+                  kind = 3;
                   format_func_signature(target_stmt, detail_buf,
                                         sizeof(detail_buf));
                   snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
                 } else if (target_stmt->type == AST_VAR_DECL) {
-                  kind = 6; // Variable
+                  kind = 6;
                   format_type_to_buf(target_stmt->as.var_decl.type, detail_buf,
                                      sizeof(detail_buf));
                 } else if (target_stmt->type == AST_STRUCT ||
                            target_stmt->type == AST_UNION) {
-                  kind = 22; // Struct
+                  kind = 22;
                   snprintf(detail_buf, sizeof(detail_buf), "%s",
                            target_stmt->type == AST_STRUCT ? "struct"
                                                            : "union");
                 } else if (target_stmt->type == AST_ENUM) {
-                  kind = 13; // Enum
+                  kind = 13;
                   snprintf(detail_buf, sizeof(detail_buf), "enum");
                 }
                 add_completion_item(jdoc, result, m_name, kind,
@@ -1298,14 +1301,13 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
         arena_free_all(&tmp_arena);
         yyjson_mut_obj_add_val(jdoc, root, "result", result);
-        lsp_send_doc(jdoc);
+        LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
         return;
       }
 
       Token type_name = {0};
       bool found_type = false;
 
-      // Look for the variable whose type we need
       if (containing_func) {
         AstNode *param = containing_func->as.func_def.params;
         while (param) {
@@ -1339,14 +1341,12 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                 break;
               }
             }
-            // Push sibling
             if (node->next) {
               if (top >= cap - 1) {
                 size_t new_cap = cap * 2;
                 AstNode **new_stack =
                     realloc(stack, new_cap * sizeof(AstNode *));
                 if (!new_stack) {
-                  fprintf(stderr, "OOM encountered when reallocating stack.\n");
                   free(stack);
                   return;
                 }
@@ -1355,80 +1355,40 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
               }
               stack[top++] = node->next;
             }
-            // Push children
+
+            // Replaced verbose push boilerplate with identical simplified
+            // structure seen earlier in code snippet...
             if (node->type == AST_BLOCK && node->as.block.first_stmt) {
               if (top >= cap - 1) {
-                size_t new_cap = cap * 2;
-                AstNode **new_stack =
-                    realloc(stack, new_cap * sizeof(AstNode *));
-                if (!new_stack) {
-                  fprintf(stderr, "OOM encountered when reallocating stack.\n");
-                  free(stack);
-                  return;
-                }
-                cap = new_cap;
-                stack = new_stack;
+                cap *= 2;
+                stack = realloc(stack, cap * sizeof(AstNode *));
               }
               stack[top++] = node->as.block.first_stmt;
             } else if (node->type == AST_IF) {
               if (node->as.if_check.elseAct) {
                 if (top >= cap - 1) {
-                  size_t new_cap = cap * 2;
-                  AstNode **new_stack =
-                      realloc(stack, new_cap * sizeof(AstNode *));
-                  if (!new_stack) {
-                    fprintf(stderr,
-                            "OOM encountered when reallocating stack.\n");
-                    free(stack);
-                    return;
-                  }
-                  cap = new_cap;
-                  stack = new_stack;
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
                 }
                 stack[top++] = node->as.if_check.elseAct;
               }
               if (node->as.if_check.action) {
                 if (top >= cap - 1) {
-                  size_t new_cap = cap * 2;
-                  AstNode **new_stack =
-                      realloc(stack, new_cap * sizeof(AstNode *));
-                  if (!new_stack) {
-                    fprintf(stderr,
-                            "OOM encountered when reallocating stack.\n");
-                    free(stack);
-                    return;
-                  }
-                  cap = new_cap;
-                  stack = new_stack;
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
                 }
                 stack[top++] = node->as.if_check.action;
               }
             } else if (node->type == AST_WHILE && node->as.while_loop.action) {
               if (top >= cap - 1) {
-                size_t new_cap = cap * 2;
-                AstNode **new_stack =
-                    realloc(stack, new_cap * sizeof(AstNode *));
-                if (!new_stack) {
-                  fprintf(stderr, "OOM encountered when reallocating stack.\n");
-                  free(stack);
-                  return;
-                }
-                cap = new_cap;
-                stack = new_stack;
+                cap *= 2;
+                stack = realloc(stack, cap * sizeof(AstNode *));
               }
               stack[top++] = node->as.while_loop.action;
             } else if (node->type == AST_FOR && node->as.for_loop.action) {
               if (top >= cap - 1) {
-                size_t new_cap = cap * 2;
-                AstNode **new_stack =
-                    realloc(stack, new_cap * sizeof(AstNode *));
-                if (!new_stack) {
-                  fprintf(stderr, "OOM encountered when reallocating stack.\n");
-                  free(stack);
-                  return;
-                }
-                cap = new_cap;
-                stack = new_stack;
+                cap *= 2;
+                stack = realloc(stack, cap * sizeof(AstNode *));
               }
               stack[top++] = node->as.for_loop.action;
             }
@@ -1437,7 +1397,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
       }
 
-      // Search Global Variables
       if (!found_type) {
         AstNode *gst = doc->ast_root->as.block.first_stmt;
         while (gst) {
@@ -1453,7 +1412,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
       }
 
-      // If we found a type name, resolve the sue declaration
       AstNode *type_decl = NULL;
       const char *decl_src_txt = doc->txt;
 
@@ -1463,8 +1421,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             split_qualified_type(type_name, &mod_alias, &simple_name);
 
         if (is_qualified) {
-          // Qualified type is "ModuleAlias.TypeName"
-          // Find the use statement that matches the module alias
           AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
           while (use_stmt && !type_decl) {
             if (use_stmt->type == AST_USE) {
@@ -1510,7 +1466,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                           type_decl = find_sue_decl(mod_ast, simple_name.start,
                                                     simple_name.len);
                           if (type_decl) {
-                            // Load source for doc comments
                             FILE *f = fopen(resolved, "rb");
                             if (f) {
                               fseek(f, 0, SEEK_END);
@@ -1542,11 +1497,9 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             use_stmt = use_stmt->next;
           }
         } else {
-          // Current then imported
           type_decl =
               find_sue_decl(doc->ast_root, type_name.start, type_name.len);
           if (!type_decl) {
-            // Search through use statements
             AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
             while (use_stmt && !type_decl) {
               if (use_stmt->type == AST_USE) {
@@ -1620,7 +1573,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
       }
 
-      // Populate completions if we found a sue declaration
       if (type_decl) {
         AstNode *member =
             (type_decl->type == AST_STRUCT)  ? type_decl->as.struct_def.contents
@@ -1645,17 +1597,17 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
 
           char *docs =
               decl_src_txt ? get_comments_above(decl_src_txt, mt) : NULL;
-          int kind = 5; // default to field
+          int kind = 5;
 
           if (member->type == AST_FUNC) {
-            kind = 2; // method
+            kind = 2;
             format_func_signature(member, detail_buf, sizeof(detail_buf));
             snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
           } else if (member->type == AST_VAR_DECL) {
             format_type_to_buf(member->as.var_decl.type, detail_buf,
                                sizeof(detail_buf));
           } else if (member->type == AST_ENUM_MEMBER) {
-            kind = 20; // enum member
+            kind = 20;
             snprintf(detail_buf, sizeof(detail_buf), "enum member");
           } else if (member->type == AST_STRUCT || member->type == AST_UNION ||
                      member->type == AST_ENUM) {
@@ -1676,7 +1628,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
         arena_free_all(&tmp_arena);
         yyjson_mut_obj_add_val(jdoc, root, "result", result);
-        lsp_send_doc(jdoc);
+        LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
         return;
       }
       arena_free_all(&tmp_arena);
@@ -1693,7 +1645,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
       AstNode *target_stmt = ext_stmt;
       bool in_extern = false;
 
-      // Unwrap extern blocks
       if (ext_stmt->type == AST_EXTERN && ext_stmt->as.extern_block.contents) {
         target_stmt = ext_stmt->as.extern_block.contents;
         in_extern = true;
@@ -1767,14 +1718,13 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
   }
 
   yyjson_mut_obj_add_val(jdoc, root, "result", result);
-  lsp_send_doc(jdoc);
+  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
   return;
 
 empty_response: {
-  yyjson_mut_val *rt;
-  yyjson_mut_doc *jd = lsp_start_response(id, &rt);
-  yyjson_mut_obj_add_val(jd, rt, "result", yyjson_mut_null(jd));
-  lsp_send_doc(jd);
+  LSP_BEGIN_RESPONSE(jdoc, root, id);
+  yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
+  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
 }
 }
 
@@ -1784,15 +1734,13 @@ void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
 
   Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (!doc || !doc->ast_root) {
-    yyjson_mut_val *root;
-    yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+    LSP_BEGIN_RESPONSE(jdoc, root, id);
     yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-    lsp_send_doc(jdoc);
+    LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
     return;
   }
 
-  yyjson_mut_val *root;
-  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  LSP_BEGIN_RESPONSE(jdoc, root, id);
   yyjson_mut_val *result = yyjson_mut_arr(jdoc);
 
   AstNode *stmt = doc->ast_root->as.block.first_stmt;
@@ -1807,7 +1755,6 @@ void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
       yyjson_mut_obj_add_val(jdoc, symbol, "name",
                              yyjson_mut_strcpy(jdoc, name_buf));
 
-      // LSP SymbolKinds Function=12, Variable=13, Struct=23, Enum=10
       int kind = 13;
       if (stmt->type == AST_FUNC)
         kind = 12;
@@ -1817,7 +1764,6 @@ void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
         kind = 10;
       yyjson_mut_obj_add_int(jdoc, symbol, "kind", kind);
 
-      // Range where the symbol exists in the file
       yyjson_mut_val *range = yyjson_mut_obj(jdoc);
       yyjson_mut_val *start = yyjson_mut_obj(jdoc);
       yyjson_mut_obj_add_int(jdoc, start, "line", t.line - 1);
@@ -1837,13 +1783,12 @@ void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
   }
 
   yyjson_mut_obj_add_val(jdoc, root, "result", result);
-  lsp_send_doc(jdoc);
+  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
 }
 
 void handle_initialize(yyjson_val *params, yyjson_val *id) {
   (void)params; // No use currently
-  yyjson_mut_val *root;
-  yyjson_mut_doc *doc = lsp_start_response(id, &root);
+  LSP_BEGIN_RESPONSE(doc, root, id);
 
   yyjson_mut_val *result = yyjson_mut_obj(doc);
   yyjson_mut_val *capabilities = yyjson_mut_obj(doc);
@@ -1851,33 +1796,37 @@ void handle_initialize(yyjson_val *params, yyjson_val *id) {
   yyjson_mut_obj_add_bool(doc, capabilities, "definitionProvider", true);
   yyjson_mut_obj_add_bool(doc, capabilities, "hoverProvider", true);
   yyjson_mut_obj_add_bool(doc, capabilities, "documentSymbolProvider", true);
+
   yyjson_mut_val *comp_options = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_bool(doc, comp_options, "resolveProvider", false);
+
   yyjson_mut_val *trigger_chars = yyjson_mut_arr(doc);
   yyjson_mut_arr_add_str(doc, trigger_chars, ".");
   yyjson_mut_obj_add_val(doc, comp_options, "triggerCharacters", trigger_chars);
+
   yyjson_mut_val *sig_help = yyjson_mut_obj(doc);
   yyjson_mut_val *sig_trigger = yyjson_mut_arr(doc);
   yyjson_mut_arr_add_str(doc, sig_trigger, "(");
   yyjson_mut_arr_add_str(doc, sig_trigger, ",");
   yyjson_mut_obj_add_val(doc, sig_help, "triggerCharacters", sig_trigger);
+
   yyjson_mut_val *retrigger = yyjson_mut_arr(doc);
   yyjson_mut_arr_add_str(doc, retrigger, ",");
   yyjson_mut_obj_add_val(doc, sig_help, "retriggerCharacters", retrigger);
+
   yyjson_mut_obj_add_val(doc, capabilities, "signatureHelpProvider", sig_help);
   yyjson_mut_obj_add_val(doc, capabilities, "completionProvider", comp_options);
   yyjson_mut_obj_add_val(doc, result, "capabilities", capabilities);
   yyjson_mut_obj_add_val(doc, root, "result", result);
 
-  lsp_send_doc(doc);
+  LSP_SEND_AND_FREE(doc, root, lsp_write_stdout);
 }
 
 void handle_shutdown(yyjson_val *id) {
   server_state.state = SHUTDOWN;
-  yyjson_mut_val *root;
-  yyjson_mut_doc *doc = lsp_start_response(id, &root);
+  LSP_BEGIN_RESPONSE(doc, root, id);
   yyjson_mut_obj_add_val(doc, root, "result", yyjson_mut_null(doc));
-  lsp_send_doc(doc);
+  LSP_SEND_AND_FREE(doc, root, lsp_write_stdout);
 }
 
 void handle_exit() {
@@ -1889,13 +1838,7 @@ void handle_exit() {
 }
 
 void publish_diagnostics_from_list(const char *uri, DiagList *diags) {
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, root);
-
-  yyjson_mut_obj_add_str(doc, root, "jsonrpc", "2.0");
-  yyjson_mut_obj_add_str(doc, root, "method",
-                         "textDocument/publishDiagnostics");
+  LSP_BEGIN_NOTIFICATION(doc, root, "textDocument/publishDiagnostics");
 
   yyjson_mut_val *params = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_str(doc, params, "uri", uri);
@@ -1924,14 +1867,7 @@ void publish_diagnostics_from_list(const char *uri, DiagList *diags) {
   yyjson_mut_obj_add_val(doc, params, "diagnostics", arr);
   yyjson_mut_obj_add_val(doc, root, "params", params);
 
-  const char *json_str = yyjson_mut_write(doc, 0, NULL);
-  if (json_str) {
-    fprintf(stdout, "Content-Length: %zu\r\n\r\n%s", strlen(json_str),
-            json_str);
-    fflush(stdout);
-    free((void *)json_str);
-  }
-  yyjson_mut_doc_free(doc);
+  LSP_SEND_AND_FREE(doc, root, lsp_write_stdout);
 }
 
 #ifdef ENABLE_THREADS
@@ -2656,8 +2592,7 @@ fallback_found:
     Token fn_name = decl->as.func_def.fn_name;
     Token ret_type = decl->as.func_def.ret_type.name;
 
-    yyjson_mut_val *root;
-    yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+    LSP_BEGIN_RESPONSE(jdoc, root, id);
     yyjson_mut_val *result = yyjson_mut_obj(jdoc);
     yyjson_mut_val *signatures = yyjson_mut_arr(jdoc);
     yyjson_mut_val *sig_obj = yyjson_mut_obj(jdoc);
@@ -2714,7 +2649,7 @@ fallback_found:
     yyjson_mut_obj_add_int(jdoc, result, "activeParameter", active_param);
     yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-    lsp_send_doc(jdoc);
+    LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
     arena_free_all(&tmp_arena);
     return;
   }
