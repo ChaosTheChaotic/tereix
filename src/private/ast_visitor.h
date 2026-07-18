@@ -7,7 +7,7 @@
 
 typedef enum {
     VISIT_CONTINUE,
-    VISIT_SKIP_CHILDREN, // Process this node, but dont push children
+    VISIT_SKIP_CHILDREN,
     VISIT_ABORT,
 } VisitResult;
 
@@ -18,6 +18,8 @@ struct AstVisitor {
     jmp_buf *panic_env;
 
     VisitResult (*enter_node)(AstVisitor *visitor, AstNode *node);
+    // step indicates which gap we are at.
+    void (*interleave_node)(AstVisitor *visitor, AstNode *node, int step);
     void (*exit_node)(AstVisitor *visitor, AstNode *node);
 };
 
