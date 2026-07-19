@@ -438,15 +438,11 @@ VisitResult gen_enter(AstVisitor *v, AstNode *n) {
     for (unsigned int i = 0; i < decl_type.array_dimens; i++) {
       sb_append(sb, "[");
       if (decl_type.dim_sizes[i]) {
-        ast_traverse(v, decl_type.dim_sizes[i]); // gen size expr
+        ast_traverse(v, decl_type.dim_sizes[i]);
       }
       sb_append(sb, "]");
     }
-    if (n->as.var_decl.init)
-      decl_type.is_extern = false;
 
-    gen_type(decl_type, sb);
-    sb_append_len(sb, n->as.var_decl.id.start, n->as.var_decl.id.len);
     if (n->as.var_decl.init) {
       sb_append(sb, " = ");
       ast_traverse(v, n->as.var_decl.init);
