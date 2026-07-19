@@ -3,12 +3,12 @@
 #include "ast_types.h"
 #include "ast_visitor.h"
 #include "diag.h"
+#include "fmt.h"
 #include "hashmap.h"
 #include "util.h"
 #include "worklist.h"
 #include <ctype.h>
 #include <dirent.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -203,137 +203,55 @@ void print_comments_between(const char *start, const char *end, FILE *out_fp,
   }
 }
 
-bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
-             const char *source_text) {
-  if (!root) {
-    fprintf(stderr, "No root AST was passed to fmt_ast\n");
-    return false;
-  }
+typedef struct {
+  FILE *out_fp;
+  HashMap *type_set;
+  const char *last_pos;
+  unsigned int depth;
 
-  const char *last_pos = source_text;
+  AstNode **parent_stack;
+  int *interleave_counts;
+  size_t parent_cap;
+  size_t parent_top;
 
-  Arena tmp_arena = {0};
-  HashMap extern_set;
-  map_init(&extern_set, &tmp_arena, 128);
+  bool oom;
+} FmtData;
 
-  size_t ext_cap = 1024;
-  AstNode **ext_stack = malloc(sizeof(AstNode *) * ext_cap);
-  size_t ext_top = 0;
-  ext_stack[ext_top++] = root;
-
-  while (ext_top > 0) {
-    AstNode *n = ext_stack[--ext_top];
-    if (!n)
-      continue;
-
-    if (n->type == AST_EXTERN) {
-      AstNode *curr = n->as.extern_block.contents;
-      while (curr) {
-        if (curr->type == AST_FUNC) {
-          map_set(&extern_set, curr->as.func_def.fn_name.start,
-                  curr->as.func_def.fn_name.len, (void *)(uintptr_t)1);
-        } else if (curr->type == AST_VAR_DECL) {
-          map_set(&extern_set, curr->as.var_decl.id.start,
-                  curr->as.var_decl.id.len, (void *)(uintptr_t)1);
-        } else if (curr->type == AST_STRUCT) {
-          map_set(&extern_set, curr->as.struct_def.structn.start,
-                  curr->as.struct_def.structn.len, (void *)(uintptr_t)1);
-        } else if (curr->type == AST_UNION) {
-          map_set(&extern_set, curr->as.union_def.unionn.start,
-                  curr->as.union_def.unionn.len, (void *)(uintptr_t)1);
-        }
-        curr = curr->next;
-      }
-    } else if (n->type == AST_FUNC && n->as.func_def.is_extern) {
-      map_set(&extern_set, n->as.func_def.fn_name.start,
-              n->as.func_def.fn_name.len, (void *)(uintptr_t)1);
-    } else if (n->type == AST_VAR_DECL && n->as.var_decl.type.is_extern) {
-      map_set(&extern_set, n->as.var_decl.id.start, n->as.var_decl.id.len,
-              (void *)(uintptr_t)1);
-    } else if (n->type == AST_STRUCT && n->as.struct_def.is_extern) {
-      map_set(&extern_set, n->as.struct_def.structn.start,
-              n->as.struct_def.structn.len, (void *)(uintptr_t)1);
-    } else if (n->type == AST_UNION && n->as.union_def.is_extern) {
-      map_set(&extern_set, n->as.union_def.unionn.start,
-              n->as.union_def.unionn.len, (void *)(uintptr_t)1);
-    }
-
-    if (n->next) {
-      if (ext_top >= ext_cap) {
-        size_t new_ext_cap = ext_cap * 2;
-        AstNode **new_ext_stack =
-            realloc(ext_stack, sizeof(AstNode *) * new_ext_cap);
-        if (!new_ext_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating ext_stack.\n");
-          free(ext_stack);
-          return false;
-        }
-        ext_stack = new_ext_stack;
-        ext_cap = new_ext_cap;
-      }
-      ext_stack[ext_top++] = n->next;
-    }
-
-    if (n->type == AST_PROGRAM || n->type == AST_BLOCK) {
-      AstNode *child = n->as.block.first_stmt;
-      if (child) {
-        if (ext_top >= ext_cap) {
-          size_t new_ext_cap = ext_cap * 2;
-          AstNode **new_ext_stack =
-              realloc(ext_stack, sizeof(AstNode *) * new_ext_cap);
-          if (!new_ext_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating ext_stack.\n");
-            free(ext_stack);
-            return false;
-          }
-          ext_stack = new_ext_stack;
-          ext_cap = new_ext_cap;
-        }
-        ext_stack[ext_top++] = child;
-      }
-    }
-  }
-  free(ext_stack);
-
-#define FPRINTF_SAFE(format, ...)                                              \
+#define FPRINTF_SAFE(...)                                                      \
   do {                                                                         \
-    if (fprintf(out_fp, format, __VA_ARGS__) < 0) {                            \
-      fprintf(stderr, "Failed to fully write to file\n");                      \
-      if (ferror(out_fp)) {                                                    \
-        fprintf(stderr, "Error details: %s\n", strerror(errno));               \
-      }                                                                        \
+    if (fprintf(data->out_fp, __VA_ARGS__) < 0) {                              \
       goto err_cleanup;                                                        \
     }                                                                          \
   } while (0)
 
 #define FMT_TYPE_SAFE(t)                                                       \
   do {                                                                         \
-    if (t.is_static)                                                           \
+    if ((t).is_static)                                                         \
       FPRINTF_SAFE("%s", "static ");                                           \
-    if (t.is_threadlocal)                                                      \
+    if ((t).is_threadlocal)                                                    \
       FPRINTF_SAFE("%s", "threadlocal ");                                      \
-    if (t.is_extern)                                                           \
+    if ((t).is_extern)                                                         \
       FPRINTF_SAFE("%s", "extern ");                                           \
-    if (t.is_async)                                                            \
+    if ((t).is_async)                                                          \
       FPRINTF_SAFE("%s", "async ");                                            \
-    if (t.is_inline)                                                           \
+    if ((t).is_inline)                                                         \
       FPRINTF_SAFE("%s", "inline ");                                           \
-    if (t.ptr_depth != 0) {                                                    \
-      char sym = (t.ptr_depth > 0) ? '*' : '&';                                \
-      int cnt = (t.ptr_depth > 0) ? t.ptr_depth : -t.ptr_depth;                \
+    if ((t).ptr_depth != 0) {                                                  \
+      char sym = ((t).ptr_depth > 0) ? '*' : '&';                              \
+      int cnt = ((t).ptr_depth > 0) ? (t).ptr_depth : -(t).ptr_depth;          \
       for (int _i = 0; _i < cnt; _i++)                                         \
         FPRINTF_SAFE("%c", sym);                                               \
     }                                                                          \
-    if (t.is_mut)                                                              \
+    if ((t).is_mut)                                                            \
       FPRINTF_SAFE("%s", "mut ");                                              \
-    if (t.is_self) {                                                           \
+    if ((t).is_self) {                                                         \
       FPRINTF_SAFE("%s", "self");                                              \
-    } else if (t.name.len > 0) {                                               \
-      FPRINTF_SAFE("%.*s", (int)t.name.len, t.name.start);                     \
+    } else if ((t).name.len > 0) {                                             \
+      FPRINTF_SAFE("%.*s", (int)(t).name.len, (t).name.start);                 \
     }                                                                          \
-    for (unsigned int _i = 0; _i < t.array_dimens; _i++) {                     \
-      if (t.dim_sizes && _i < t.array_dimens && t.dim_sizes[_i]) {             \
-        AstNode *dim = t.dim_sizes[_i];                                        \
+    for (unsigned int _i = 0; _i < (t).array_dimens; _i++) {                   \
+      if ((t).dim_sizes && _i < (t).array_dimens && (t).dim_sizes[_i]) {       \
+        AstNode *dim = (t).dim_sizes[_i];                                      \
         if (dim->type == AST_NUM_LIT) {                                        \
           FPRINTF_SAFE("[%.*s]", (int)dim->as.num_lit.val.len,                 \
                        dim->as.num_lit.val.start);                             \
@@ -346,1179 +264,637 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
     }                                                                          \
   } while (0)
 
-  size_t stack_cap = 1024;
-  FmtStackItem *stack = malloc(sizeof(FmtStackItem) * stack_cap);
-  size_t top = 0;
+// Check if a newline or semicolon is needed
+bool is_statement_context(AstNode *node, AstNode *parent) {
+  if (!parent)
+    return true;
+  switch (parent->type) {
+  case AST_PROGRAM:
+  case AST_BLOCK:
+  case AST_EXTERN:
+    return true;
+  case AST_IF:
+    return node == parent->as.if_check.action ||
+           node == parent->as.if_check.elseAct;
+  case AST_WHILE:
+    return node == parent->as.while_loop.action;
+  case AST_FOR:
+    return node == parent->as.for_loop.action;
+  case AST_CASE:
+    return node == parent->as.case_stmt.action;
+  default:
+    return false;
+  }
+}
 
-  stack[top++] = (FmtStackItem){root, 0, 0, NULL};
+// Check if a node does not print its own semicolon
+bool needs_semi(AstNode *stmt) {
+  switch (stmt->type) {
+  case AST_FUNC_CALL:
+  case AST_BINOP:
+  case AST_UOP:
+  case AST_IDENTIF:
+  case AST_NUM_LIT:
+  case AST_STR_LIT:
+  case AST_CHAR_LIT:
+  case AST_BOOL_LIT:
+  case AST_NULL_LIT:
+  case AST_MEMBER:
+  case AST_ARRAY_LIT:
+  case AST_INDEX:
+  case AST_CAST:
+  case AST_SIZEOF:
+    return true;
+  default:
+    return false;
+  }
+}
 
-  while (top > 0) {
-    FmtStackItem *item = &stack[top - 1];
-    AstNode *node = item->node;
+VisitResult fmt_enter_node(AstVisitor *visitor, AstNode *node) {
+  FmtData *data = (FmtData *)visitor->user_data;
 
-    if (!node) {
-      top--;
-      continue;
-    }
+  if (node->src_start && data->last_pos < node->src_start) {
+    print_comments_between(data->last_pos, node->src_start, data->out_fp,
+                           data->depth);
+    data->last_pos = node->src_start;
+  }
 
-    if (item->step == 0 && node->src_start && last_pos < node->src_start) {
-      print_comments_between(last_pos, node->src_start, out_fp, item->depth);
-      last_pos = node->src_start;
-    }
+  AstNode *parent =
+      data->parent_top > 0 ? data->parent_stack[data->parent_top - 1] : NULL;
 
-    size_t old_top = top;
+  // Track stack
+  if (data->parent_top >= data->parent_cap) {
+    data->parent_cap = data->parent_cap == 0 ? 128 : data->parent_cap * 2;
+    data->parent_stack =
+        realloc(data->parent_stack, data->parent_cap * sizeof(AstNode *));
+    data->interleave_counts =
+        realloc(data->interleave_counts, data->parent_cap * sizeof(int));
+  }
+  data->parent_stack[data->parent_top] = node;
+  data->interleave_counts[data->parent_top] = 0;
+  data->parent_top++;
 
-    switch (node->type) {
-    case AST_PROGRAM:
-    case AST_BLOCK:
-    case AST_EXTERN: {
-      if (item->step == 0) {
-        if (node->type == AST_BLOCK) {
-          FPRINTF_SAFE("%s", "{\n");
-        } else if (node->type == AST_EXTERN) {
-          FPRINTF_SAFE("%s", "extern {\n");
-        }
-        item->aux = (node->type == AST_EXTERN) ? node->as.extern_block.contents
-                                               : node->as.block.first_stmt;
-        item->step = 1;
-      } else if (item->step == 1) {
-        if (item->aux) {
-          AstNode *stmt = item->aux;
-          item->aux = stmt->next;
+  // Base indentation
+  if (parent) {
+    bool indent = false;
+    if (parent->type == AST_PROGRAM || parent->type == AST_BLOCK ||
+        parent->type == AST_EXTERN)
+      indent = true;
+    else if (parent->type == AST_STRUCT || parent->type == AST_UNION ||
+             parent->type == AST_ENUM)
+      indent = true;
+    else if (parent->type == AST_SWITCH &&
+             (node->type == AST_CASE ||
+              node == parent->as.switch_stmt.default_case))
+      indent = true;
 
-          unsigned int next_depth =
-              item->depth + (node->type == AST_PROGRAM ? 0 : 1);
-
-          if (stmt->src_start && last_pos < stmt->src_start) {
-            print_comments_between(last_pos, stmt->src_start, out_fp,
-                                   next_depth);
-            last_pos = stmt->src_start;
-          }
-
-          // Print indentation for the statement itself
-          for (unsigned int i = 0; i < next_depth; i++) {
-            FPRINTF_SAFE("%c", '\t');
-          }
-
-          // Determine if the statement needs a semicolon later
-          bool needs_semi =
-              (stmt->type == AST_FUNC_CALL || stmt->type == AST_BINOP ||
-               stmt->type == AST_UOP || stmt->type == AST_IDENTIF ||
-               stmt->type == AST_NUM_LIT || stmt->type == AST_STR_LIT ||
-               stmt->type == AST_CHAR_LIT || stmt->type == AST_BOOL_LIT ||
-               stmt->type == AST_NULL_LIT || stmt->type == AST_MEMBER ||
-               stmt->type == AST_ARRAY_LIT || stmt->type == AST_INDEX ||
-               stmt->type == AST_CAST || stmt->type == AST_SIZEOF);
-
-          bool is_block = (stmt->type == AST_BLOCK);
-
-          if (needs_semi)
-            item->step = 2;
-          else if (is_block)
-            item->step = 3;
-          else
-            item->step = 5;
-
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] = (FmtStackItem){stmt, next_depth, 0, NULL};
-        } else {
-          item->step = 4;
-        }
-      } else if (item->step == 2 || item->step == 3 || item->step == 5) {
-        if (item->step == 2)
-          FPRINTF_SAFE("%s", ";\n");
-        else if (item->step == 3)
-          FPRINTF_SAFE("%s", "\n");
-        item->step = 1;
-      } else if (item->step == 4) {
-        if (node->type == AST_BLOCK || node->type == AST_EXTERN) {
-          for (unsigned int i = 0; i < item->depth; i++)
-            FPRINTF_SAFE("%c", '\t');
-          FPRINTF_SAFE("%s", "}");
-          // Blocks do not print \n so IF/WHILE/FOR can control trailing flow
-          if (node->type == AST_EXTERN)
-            FPRINTF_SAFE("%s", "\n\n");
-        }
-        top--;
-      }
-      break;
-    }
-
-    case AST_FUNC: {
-      if (item->step == 0) {
-        FMT_TYPE_SAFE(node->as.func_def.ret_type);
-        FPRINTF_SAFE("%s", " ");
-        FPRINTF_SAFE("%.*s(", (int)node->as.func_def.fn_name.len,
-                     node->as.func_def.fn_name.start);
-
-        AstNode *param = node->as.func_def.params;
-        while (param) {
-          FMT_TYPE_SAFE(param->as.fn_param.type);
-
-          bool is_implicit_self =
-              param->as.fn_param.type.is_self &&
-              param->as.fn_param.id.len == 4 &&
-              strncmp(param->as.fn_param.id.start, "self", 4) == 0;
-
-          if (!is_implicit_self) {
-            FPRINTF_SAFE("%s", " ");
-            FPRINTF_SAFE("%.*s", (int)param->as.fn_param.id.len,
-                         param->as.fn_param.id.start);
-          }
-
-          if (param->next)
-            FPRINTF_SAFE("%s", ", ");
-          param = param->next;
-        }
-        FPRINTF_SAFE("%s", ")");
-        if (node->as.func_def.block) {
-          item->step = 1;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.func_def.block, item->depth, 0, NULL};
-          FPRINTF_SAFE("%s", " ");
-        } else {
-          FPRINTF_SAFE("%s", ";\n");
-          top--;
-        }
-      } else {
-        FPRINTF_SAFE("%s", "\n"); // block ended without \n
-        if (node->next)
-          FPRINTF_SAFE("%s", "\n");
-
-        top--;
-      }
-      break;
-    }
-
-    case AST_VAR_DECL: {
-      bool is_global_or_sue = false;
-      if (top >= 2) {
-        AstNode *parent = stack[top - 2].node;
-        if (parent->type == AST_PROGRAM || parent->type == AST_STRUCT ||
-            parent->type == AST_UNION || parent->type == AST_EXTERN) {
-          is_global_or_sue = true;
-        }
-      } else {
-        is_global_or_sue = true;
-      }
-
-      bool extra_newline = false;
-      if (!item->aux) {
-        if (is_global_or_sue) {
-          if (node->next && node->next->type != AST_VAR_DECL) {
-            extra_newline = true;
-          }
-        } else {
-          if (node->next && node->src_end && node->next->src_start) {
-            int nl_count = 0;
-            for (const char *p = node->src_end; p < node->next->src_start;
-                 p++) {
-              if (*p == '\n')
-                nl_count++;
-            }
-            if (nl_count >= 2) {
-              extra_newline = true;
-            }
-          }
-        }
-      }
-
-      if (item->step == 0) {
-        FMT_TYPE_SAFE(node->as.var_decl.type);
-        FPRINTF_SAFE("%s", " ");
-        FPRINTF_SAFE("%.*s", (int)node->as.var_decl.id.len,
-                     node->as.var_decl.id.start);
-
-        if (node->as.var_decl.init) {
-          FPRINTF_SAFE("%s", " = ");
-          item->step = 1;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.var_decl.init, item->depth, 0, NULL};
-        } else {
-          FPRINTF_SAFE("%s", item->aux ? "; " : ";\n");
-          if (extra_newline)
-            FPRINTF_SAFE("%s", "\n");
-          top--;
-        }
-      } else {
-        FPRINTF_SAFE("%s", item->aux ? "; " : ";\n");
-        if (extra_newline)
-          FPRINTF_SAFE("%s", "\n");
-        top--;
-      }
-      break;
-    }
-
-    case AST_STRUCT:
-    case AST_UNION:
-    case AST_ENUM: {
-      if (item->step == 0) {
-        const char *kw = (node->type == AST_STRUCT)  ? "struct"
-                         : (node->type == AST_UNION) ? "union"
-                                                     : "enum";
-        Token name_tok = (node->type == AST_STRUCT)
-                             ? node->as.struct_def.structn
-                         : (node->type == AST_UNION) ? node->as.union_def.unionn
-                                                     : node->as.enum_def.enumn;
-
-        bool is_decl_only = false;
-        if (node->src_end && node->src_end > node->src_start) {
-          if (*(node->src_end - 1) == ';') {
-            is_decl_only = true;
-          }
-        }
-
-        bool is_extern_node = false;
-        if (node->type == AST_STRUCT && node->as.struct_def.is_extern)
-          is_extern_node = true;
-        if (node->type == AST_UNION && node->as.union_def.is_extern)
-          is_extern_node = true;
-
-        if (is_extern_node) {
-          FPRINTF_SAFE("%s", "extern ");
-        }
-
-        FPRINTF_SAFE("%s ", kw);
-        if (is_decl_only) {
-          FPRINTF_SAFE("%.*s;\n\n", (int)name_tok.len, name_tok.start);
-          top--;
-          break;
-        }
-
-        FPRINTF_SAFE("%.*s {\n", (int)name_tok.len, name_tok.start);
-
-        item->aux = (node->type == AST_STRUCT)  ? node->as.struct_def.contents
-                    : (node->type == AST_UNION) ? node->as.union_def.contents
-                                                : node->as.enum_def.contents;
-        item->step = 1;
-      } else if (item->step == 1) {
-        if (item->aux) {
-          AstNode *mem = item->aux;
-          item->aux = mem->next;
-          for (unsigned int i = 0; i < item->depth + 1; i++)
-            FPRINTF_SAFE("%c", '\t');
-
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] = (FmtStackItem){mem, item->depth + 1, 0, NULL};
-        } else {
-          item->step = 2;
-        }
-      } else {
-        for (unsigned int i = 0; i < item->depth; i++)
-          FPRINTF_SAFE("%c", '\t');
-        FPRINTF_SAFE("%s", "}\n\n");
-        top--;
-      }
-      break;
-    }
-
-    case AST_FUNC_CALL: {
-      if (item->step == 0) {
-        if (node->as.func_call.caller->type == AST_IDENTIF) {
-          Token ident = node->as.func_call.caller->as.identif.val;
-          FPRINTF_SAFE("%.*s(", (int)ident.len, ident.start);
-          item->step = 2;
-        } else {
-          item->step = 1;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.func_call.caller, item->depth, 0, NULL};
-        }
-      } else if (item->step == 1) {
-        FPRINTF_SAFE("%s", "(");
-        item->step = 2;
-      } else if (item->step == 2) {
-        item->aux = node->as.func_call.args;
-        item->step = 3;
-      } else if (item->step == 3) {
-        if (item->aux) {
-          AstNode *arg = item->aux;
-          item->aux = arg->next;
-          item->step = item->aux ? 4 : 5;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] = (FmtStackItem){arg, item->depth, 0, NULL};
-        } else {
-          FPRINTF_SAFE("%s", ")");
-          top--;
-        }
-      } else if (item->step == 4) {
-        FPRINTF_SAFE("%s", ", ");
-        item->step = 3;
-      } else if (item->step == 5) {
-        FPRINTF_SAFE("%s", ")");
-        top--;
-      }
-      break;
-    }
-
-    case AST_IDENTIF: {
-      Token ident = node->as.identif.val;
-      FPRINTF_SAFE("%.*s", (int)ident.len, ident.start);
-      top--;
-      break;
-    }
-
-    case AST_BINOP: {
-      if (item->step == 0) {
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.binop.left, item->depth, 0, NULL};
-      } else if (item->step == 1) {
-        FPRINTF_SAFE(" %.*s ", node->as.binop.op.len, node->as.binop.op.start);
-        item->step = 2;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.binop.right, item->depth, 0, NULL};
-      } else {
-        top--;
-      }
-      break;
-    }
-
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF: {
-      if (item->step == 0) {
-        if (!node->as.unop.is_postfix) {
-          FPRINTF_SAFE("%.*s", node->as.unop.op.len, node->as.unop.op.start);
-        }
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.unop.operand, item->depth, 0, NULL};
-      } else {
-        if (node->as.unop.is_postfix) {
-          FPRINTF_SAFE("%.*s", node->as.unop.op.len, node->as.unop.op.start);
-        }
-        top--;
-      }
-      break;
-    }
-
-    case AST_IF: {
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "if (");
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.if_check.check, item->depth, 0, NULL};
-      } else if (item->step == 1) {
-        FPRINTF_SAFE("%s", ") ");
-        item->step = 2;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.if_check.action, item->depth, 0, NULL};
-      } else if (item->step == 2) {
-        if (node->as.if_check.action->type != AST_BLOCK)
-          FPRINTF_SAFE("%s", ";\n");
-        if (node->as.if_check.elseAct) {
-          if (node->as.if_check.action->type == AST_BLOCK) {
-            FPRINTF_SAFE("%s", " ");
-          } else {
-            for (unsigned int i = 0; i < item->depth; i++)
-              FPRINTF_SAFE("%c", '\t');
-          }
-          FPRINTF_SAFE("%s", "else ");
-          item->step = 3;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.if_check.elseAct, item->depth, 0, NULL};
-        } else {
-          if (node->as.if_check.action->type == AST_BLOCK)
-            FPRINTF_SAFE("%s", "\n");
-          top--;
-        }
-      } else {
-        if (node->as.if_check.elseAct->type == AST_BLOCK)
-          FPRINTF_SAFE("%s", "\n");
-        else
-          FPRINTF_SAFE("%s", ";\n");
-        top--;
-      }
-      break;
-    }
-
-    case AST_NUM_LIT:
-      FPRINTF_SAFE("%.*s", node->as.num_lit.val.len,
-                   node->as.num_lit.val.start);
-      top--;
-      break;
-
-    case AST_STR_LIT:
-      FPRINTF_SAFE("%.*s", node->as.str_lit.val.len,
-                   node->as.str_lit.val.start);
-      top--;
-      break;
-
-    case AST_CHAR_LIT:
-      FPRINTF_SAFE("%.*s", node->as.char_lit.val.len,
-                   node->as.char_lit.val.start);
-      top--;
-      break;
-
-    case AST_BOOL_LIT:
-      FPRINTF_SAFE("%.*s", node->as.bool_lit.val.len,
-                   node->as.bool_lit.val.start);
-      top--;
-      break;
-
-    case AST_NULL_LIT:
-      FPRINTF_SAFE("%s", "null");
-      top--;
-      break;
-
-    case AST_RET: {
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "ret");
-        if (node->as.ret_stmt.expr) {
-          FPRINTF_SAFE("%s", " ");
-          item->step = 1;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.ret_stmt.expr, item->depth, 0, NULL};
-        } else {
-          FPRINTF_SAFE("%s", ";\n");
-          top--;
-        }
-      } else {
-        FPRINTF_SAFE("%s", ";\n");
-        top--;
-      }
-      break;
-    }
-
-    case AST_ARRAY_LIT:
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "[");
-        item->aux = node->as.array_lit.elements;
-        item->step = 1;
-      } else if (item->step == 1) {
-        if (item->aux) {
-          AstNode *elem = item->aux;
-          item->aux = item->aux->next;
-          item->step = (item->aux != NULL) ? 2 : 3;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] = (FmtStackItem){elem, item->depth, 0, NULL};
-        } else {
-          FPRINTF_SAFE("%s", "]");
-          top--;
-        }
-      } else if (item->step == 2) {
-        FPRINTF_SAFE("%s", ", ");
-        item->step = 1;
-      } else {
-        FPRINTF_SAFE("%s", "]");
-        top--;
-      }
-      break;
-
-    case AST_ENUM_MEMBER:
-      if (item->step == 0) {
-        FPRINTF_SAFE("%.*s", (int)node->as.enum_member.name.len,
-                     node->as.enum_member.name.start);
-        if (node->as.enum_member.val) {
-          FPRINTF_SAFE("%s", " = ");
-          item->step = 1;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.enum_member.val, item->depth, 0, NULL};
-        } else {
-          FPRINTF_SAFE("%s", ",\n");
-          top--;
-        }
-      } else {
-        FPRINTF_SAFE("%s", ",\n");
-        top--;
-      }
-      break;
-
-    case AST_DEFER:
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "defer ");
-        item->step = 1;
-        if (node->as.defer_stmt.contents) {
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] = (FmtStackItem){node->as.defer_stmt.contents,
-                                        item->depth, 0, NULL};
-        } else {
-          FPRINTF_SAFE("%s", ";\n");
-          top--;
-        }
-      } else {
-        if (node->as.defer_stmt.contents &&
-            node->as.defer_stmt.contents->type == AST_BLOCK) {
-          FPRINTF_SAFE("%s", "\n");
-        } else {
-          FPRINTF_SAFE("%s", ";\n");
-        }
-        top--;
-      }
-      break;
-
-    case AST_FOR:
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "for (");
-        item->step = 1;
-        if (node->as.for_loop.init) {
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.for_loop.init, item->depth, 0, (void *)1};
-        }
-      } else if (item->step == 1) {
-        if (!node->as.for_loop.init ||
-            node->as.for_loop.init->type != AST_VAR_DECL)
-          FPRINTF_SAFE("%s", "; ");
-        item->step = 2;
-        if (node->as.for_loop.check) {
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.for_loop.check, item->depth, 0, NULL};
-        }
-      } else if (item->step == 2) {
-        FPRINTF_SAFE("%s", "; ");
-        item->step = 3;
-        if (node->as.for_loop.inc) {
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.for_loop.inc, item->depth, 0, NULL};
-        }
-      } else if (item->step == 3) {
-        FPRINTF_SAFE("%s", ") ");
-        item->step = 4;
-        if (node->as.for_loop.action) {
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.for_loop.action, item->depth, 0, NULL};
-        }
-      } else {
-        if (node->as.for_loop.action->type == AST_BLOCK)
-          FPRINTF_SAFE("%s", "\n");
-        else
-          FPRINTF_SAFE("%s", ";\n");
-        top--;
-      }
-      break;
-
-    case AST_WHILE:
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "while (");
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.while_loop.check, item->depth, 0, NULL};
-      } else if (item->step == 1) {
-        FPRINTF_SAFE("%s", ") ");
-        item->step = 2;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.while_loop.action, item->depth, 0, NULL};
-      } else {
-        if (node->as.while_loop.action->type == AST_BLOCK)
-          FPRINTF_SAFE("%s", "\n");
-        else
-          FPRINTF_SAFE("%s", ";\n");
-        top--;
-      }
-      break;
-
-    case AST_INDEX:
-      if (item->step == 0) {
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.index.base, item->depth, 0, NULL};
-      } else if (item->step == 1) {
-        FPRINTF_SAFE("%s", "[");
-        item->step = 2;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.index.index, item->depth, 0, NULL};
-      } else {
-        FPRINTF_SAFE("%s", "]");
-        top--;
-      }
-      break;
-
-    case AST_MEMBER:
-      if (item->step == 0) {
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.member.base, item->depth, 0, NULL};
-      } else {
-        FPRINTF_SAFE("%s", ".");
-        FPRINTF_SAFE("%.*s", (int)node->as.member.name.len,
-                     node->as.member.name.start);
-        top--;
-      }
-      break;
-
-    case AST_SWITCH:
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "switch (");
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.switch_stmt.check, item->depth, 0, NULL};
-      } else if (item->step == 1) {
-        FPRINTF_SAFE("%s", ") {\n");
-        item->aux = node->as.switch_stmt.cases;
-        item->step = 2;
-      } else if (item->step == 2) {
-        if (item->aux) {
-          AstNode *c = item->aux;
-          item->aux = c->next;
-          for (unsigned int i = 0; i < item->depth + 1; i++)
-            FPRINTF_SAFE("%c", '\t');
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] = (FmtStackItem){c, item->depth + 1, 0, NULL};
-        } else if (node->as.switch_stmt.default_case) {
-          for (unsigned int i = 0; i < item->depth + 1; i++)
-            FPRINTF_SAFE("%c", '\t');
-          FPRINTF_SAFE("%s", "default ");
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] = (FmtStackItem){node->as.switch_stmt.default_case,
-                                        item->depth + 1, 0, NULL};
-          item->step = 3;
-        } else {
-          for (unsigned int i = 0; i < item->depth; i++)
-            FPRINTF_SAFE("%c", '\t');
-          FPRINTF_SAFE("%s", "}\n");
-          top--;
-        }
-      } else if (item->step == 3) {
-        FPRINTF_SAFE("%s", "\n");
-        for (unsigned int i = 0; i < item->depth; i++)
-          FPRINTF_SAFE("%c", '\t');
-        FPRINTF_SAFE("%s", "}\n");
-        top--;
-      }
-      break;
-
-    case AST_CASE:
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "case (");
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] =
-            (FmtStackItem){node->as.case_stmt.val, item->depth, 0, NULL};
-      } else if (item->step == 1) {
-        FPRINTF_SAFE("%s", ") ");
-        item->step = 2;
-        if (node->as.case_stmt.action) {
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] =
-              (FmtStackItem){node->as.case_stmt.action, item->depth, 0, NULL};
-        }
-      } else if (item->step == 2) {
-        if (node->as.case_stmt.action &&
-            node->as.case_stmt.action->type == AST_BLOCK)
-          FPRINTF_SAFE("%s", "\n");
-        else
-          FPRINTF_SAFE("%s", ";\n");
-        top--;
-      }
-      break;
-
-    case AST_USE:
-      FPRINTF_SAFE("%s", "use ");
-      FPRINTF_SAFE("%.*s", (int)node->as.use_stmt.path.len,
-                   node->as.use_stmt.path.start);
-      if (node->as.use_stmt.alias.len > 0) {
-        FPRINTF_SAFE("%s", " as ");
-        FPRINTF_SAFE("%.*s", (int)node->as.use_stmt.alias.len,
-                     node->as.use_stmt.alias.start);
-      }
-      FPRINTF_SAFE("%s", ";\n");
-
-      if (node->next && node->next->type != AST_USE) {
-        FPRINTF_SAFE("%s", "\n");
-      }
-      top--;
-      break;
-
-    case AST_BREAK:
-      FPRINTF_SAFE("%s", "break;\n");
-      top--;
-      break;
-
-    case AST_CONTINUE:
-      FPRINTF_SAFE("%s", "continue;\n");
-      top--;
-      break;
-
-    case AST_CAST:
-      if (item->step == 0) {
-        FPRINTF_SAFE("%s", "(");
-        if (node->as.cast.target.is_self) {
-          FPRINTF_SAFE("%s", "self");
-        } else {
-          FPRINTF_SAFE("%.*s", (int)node->as.cast.target.name.len,
-                       node->as.cast.target.name.start);
-        }
-        FPRINTF_SAFE("%s", ")");
-        item->step = 1;
-        if (top >= stack_cap) {
-          size_t new_stack_cap = stack_cap * 2;
-          FmtStackItem *new_stack =
-              realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return false;
-          }
-          stack = new_stack;
-          stack_cap = new_stack_cap;
-          item = &stack[top - 1];
-        }
-        stack[top++] = (FmtStackItem){node->as.cast.op, item->depth, 0, NULL};
-      } else {
-        top--;
-      }
-      break;
-
-    case AST_SIZEOF:
-      if (item->step == 0) {
-        if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr &&
-            node->as.sizeof_expr.target_expr->type == AST_CAST) {
-          AstNode *cast = node->as.sizeof_expr.target_expr;
-          AstNode *op = cast->as.cast.op;
-
-          if (op && op->type == AST_IDENTIF &&
-              map_get(type_set, op->as.identif.val.start,
-                      op->as.identif.val.len) != NULL) {
-            FPRINTF_SAFE("%s", "(");
-            FMT_TYPE_SAFE(cast->as.cast.target);
-            FPRINTF_SAFE("%s", ")");
-            FPRINTF_SAFE("%s", "sizeof(");
-            FPRINTF_SAFE("%.*s", (int)op->as.identif.val.len,
-                         op->as.identif.val.start);
-            FPRINTF_SAFE("%s", ")");
-            top--;
-            break;
-          }
-        }
-        FPRINTF_SAFE("%s", "sizeof(");
-        if (node->as.sizeof_expr.is_type) {
-          if (node->as.sizeof_expr.target_type.is_self) {
-            FPRINTF_SAFE("%s", "self");
-          } else {
-            FPRINTF_SAFE("%.*s", (int)node->as.sizeof_expr.target_type.name.len,
-                         node->as.sizeof_expr.target_type.name.start);
-          }
-          FPRINTF_SAFE("%s", ")");
-          top--;
-        } else {
-          item->step = 1;
-          if (top >= stack_cap) {
-            size_t new_stack_cap = stack_cap * 2;
-            FmtStackItem *new_stack =
-                realloc(stack, sizeof(FmtStackItem) * new_stack_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return false;
-            }
-            stack = new_stack;
-            stack_cap = new_stack_cap;
-            item = &stack[top - 1];
-          }
-          stack[top++] = (FmtStackItem){node->as.sizeof_expr.target_expr,
-                                        item->depth, 0, NULL};
-        }
-      } else if (item->step == 1) {
-        FPRINTF_SAFE("%s", ")");
-        top--;
-      }
-      break;
-    case AST_PARAM:
-      break;
-    case AST_ERROR:
-      break;
-    }
-    if (top < old_top) {
-      if (node->src_end && node->src_end > last_pos) {
-        last_pos = node->src_end;
-      }
+    if (indent) {
+      for (unsigned int i = 0; i < data->depth; i++)
+        FPRINTF_SAFE("%c", '\t');
     }
   }
 
-  if (last_pos) {
-    size_t remain = strlen(last_pos);
-    print_comments_between(last_pos, last_pos + remain, out_fp, 0);
+  switch (node->type) {
+  case AST_BLOCK:
+    if (parent && (parent->type == AST_FUNC || parent->type == AST_IF ||
+                   parent->type == AST_WHILE || parent->type == AST_FOR ||
+                   parent->type == AST_CASE || parent->type == AST_DEFER)) {
+      if (parent->type == AST_FUNC)
+        FPRINTF_SAFE(") ");
+      else
+        FPRINTF_SAFE(" ");
+    }
+    if (parent && parent->type == AST_SWITCH &&
+        node == parent->as.switch_stmt.default_case) {
+      FPRINTF_SAFE("default ");
+    }
+    FPRINTF_SAFE("{\n");
+    data->depth++;
+    break;
+  case AST_EXTERN:
+    FPRINTF_SAFE("extern {\n");
+    data->depth++;
+    break;
+  case AST_FUNC:
+    FMT_TYPE_SAFE(node->as.func_def.ret_type);
+    FPRINTF_SAFE(" %.*s(", (int)node->as.func_def.fn_name.len,
+                 node->as.func_def.fn_name.start);
+    break;
+  case AST_PARAM: {
+    FMT_TYPE_SAFE(node->as.fn_param.type);
+    bool is_implicit_self = node->as.fn_param.type.is_self &&
+                            node->as.fn_param.id.len == 4 &&
+                            strncmp(node->as.fn_param.id.start, "self", 4) == 0;
+    if (!is_implicit_self)
+      FPRINTF_SAFE(" %.*s", (int)node->as.fn_param.id.len,
+                   node->as.fn_param.id.start);
+    break;
+  }
+  case AST_VAR_DECL:
+    FMT_TYPE_SAFE(node->as.var_decl.type);
+    FPRINTF_SAFE(" %.*s", (int)node->as.var_decl.id.len,
+                 node->as.var_decl.id.start);
+    if (node->as.var_decl.init)
+      FPRINTF_SAFE(" = ");
+    break;
+  case AST_STRUCT:
+  case AST_UNION:
+  case AST_ENUM: {
+    const char *kw = (node->type == AST_STRUCT)  ? "struct"
+                     : (node->type == AST_UNION) ? "union"
+                                                 : "enum";
+    Token name_tok = (node->type == AST_STRUCT)  ? node->as.struct_def.structn
+                     : (node->type == AST_UNION) ? node->as.union_def.unionn
+                                                 : node->as.enum_def.enumn;
+    bool is_decl_only = false;
+
+    if (node->src_end && node->src_end > node->src_start &&
+        *(node->src_end - 1) == ';') {
+      is_decl_only = true;
+    }
+
+    bool is_extern_node =
+        (node->type == AST_STRUCT && node->as.struct_def.is_extern) ||
+        (node->type == AST_UNION && node->as.union_def.is_extern);
+    if (is_extern_node)
+      FPRINTF_SAFE("extern ");
+    FPRINTF_SAFE("%s ", kw);
+
+    if (is_decl_only) {
+      FPRINTF_SAFE("%.*s;\n\n", (int)name_tok.len, name_tok.start);
+      return VISIT_SKIP_CHILDREN;
+    } else {
+      FPRINTF_SAFE("%.*s {\n", (int)name_tok.len, name_tok.start);
+      data->depth++;
+    }
+    break;
+  }
+  case AST_IDENTIF:
+    FPRINTF_SAFE("%.*s", (int)node->as.identif.val.len,
+                 node->as.identif.val.start);
+    break;
+  case AST_UOP:
+  case AST_ADDR_OF:
+  case AST_DEREF:
+    if (!node->as.unop.is_postfix)
+      FPRINTF_SAFE("%.*s", node->as.unop.op.len, node->as.unop.op.start);
+    break;
+  case AST_IF:
+    FPRINTF_SAFE("if (");
+    break;
+  case AST_NUM_LIT:
+    FPRINTF_SAFE("%.*s", node->as.num_lit.val.len, node->as.num_lit.val.start);
+    break;
+  case AST_STR_LIT:
+    FPRINTF_SAFE("%.*s", node->as.str_lit.val.len, node->as.str_lit.val.start);
+    break;
+  case AST_CHAR_LIT:
+    FPRINTF_SAFE("%.*s", node->as.char_lit.val.len,
+                 node->as.char_lit.val.start);
+    break;
+  case AST_BOOL_LIT:
+    FPRINTF_SAFE("%.*s", node->as.bool_lit.val.len,
+                 node->as.bool_lit.val.start);
+    break;
+  case AST_NULL_LIT:
+    FPRINTF_SAFE("null");
+    break;
+  case AST_RET:
+    FPRINTF_SAFE("ret");
+    if (node->as.ret_stmt.expr)
+      FPRINTF_SAFE(" ");
+    break;
+  case AST_ARRAY_LIT:
+    FPRINTF_SAFE("[");
+    break;
+  case AST_ENUM_MEMBER:
+    FPRINTF_SAFE("%.*s", (int)node->as.enum_member.name.len,
+                 node->as.enum_member.name.start);
+    if (node->as.enum_member.val)
+      FPRINTF_SAFE(" = ");
+    break;
+  case AST_DEFER:
+    if (node->as.defer_stmt.contents &&
+        node->as.defer_stmt.contents->type == AST_BLOCK)
+      FPRINTF_SAFE("defer");
+    else
+      FPRINTF_SAFE("defer ");
+    break;
+  case AST_FOR:
+    FPRINTF_SAFE("for (");
+    break;
+  case AST_WHILE:
+    FPRINTF_SAFE("while (");
+    break;
+  case AST_SWITCH:
+    FPRINTF_SAFE("switch (");
+    break;
+  case AST_CASE:
+    if (node->as.case_stmt.val == NULL) {
+      FPRINTF_SAFE("default");
+    } else {
+      FPRINTF_SAFE("case (");
+    }
+    break;
+  case AST_USE:
+    FPRINTF_SAFE("use %.*s", (int)node->as.use_stmt.path.len,
+                 node->as.use_stmt.path.start);
+    if (node->as.use_stmt.alias.len > 0)
+      FPRINTF_SAFE(" as %.*s", (int)node->as.use_stmt.alias.len,
+                   node->as.use_stmt.alias.start);
+    FPRINTF_SAFE(";\n");
+    if (node->next && node->next->type != AST_USE)
+      FPRINTF_SAFE("\n");
+    break;
+  case AST_BREAK:
+    FPRINTF_SAFE("break;\n");
+    break;
+  case AST_CONTINUE:
+    FPRINTF_SAFE("continue;\n");
+    break;
+  case AST_CAST:
+    FPRINTF_SAFE("(");
+    if (node->as.cast.target.is_self)
+      FPRINTF_SAFE("self");
+    else
+      FPRINTF_SAFE("%.*s", (int)node->as.cast.target.name.len,
+                   node->as.cast.target.name.start);
+    FPRINTF_SAFE(")");
+    break;
+  case AST_SIZEOF:
+    if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr &&
+        node->as.sizeof_expr.target_expr->type == AST_CAST) {
+      AstNode *cast = node->as.sizeof_expr.target_expr;
+      AstNode *op = cast->as.cast.op;
+      if (op && op->type == AST_IDENTIF &&
+          map_get(data->type_set, op->as.identif.val.start,
+                  op->as.identif.val.len) != NULL) {
+        FPRINTF_SAFE("(");
+        FMT_TYPE_SAFE(cast->as.cast.target);
+        FPRINTF_SAFE(")sizeof(%.*s)", (int)op->as.identif.val.len,
+                     op->as.identif.val.start);
+        return VISIT_SKIP_CHILDREN;
+      }
+    }
+    FPRINTF_SAFE("sizeof(");
+    if (node->as.sizeof_expr.is_type) {
+      if (node->as.sizeof_expr.target_type.is_self)
+        FPRINTF_SAFE("self");
+      else
+        FPRINTF_SAFE("%.*s", (int)node->as.sizeof_expr.target_type.name.len,
+                     node->as.sizeof_expr.target_type.name.start);
+      FPRINTF_SAFE(")");
+    }
+    break;
+  default:
+    break;
   }
 
-  free(stack);
-  return true;
+  // Handle gap prints before specific statements for `for` loops
+  if (parent && parent->type == AST_FOR) {
+    if (node == parent->as.for_loop.check) {
+      if (!parent->as.for_loop.init)
+        FPRINTF_SAFE("; ");
+    } else if (node == parent->as.for_loop.inc) {
+      if (!parent->as.for_loop.init && !parent->as.for_loop.check)
+        FPRINTF_SAFE("; ; ");
+      else if (!parent->as.for_loop.check)
+        FPRINTF_SAFE("; ");
+    } else if (node == parent->as.for_loop.action) {
+      if (!parent->as.for_loop.init && !parent->as.for_loop.check &&
+          !parent->as.for_loop.inc)
+        FPRINTF_SAFE("; ; ) ");
+      else if (!parent->as.for_loop.check && !parent->as.for_loop.inc)
+        FPRINTF_SAFE("; ) ");
+      else if (!parent->as.for_loop.inc)
+        FPRINTF_SAFE(") ");
+    }
+  }
+
+  return VISIT_CONTINUE;
 
 err_cleanup:
-  fclose(out_fp);
-  free(stack);
-  return false;
+  data->oom = true;
+  return VISIT_ABORT;
 }
+
+void fmt_interleave_node(AstVisitor *visitor, AstNode *node, int step) {
+  (void)step; // Unused
+  FmtData *data = (FmtData *)visitor->user_data;
+
+  // Node here is parent currently at top of stack
+  int count = data->interleave_counts[data->parent_top - 1]++;
+
+  switch (node->type) {
+  case AST_FUNC:
+    FPRINTF_SAFE(", ");
+    break;
+  case AST_BINOP:
+    FPRINTF_SAFE(" %.*s ", (int)node->as.binop.op.len, node->as.binop.op.start);
+    break;
+  case AST_IF:
+    if (count == 0) {
+      if (node->as.if_check.action &&
+          node->as.if_check.action->type == AST_BLOCK)
+        FPRINTF_SAFE(")");
+      else
+        FPRINTF_SAFE(") ");
+    } else if (count == 1) {
+      if (node->as.if_check.elseAct &&
+          node->as.if_check.elseAct->type == AST_BLOCK)
+        FPRINTF_SAFE(" else");
+      else
+        FPRINTF_SAFE(" else ");
+    }
+    break;
+  case AST_FUNC_CALL:
+    if (count == 0)
+      FPRINTF_SAFE("(");
+    else
+      FPRINTF_SAFE(", ");
+    break;
+  case AST_ARRAY_LIT:
+    FPRINTF_SAFE(", ");
+    break;
+  case AST_INDEX:
+    if (count == 0)
+      FPRINTF_SAFE("[");
+    break;
+  default:
+    break;
+  }
+  return;
+err_cleanup:
+  data->oom = true;
+}
+
+void fmt_exit_node(AstVisitor *visitor, AstNode *node) {
+  FmtData *data = (FmtData *)visitor->user_data;
+  AstNode *parent =
+      data->parent_top > 1 ? data->parent_stack[data->parent_top - 2] : NULL;
+
+  switch (node->type) {
+  case AST_BLOCK:
+    data->depth--;
+    for (unsigned int i = 0; i < data->depth; i++)
+      FPRINTF_SAFE("%c", '\t');
+    FPRINTF_SAFE("}");
+    if (parent && parent->type == AST_EXTERN)
+      FPRINTF_SAFE("\n\n");
+    else if (parent && parent->type == AST_SWITCH && 
+             node == parent->as.switch_stmt.default_case)
+        FPRINTF_SAFE("\n");
+    break;
+  case AST_EXTERN:
+    data->depth--;
+    for (unsigned int i = 0; i < data->depth; i++)
+      FPRINTF_SAFE("%c", '\t');
+    FPRINTF_SAFE("}\n\n");
+    break;
+  case AST_FUNC:
+    if (!node->as.func_def.block)
+      FPRINTF_SAFE(");\n");
+    else {
+      FPRINTF_SAFE("\n");
+      if (node->next)
+        FPRINTF_SAFE("\n");
+    }
+    break;
+  case AST_STRUCT:
+  case AST_UNION:
+  case AST_ENUM: {
+    bool is_decl_only = false;
+    if (node->src_end && node->src_end > node->src_start &&
+        *(node->src_end - 1) == ';')
+      is_decl_only = true;
+    if (!is_decl_only) {
+      data->depth--;
+      for (unsigned int i = 0; i < data->depth; i++)
+        FPRINTF_SAFE("%c", '\t');
+      FPRINTF_SAFE("}\n\n");
+    }
+    break;
+  }
+  case AST_FUNC_CALL:
+    FPRINTF_SAFE(")");
+    break;
+  case AST_ARRAY_LIT:
+    FPRINTF_SAFE("]");
+    break;
+  case AST_ENUM_MEMBER:
+    FPRINTF_SAFE(",\n");
+    break;
+  case AST_INDEX:
+    FPRINTF_SAFE("]");
+    break;
+  case AST_MEMBER:
+    FPRINTF_SAFE(".%.*s", (int)node->as.member.name.len,
+                 node->as.member.name.start);
+    break;
+  case AST_UOP:
+  case AST_ADDR_OF:
+  case AST_DEREF:
+    if (node->as.unop.is_postfix)
+      FPRINTF_SAFE("%.*s", node->as.unop.op.len, node->as.unop.op.start);
+    break;
+  case AST_SIZEOF:
+    if (!(!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr &&
+          node->as.sizeof_expr.target_expr->type == AST_CAST)) {
+      if (!node->as.sizeof_expr.is_type)
+        FPRINTF_SAFE(")");
+    }
+    break;
+  case AST_VAR_DECL: {
+    bool is_for_init =
+        parent && parent->type == AST_FOR && node == parent->as.for_loop.init;
+    if (is_for_init)
+      FPRINTF_SAFE("; ");
+    else {
+      FPRINTF_SAFE(";\n");
+      bool is_global = !parent || parent->type == AST_PROGRAM ||
+                       parent->type == AST_STRUCT ||
+                       parent->type == AST_UNION || parent->type == AST_EXTERN;
+      if (is_global && node->next && node->next->type != AST_VAR_DECL) {
+        FPRINTF_SAFE("\n");
+      } else if (!is_global && node->next && node->src_end &&
+                 node->next->src_start) {
+        int nl_count = 0;
+        for (const char *p = node->src_end; p < node->next->src_start; p++) {
+          if (*p == '\n')
+            nl_count++;
+        }
+        if (nl_count >= 2)
+          FPRINTF_SAFE("\n");
+      }
+    }
+    break;
+  }
+  case AST_RET:
+  case AST_DEFER:
+    if (node->type == AST_DEFER && node->as.defer_stmt.contents &&
+        node->as.defer_stmt.contents->type == AST_BLOCK)
+      FPRINTF_SAFE("\n");
+    else
+      FPRINTF_SAFE(";\n");
+    break;
+  case AST_SWITCH:
+    data->depth--;
+    for (unsigned int i = 0; i < data->depth; i++)
+      FPRINTF_SAFE("%c", '\t');
+    FPRINTF_SAFE("}\n");
+    break;
+  case AST_CASE:
+    if (node->as.case_stmt.action &&
+        node->as.case_stmt.action->type == AST_BLOCK)
+      FPRINTF_SAFE("\n");
+    else
+      FPRINTF_SAFE(";\n");
+    break;
+  case AST_IF:
+    if (node->as.if_check.elseAct) {
+      if (node->as.if_check.elseAct->type == AST_BLOCK)
+        FPRINTF_SAFE("\n");
+    } else if (node->as.if_check.action->type == AST_BLOCK)
+      FPRINTF_SAFE("\n");
+    break;
+  case AST_WHILE:
+    if (node == parent->as.while_loop.check) {
+      if (parent->as.while_loop.action &&
+          parent->as.while_loop.action->type == AST_BLOCK)
+        FPRINTF_SAFE(")");
+      else
+        FPRINTF_SAFE(") ");
+    }
+    break;
+  case AST_FOR:
+    if (!node->as.for_loop.action) {
+      if (!node->as.for_loop.init && !node->as.for_loop.check &&
+          !node->as.for_loop.inc)
+        FPRINTF_SAFE("; ; ) ;\n");
+      else if (!node->as.for_loop.check && !node->as.for_loop.inc)
+        FPRINTF_SAFE("; ) ;\n");
+      else if (!node->as.for_loop.inc)
+        FPRINTF_SAFE(") ;\n");
+      else
+        FPRINTF_SAFE(";\n");
+    } else if (node->as.for_loop.action->type == AST_BLOCK)
+      FPRINTF_SAFE("\n");
+    break;
+  default:
+    break;
+  }
+
+  // Append context based gaps safely
+  if (parent) {
+    if (parent->type == AST_WHILE && node == parent->as.while_loop.check) {
+      FPRINTF_SAFE(") ");
+    } else if (parent->type == AST_FOR) {
+      if (node == parent->as.for_loop.init) {
+        if (node->type != AST_VAR_DECL)
+          FPRINTF_SAFE("; ");
+      } else if (node == parent->as.for_loop.check) {
+        FPRINTF_SAFE("; ");
+      } else if (node == parent->as.for_loop.inc) {
+        if (parent->as.for_loop.action &&
+            parent->as.for_loop.action->type == AST_BLOCK)
+          FPRINTF_SAFE(")");
+        else
+          FPRINTF_SAFE(") ");
+      }
+    } else if (parent->type == AST_CASE && node == parent->as.case_stmt.val) {
+      if (parent->as.case_stmt.action &&
+          parent->as.case_stmt.action->type == AST_BLOCK)
+        FPRINTF_SAFE(")");
+      else
+        FPRINTF_SAFE(") ");
+    } else if (parent->type == AST_SWITCH &&
+               node == parent->as.switch_stmt.check) {
+      FPRINTF_SAFE(") {\n");
+      data->depth++;
+    }
+  }
+
+  if (is_statement_context(node, parent) && needs_semi(node)) {
+    FPRINTF_SAFE(";\n");
+  } else if (node->type == AST_BLOCK && parent &&
+             (parent->type == AST_BLOCK || parent->type == AST_PROGRAM ||
+              parent->type == AST_EXTERN)) {
+    FPRINTF_SAFE("\n");
+  }
+
+  if (node->src_end && data->last_pos < node->src_end) {
+    data->last_pos = node->src_end;
+  }
+
+  data->parent_top--;
+  return;
+
+err_cleanup:
+  data->oom = true;
+}
+
+bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
+             const char *source_text) {
+  if (!root) {
+    fprintf(stderr, "No root AST was passed to fmt_ast\n");
+    return false;
+  }
+
+  FmtData data = {0};
+  data.out_fp = out_fp;
+  data.type_set = type_set;
+  data.last_pos = source_text;
+  data.depth = 0;
+  data.parent_cap = 128;
+  data.parent_stack = malloc(sizeof(AstNode *) * data.parent_cap);
+  data.interleave_counts = malloc(sizeof(int) * data.parent_cap);
+  data.parent_top = 0;
+  data.oom = false;
+
+  if (!data.parent_stack || !data.interleave_counts) {
+    fprintf(stderr,
+            "OOM encountered whilst allocating formatter tracker stacks.\n");
+    if (data.parent_stack)
+      free(data.parent_stack);
+    if (data.interleave_counts)
+      free(data.interleave_counts);
+    return false;
+  }
+
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = fmt_enter_node;
+  visitor.interleave_node = fmt_interleave_node;
+  visitor.exit_node = fmt_exit_node;
+
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
+
+  bool success = true;
+  if (setjmp(panic_env) == 0) {
+    success = ast_traverse(&visitor, root);
+  } else {
+    success = false;
+  }
+
+  if (data.oom) {
+    success = false;
+  }
+
+  // Flush trailing comments
+  if (success && data.last_pos) {
+    size_t remain = strlen(data.last_pos);
+    print_comments_between(data.last_pos, data.last_pos + remain, out_fp, 0);
+  }
+
+  free(data.parent_stack);
+  free(data.interleave_counts);
+
+  return success;
+}
+
+#undef FPRINTF_SAFE
+#undef FMT_TYPE_SAFE
 
 #ifdef ENABLE_THREADS
 #include "thread_pool.h"
