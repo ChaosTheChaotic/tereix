@@ -726,9 +726,10 @@ VisitResult gen_enter(AstVisitor *v, AstNode *n) {
                                                  : n->as.union_def.unionn);
 
     if (is_nested) {
-      sb_append(sb, is_enum
-                        ? "enum {\n"
-                        : (n->type == AST_STRUCT ? "struct {\n" : "union {\n"));
+      sb_append(sb, is_enum ? "enum "
+                            : (n->type == AST_STRUCT ? "struct " : "union "));
+      sb_append_len(sb, tag.start, tag.len);
+      sb_append(sb, " {\n");
     } else {
       if (is_opaque && !is_enum) {
         sb_append(sb, "typedef ");
@@ -767,9 +768,7 @@ VisitResult gen_enter(AstVisitor *v, AstNode *n) {
     }
 
     if (is_nested) {
-      sb_append(sb, "} ");
-      sb_append_len(sb, tag.start, tag.len);
-      sb_append(sb, ";\n");
+      sb_append(sb, "};\n");
     } else {
       if (is_enum) {
         sb_append(sb, "} ");
