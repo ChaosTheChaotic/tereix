@@ -228,1178 +228,700 @@ void inject_yield_assignments(AstNode *node, const char *var_name,
   free(stack);
 }
 
-void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
-                     Arena *arena, bool is_main_mod) {
-  size_t cap = 2048;
-  IterFrame *stack = malloc(sizeof(IterFrame) * cap);
-  size_t top = 0;
+typedef struct {
+  StringBuilder *sb;
+  HashMap *func_map;
+  Arena *arena;
+  bool is_main_mod;
+  uint64_t yield_blk_ctr;
 
-  stack[top++] = (IterFrame){root, 0, NULL, NULL, 0};
+  AstNode *parent_stack[2048];
+  size_t parent_top;
+} GenCtx;
 
-  uint64_t yield_blk_ctr = 0;
-  while (top > 0) {
-    IterFrame *f = &stack[top - 1];
-    AstNode *n = f->node;
+// Check if node evaluated as expr
+bool is_expr_context(AstNode *parent, AstNode *child) {
+  if (!parent)
+    return false;
+  switch (parent->type) {
+  case AST_BINOP:
+  case AST_UOP:
+  case AST_ADDR_OF:
+  case AST_DEREF:
+  case AST_FUNC_CALL:
+  case AST_ARRAY_LIT:
+  case AST_RET:
+  case AST_CAST:
+  case AST_MEMBER:
+  case AST_INDEX:
+  case AST_ENUM_MEMBER:
+  case AST_SIZEOF:
+    return true;
+  case AST_CASE:
+    return parent->as.case_stmt.val == child;
+  case AST_SWITCH:
+    return parent->as.switch_stmt.check == child;
+  case AST_VAR_DECL:
+    return parent->as.var_decl.init == child;
+  case AST_IF:
+    return parent->as.if_check.check == child;
+  case AST_WHILE:
+    return parent->as.while_loop.check == child;
+  case AST_FOR:
+    return parent->as.for_loop.check == child ||
+           parent->as.for_loop.inc == child;
+  default:
+    return false;
+  }
+}
 
-    if (!n) {
-      top--;
-      continue;
+// Checks if an expression block can be unwrapped safely
+static bool is_auto_unwrap(AstNode *n) {
+  if (n->type != AST_BLOCK)
+    return false;
+  AstNode *unwrapped = n;
+  while (unwrapped && unwrapped->type == AST_BLOCK &&
+         unwrapped->as.block.first_stmt &&
+         !unwrapped->as.block.first_stmt->next) {
+    AstNode *stmt = unwrapped->as.block.first_stmt;
+    if (is_c_expr(stmt))
+      unwrapped = stmt;
+    else
+      break;
+  }
+  return unwrapped != n;
+}
+
+static VisitResult gen_enter(AstVisitor *v, AstNode *n) {
+  GenCtx *ctx = v->user_data;
+  StringBuilder *sb = ctx->sb;
+  AstNode *parent =
+      ctx->parent_top > 0 ? ctx->parent_stack[ctx->parent_top - 1] : NULL;
+
+  ctx->parent_stack[ctx->parent_top++] = n;
+
+  // Block auto unwrap handling (skip standard block structure)
+  if (n->type == AST_BLOCK && is_expr_context(parent, n) && is_auto_unwrap(n)) {
+    AstNode *unwrapped = n;
+    while (unwrapped && unwrapped->type == AST_BLOCK &&
+           unwrapped->as.block.first_stmt &&
+           !unwrapped->as.block.first_stmt->next) {
+      AstNode *stmt = unwrapped->as.block.first_stmt;
+      if (is_c_expr(stmt))
+        unwrapped = stmt;
+      else
+        break;
     }
+    // Temporarily spoof parent context to bypass expression wrapper rules
+    AstNode *old_parent = ctx->parent_stack[ctx->parent_top - 1];
+    ctx->parent_stack[ctx->parent_top - 1] = parent;
+    ast_traverse(v, unwrapped);
+    ctx->parent_stack[ctx->parent_top - 1] = old_parent;
+    return VISIT_SKIP_CHILDREN;
+  }
 
-    // Auto-unwrap single expression blocks
-    if (f->step == 0 && (f->flags & 2)) {
-      while (n && n->type == AST_BLOCK && n->as.block.first_stmt &&
-             !n->as.block.first_stmt->next) {
-        AstNode *stmt = n->as.block.first_stmt;
-        if (is_c_expr(stmt)) {
-          n = stmt;
-          f->node = n;
-        } else {
-          break;
-        }
-      }
-    }
-
-    if (n->type == AST_PROGRAM || n->type == AST_BLOCK ||
-        n->type == AST_EXTERN) {
-      if (f->step == 0) {
-        if (n->type == AST_BLOCK) {
-          // Standard C block emission (GNU code removed here)
-          sb_append(sb, "{\n");
-        }
-        f->aux = (n->type == AST_EXTERN) ? n->as.extern_block.contents
-                                         : n->as.block.first_stmt;
-        f->step = 1;
-      } else if (f->step == 1) {
-        if (f->aux) {
-          AstNode *stmt = f->aux;
-          f->aux = f->aux->next;
-
-          bool needs_semi =
-              (stmt->type == AST_FUNC_CALL || stmt->type == AST_BINOP ||
-               stmt->type == AST_UOP || stmt->type == AST_IDENTIF ||
-               stmt->type == AST_NUM_LIT || stmt->type == AST_STR_LIT ||
-               stmt->type == AST_MEMBER);
-
-          f->flags = (f->flags & 2) | (needs_semi ? 1 : 0);
-          f->step = 2;
-
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){stmt, 0, NULL, NULL, 0};
-        } else {
-          f->step = 3;
-        }
-      } else if (f->step == 2) {
-        if (f->flags & 1)
-          sb_append(sb, ";\n");
-        f->step = 1;
-      } else {
-        if (n->type == AST_BLOCK) {
-          // Standard C block end (GNU code removed here)
-          sb_append(sb, "}\n");
-        }
-        top--;
-      }
-    } else if (n->type == AST_FUNC) {
-      if (f->step == 0) {
-        if (n->as.func_def.fn_name.len == 4 &&
-            strncmp(n->as.func_def.fn_name.start, "main", 4) == 0 &&
-            is_main_mod) {
-          AstNode *params = n->as.func_def.params;
-          int param_count = 0;
-          AstNode *p = params;
-          while (p) {
-            param_count++;
-            p = p->next;
-          }
-
-          if (param_count != 2) {
-            fprintf(stderr,
-                    "Error: main function must have exactly 2 parameters "
-                    "(an integer and a string array). Found %d.\n",
-                    param_count);
-            top--;
-            continue;
-          }
-
-          AstNode *param1 = params;
-          DataType t1 = param1->as.fn_param.type;
-          int width;
-          bool is_signed, is_float;
-          if (!get_numeric_info(t1, &width, &is_signed, &is_float) ||
-              width < 32) {
-            fprintf(stderr, "Error: first parameter of main must be a integer "
-                            "with at least 32 bits (e.g. i32, i64).\n");
-            top--;
-            continue;
-          }
-
-          AstNode *param2 = param1->next;
-          DataType t2 = param2->as.fn_param.type;
-          if (!(t2.name.len == 3 && strncmp(t2.name.start, "str", 3) == 0 &&
-                (t2.ptr_depth + t2.array_dimens >= 1))) {
-            fprintf(
-                stderr,
-                "Error: second parameter of main must be str[] or **str.\n");
-            top--;
-            continue;
-          }
-
-          if (n->as.func_def.is_extern)
-            sb_append(sb, "extern ");
-          if (n->as.func_def.is_inline)
-            sb_append(sb, "inline ");
-
-          sb_append(sb, "int main(");
-          sb_append(sb, "int ");
-          sb_append_len(sb, param1->as.fn_param.id.start,
-                        param1->as.fn_param.id.len);
-          sb_append(sb, ", char **");
-          sb_append_len(sb, param2->as.fn_param.id.start,
-                        param2->as.fn_param.id.len);
-          sb_append(sb, ") ");
-
-          f->aux = NULL;
-          f->step = 2;
-
-          if (n->as.func_def.block) {
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              IterFrame *new_stack =
-                  realloc(stack, sizeof(IterFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-              f = &stack[top - 1];
-            }
-            stack[top++] = (IterFrame){n->as.func_def.block, 0, NULL, NULL, 0};
-          } else {
-            sb_append(sb, ";\n");
-            top--;
-          }
-        } else {
-          if (n->as.func_def.is_extern)
-            sb_append(sb, "extern ");
-          if (n->as.func_def.is_inline)
-            sb_append(sb, "inline ");
-
-          DataType clean_ret = n->as.func_def.ret_type;
-          clean_ret.is_extern = false;
-          clean_ret.is_static = false;
-          if (clean_ret.ptr_depth == 0 && clean_ret.array_dimens == 0) {
-            clean_ret.is_mut = true;
-          }
-          clean_ret.is_mut = true;
-
-          gen_type(clean_ret, sb);
-          sb_append_len(sb, n->as.func_def.fn_name.start,
-                        n->as.func_def.fn_name.len);
-          sb_append(sb, "(");
-
-          f->aux = n->as.func_def.params;
-          f->step = 1;
-        }
-      } else if (f->step == 1) {
-        if (f->aux) {
-          AstNode *p = f->aux;
-          gen_type(p->as.fn_param.type, sb);
-          sb_append_len(sb, p->as.fn_param.id.start, p->as.fn_param.id.len);
-          f->aux = f->aux->next;
-          if (f->aux)
-            sb_append(sb, ", ");
-        } else {
-          sb_append(sb, ") ");
-          if (n->as.func_def.block) {
-            f->step = 2;
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              IterFrame *new_stack =
-                  realloc(stack, sizeof(IterFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-              f = &stack[top - 1];
-            }
-            stack[top++] = (IterFrame){n->as.func_def.block, 0, NULL, NULL, 0};
-          } else {
-            sb_append(sb, ";\n");
-            top--;
-          }
-        }
-      } else {
-        sb_append(sb, "\n");
-        top--;
-      }
-    } else if (n->type == AST_VAR_DECL) {
-      if (f->step == 0) {
-        DataType decl_type = n->as.var_decl.type;
-        // Do not emit extern if the variable is being initialized
-        if (n->as.var_decl.init)
-          decl_type.is_extern = false;
-
-        gen_type(decl_type, sb);
-        sb_append_len(sb, n->as.var_decl.id.start, n->as.var_decl.id.len);
-        if (n->as.var_decl.init) {
-          sb_append(sb, " = ");
-          f->step = 1;
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){n->as.var_decl.init, 0, NULL, NULL, 2};
-        } else {
-          sb_append(sb, ";\n");
-          top--;
-        }
-      } else {
-        sb_append(sb, ";\n");
-        top--;
-      }
-    } else if (n->type == AST_BINOP) {
-      if (f->step == 0) {
-        sb_append(sb, "(");
-        f->step = 1;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.binop.left, 0, NULL, NULL, 2};
-      } else if (f->step == 1) {
-        sb_append(sb, " ");
-        sb_append_len(sb, n->as.binop.op.start, n->as.binop.op.len);
-        sb_append(sb, " ");
-        f->step = 2;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.binop.right, 0, NULL, NULL, 2};
-      } else {
-        sb_append(sb, ")");
-        top--;
-      }
-    } else if (n->type == AST_UOP || n->type == AST_ADDR_OF ||
-               n->type == AST_DEREF) {
-      if (f->step == 0) {
-        if (n->type == AST_ADDR_OF)
-          sb_append(sb, "&(");
-        else if (n->type == AST_DEREF)
-          sb_append(sb, "*(");
-        else {
-          if (!n->as.unop.is_postfix)
-            sb_append_len(sb, n->as.unop.op.start, n->as.unop.op.len);
-          sb_append(sb, "(");
-        }
-        f->step = 1;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.unop.operand, 0, NULL, NULL, 2};
-      } else {
-        sb_append(sb, ")");
-        if (n->type == AST_UOP && n->as.unop.is_postfix) {
-          sb_append_len(sb, n->as.unop.op.start, n->as.unop.op.len);
-        }
-        top--;
-      }
-    } else if (n->type == AST_IF) {
-      if (f->step == 0) {
-        sb_append(sb, "if (");
-        f->step = 1;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.if_check.check, 0, NULL, NULL, 2};
-      } else if (f->step == 1) {
-        sb_append(sb, ") ");
-        f->step = 2;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.if_check.action, 0, NULL, NULL, 0};
-      } else if (f->step == 2) {
-        if (n->as.if_check.elseAct) {
-          sb_append(sb, " else ");
-          f->step = 3;
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){n->as.if_check.elseAct, 0, NULL, NULL, 0};
-        } else {
-          top--;
-        }
-      } else {
-        top--;
-      }
-    } else if (n->type == AST_WHILE) {
-      if (f->step == 0) {
-        sb_append(sb, "while (");
-        f->step = 1;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.while_loop.check, 0, NULL, NULL, 2};
-      } else if (f->step == 1) {
-        sb_append(sb, ") ");
-        f->step = 2;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.while_loop.action, 0, NULL, NULL, 0};
-      } else {
-        top--;
-      }
-    } else if (n->type == AST_FOR) {
-      if (f->step == 0) {
-        sb_append(sb, "for (");
-        f->step = 1;
-        if (n->as.for_loop.init) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){n->as.for_loop.init, 0, NULL, NULL, 0};
-        }
-      } else if (f->step == 1) {
-        if (!n->as.for_loop.init || n->as.for_loop.init->type != AST_VAR_DECL)
-          sb_append(sb, "; ");
-        f->step = 2;
-        if (n->as.for_loop.check) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){n->as.for_loop.check, 0, NULL, NULL, 2};
-        }
-      } else if (f->step == 2) {
-        sb_append(sb, "; ");
-        f->step = 3;
-        if (n->as.for_loop.inc) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){n->as.for_loop.inc, 0, NULL, NULL, 2};
-        }
-      } else if (f->step == 3) {
-        sb_append(sb, ") ");
-        f->step = 4;
-        if (n->as.for_loop.action) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){n->as.for_loop.action, 0, NULL, NULL, 0};
-        }
-      } else {
-        top--;
-      }
-    } else if (n->type == AST_FUNC_CALL) {
-      if (n->as.func_call.caller &&
-          n->as.func_call.caller->type == AST_MEMBER) {
-        if (f->step == 0) {
-          AstNode *member_node = n->as.func_call.caller;
-          AstNode *base = member_node->as.member.base;
-
-          if (base->type == AST_IDENTIF && base->as.identif.res_sm &&
-              base->as.identif.res_sm->is_imported_mod) {
-            sb_append_len(sb, base->as.identif.val.start,
-                          base->as.identif.val.len);
-            sb_append(sb, "_");
-            sb_append_len(sb, member_node->as.member.name.start,
-                          member_node->as.member.name.len);
-            sb_append(sb, "(");
-            f->aux = n->as.func_call.args;
-            f->aux2 = NULL;
-            f->step = 2;
-          } else {
-            Token method = member_node->as.member.name;
-            DataType base_eval = base->eval_type;
-            Token base_type = base_eval.name;
-            if (base_type.len == 0)
-              base_type = member_node->as.member.type;
-
-            size_t mangled_len = base_type.len + 1 + method.len;
-            char *mangled = arena_alloc(arena, mangled_len + 1);
-            memcpy(mangled, base_type.start, base_type.len);
-            mangled[base_type.len] = '_';
-            memcpy(mangled + base_type.len + 1, method.start, method.len);
-            mangled[mangled_len] = '\0';
-
-            AstNode *func_def = map_get(func_map, mangled, mangled_len);
-            bool has_self = false;
-            bool needs_addrof = false;
-            bool needs_deref = false;
-
-            if (func_def && func_def->type == AST_FUNC) {
-              AstNode *first_param = func_def->as.func_def.params;
-              if (first_param) {
-                DataType pt = first_param->as.fn_param.type;
-
-                if (pt.name.len == base_type.len &&
-                    strncmp(pt.name.start, base_type.start, pt.name.len) == 0 &&
-                    pt.array_dimens == 0) {
-                  has_self = true;
-
-                  if (pt.ptr_depth > base_eval.ptr_depth) {
-                    needs_addrof = true;
-                  } else if (pt.ptr_depth < base_eval.ptr_depth) {
-                    needs_deref = true;
-                  }
-                }
-              }
-            }
-
-            sb_append_len(sb, mangled, mangled_len);
-            sb_append(sb, "(");
-
-            f->aux = (AstNode *)(uintptr_t)has_self;
-            f->aux2 = n->as.func_call.args;
-
-            if (has_self) {
-              f->step = 1;
-              if (top >= cap) {
-                size_t new_cap = cap * 2;
-                IterFrame *new_stack =
-                    realloc(stack, sizeof(IterFrame) * new_cap);
-                if (!new_stack) {
-                  fprintf(stderr,
-                          "OOM encountered whilst reallocating stack.\n");
-                  free(stack);
-                  return;
-                }
-                stack = new_stack;
-                cap = new_cap;
-                f = &stack[top - 1];
-              }
-
-              AstNode *self_arg = member_node->as.member.base;
-
-              if (needs_addrof) {
-                AstNode *addrof = arena_alloc(arena, sizeof(AstNode));
-                memset(addrof, 0, sizeof(AstNode));
-                addrof->type = AST_ADDR_OF;
-                addrof->as.unop.operand = self_arg;
-                self_arg = addrof;
-              } else if (needs_deref) {
-                AstNode *deref = arena_alloc(arena, sizeof(AstNode));
-                memset(deref, 0, sizeof(AstNode));
-                deref->type = AST_DEREF;
-                deref->as.unop.operand = self_arg;
-                self_arg = deref;
-              }
-
-              stack[top++] = (IterFrame){self_arg, 0, NULL, NULL, 2};
-            } else {
-              f->step = 2;
-              f->aux = f->aux2;
-              f->aux2 = NULL;
-            }
-          }
-        } else if (f->step == 1) {
-          if (f->aux2)
-            sb_append(sb, ", ");
-          f->aux = f->aux2;
-          f->aux2 = NULL;
-          f->step = 2;
-        } else if (f->step == 2) {
-          if (f->aux) {
-            AstNode *arg = f->aux;
-            f->aux = f->aux->next;
-            f->step = (f->aux != NULL) ? 3 : 4;
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              IterFrame *new_stack =
-                  realloc(stack, sizeof(IterFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-              f = &stack[top - 1];
-            }
-            stack[top++] = (IterFrame){arg, 0, NULL, NULL, 2};
-          } else {
-            sb_append(sb, ")");
-            top--;
-          }
-        } else if (f->step == 3) {
-          if (f->aux)
-            sb_append(sb, ", ");
-          f->step = 2;
-        } else if (f->step == 4) {
-          sb_append(sb, ")");
-          top--;
-        }
-      } else {
-        if (f->step == 0) {
-          bool is_ctor = false;
-          Sym *sym = NULL;
-          if (n->as.func_call.caller &&
-              n->as.func_call.caller->type == AST_IDENTIF) {
-            sym = n->as.func_call.caller->as.identif.res_sm;
-            if (sym && (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
-                        sym->kind == SYM_ENUM)) {
-              is_ctor = true;
-            }
-          }
-          f->aux2 = (AstNode *)(uintptr_t)(is_ctor ? 1 : 0);
-          if (is_ctor) {
-            switch (sym->kind) {
-            case SYM_STRUCT:
-              sb_append(sb, "(struct ");
-              break;
-            case SYM_UNION:
-              sb_append(sb, "(union ");
-              break;
-            case SYM_ENUM:
-              sb_append(sb, "(enum ");
-              break;
-            default:
-              sb_append(sb, "(");
-              break;
-            }
-          }
-
-          f->step = 1;
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){n->as.func_call.caller, 0, NULL, NULL, 2};
-        } else if (f->step == 1) {
-          bool is_ctor = (uintptr_t)f->aux2;
-          if (is_ctor)
-            sb_append(sb, "){");
-          else
-            sb_append(sb, "(");
-
-          f->aux = n->as.func_call.args;
-          f->step = 2;
-        } else if (f->step == 2) {
-          if (f->aux) {
-            AstNode *arg = f->aux;
-            f->aux = f->aux->next;
-            f->step = (f->aux != NULL) ? 3 : 4;
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              IterFrame *new_stack =
-                  realloc(stack, sizeof(IterFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-              f = &stack[top - 1];
-            }
-            stack[top++] = (IterFrame){arg, 0, NULL, NULL, 2};
-          } else {
-            bool is_ctor = (uintptr_t)f->aux2;
-            sb_append(sb, is_ctor ? "}" : ")");
-            top--;
-          }
-        } else if (f->step == 3) {
-          sb_append(sb, ", ");
-          f->step = 2;
-        } else if (f->step == 4) {
-          bool is_ctor = (uintptr_t)f->aux2;
-          sb_append(sb, is_ctor ? "}" : ")");
-          top--;
-        }
-      }
-    } else if (n->type == AST_ARRAY_LIT) {
-      if (f->step == 0) {
-        DataType t = n->eval_type;
-        if (t.name.len > 0) {
-          sb_append(sb, "(");
-
-          int array_lit_depth = 0;
-          for (long i = (long)top - 2; i >= 0; i--) {
-            if (stack[i].node && stack[i].node->type == AST_ARRAY_LIT) {
-              array_lit_depth++;
-            } else {
-              break;
-            }
-          }
-
-          int total = t.ptr_depth + t.array_dimens;
-          total -= array_lit_depth;
-          if (total < 0)
-            total = 0;
-
-          t.ptr_depth = total > 0 ? total - 1 : 0;
-          t.array_dimens = 0;
-          gen_type(t, sb);
-          sb_append(sb, "[])");
-        }
-        sb_append(sb, "{");
-        f->aux = n->as.array_lit.elements;
-        f->step = 1;
-      } else if (f->step == 1) {
-        if (f->aux) {
-          AstNode *elem = f->aux;
-          f->aux = f->aux->next;
-          f->step = f->aux ? 2 : 3;
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){elem, 0, NULL, NULL, 2};
-        } else {
-          sb_append(sb, "}");
-          top--;
-        }
-      } else if (f->step == 2) {
-        sb_append(sb, ", ");
-        f->step = 1;
-      } else {
-        sb_append(sb, "}");
-        top--;
-      }
-    } else if (n->type == AST_RET) {
-      if (f->step == 0) {
-        if (n->as.ret_stmt.expr && n->as.ret_stmt.expr->type == AST_BLOCK) {
-          AstNode *block = n->as.ret_stmt.expr;
-
-          AstNode *unwrapped = block;
-          while (unwrapped && unwrapped->type == AST_BLOCK &&
-                 unwrapped->as.block.first_stmt &&
-                 !unwrapped->as.block.first_stmt->next) {
-            AstNode *stmt = unwrapped->as.block.first_stmt;
-            if (is_c_expr(stmt))
-              unwrapped = stmt;
-            else
-              break;
-          }
-
-          if (unwrapped->type != AST_BLOCK) {
-            sb_append(sb, "return ");
-            f->step = 1;
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              IterFrame *new_stack =
-                  realloc(stack, sizeof(IterFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-              f = &stack[top - 1];
-            }
-            stack[top++] = (IterFrame){unwrapped, 0, NULL, NULL, 2};
-          } else {
-            bool is_void =
-                (block->eval_type.name.len == 4 &&
-                 strncmp(block->eval_type.name.start, "void", 4) == 0 &&
-                 block->eval_type.ptr_depth == 0 &&
-                 block->eval_type.array_dimens == 0) ||
-                (block->eval_type.name.len == 0);
-
-            char var_name[64];
-            sprintf(var_name, "_tx_blk_%zu", ++yield_blk_ctr);
-
-            if (!is_void) {
-              DataType mut_type = block->eval_type;
-              mut_type.is_mut = true;
-              mut_type.is_threadlocal = false;
-              mut_type.is_static = false;
-              mut_type.is_extern = false;
-              gen_type(mut_type, sb);
-              sb_append(sb, var_name);
-              sb_append(sb, ";\n");
-              inject_yield_assignments(block, var_name, arena);
-            }
-
-            f->step = 3;
-            f->aux = block->as.block.first_stmt;
-            f->aux2 = (AstNode *)(uintptr_t)is_void;
-          }
-        } else {
-          sb_append(sb, "return ");
-          if (n->as.ret_stmt.expr) {
-            f->step = 1;
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              IterFrame *new_stack =
-                  realloc(stack, sizeof(IterFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-              f = &stack[top - 1];
-            }
-            stack[top++] = (IterFrame){n->as.ret_stmt.expr, 0, NULL, NULL, 2};
-          } else {
-            sb_append(sb, ";\n");
-            top--;
-          }
-        }
-      } else if (f->step == 1) {
-        sb_append(sb, ";\n");
-        top--;
-      } else if (f->step == 3) {
-        if (f->aux) {
-          AstNode *stmt = f->aux;
-          f->aux = f->aux->next;
-
-          bool needs_semi =
-              (stmt->type == AST_FUNC_CALL || stmt->type == AST_BINOP ||
-               stmt->type == AST_UOP || stmt->type == AST_IDENTIF ||
-               stmt->type == AST_NUM_LIT || stmt->type == AST_STR_LIT ||
-               stmt->type == AST_MEMBER);
-
-          f->flags = needs_semi ? 1 : 0;
-          f->step = 4;
-
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){stmt, 0, NULL, NULL, 0};
-        } else {
-          bool is_void = (bool)(uintptr_t)f->aux2;
-          if (!is_void) {
-            char var_name[64];
-            sprintf(var_name, "_tx_blk_%zu", yield_blk_ctr);
-            sb_append(sb, "return ");
-            sb_append(sb, var_name);
-            sb_append(sb, ";\n");
-          } else {
-            sb_append(sb, "return;\n");
-          }
-          top--;
-        }
-      } else if (f->step == 4) {
-        if (f->flags & 1)
-          sb_append(sb, ";\n");
-        f->step = 3;
-      }
-    } else if (n->type == AST_CAST) {
-      if (f->step == 0) {
-        sb_append(sb, "(");
-        gen_type(n->as.cast.target, sb);
-        sb_append(sb, ")(");
-        f->step = 1;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.cast.op, 0, NULL, NULL, 2};
-      } else {
-        sb_append(sb, ")");
-        top--;
-      }
-    } else if (n->type == AST_MEMBER) {
-      if (f->step == 0) {
-        f->step = 1;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.member.base, 0, NULL, NULL, 2};
-      } else {
-        AstNode *base = n->as.member.base;
-        if (base->eval_type.ptr_depth > 0) {
-          sb_append(sb, "->");
-        } else {
-          sb_append(sb, ".");
-        }
-        sb_append_len(sb, n->as.member.name.start, n->as.member.name.len);
-        top--;
-      }
-    } else if (n->type == AST_INDEX) {
-      if (f->step == 0) {
-        f->step = 1;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.index.base, 0, NULL, NULL, 2};
-      } else if (f->step == 1) {
-        sb_append(sb, "[");
-        f->step = 2;
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-          f = &stack[top - 1];
-        }
-        stack[top++] = (IterFrame){n->as.index.index, 0, NULL, NULL, 2};
-      } else {
-        sb_append(sb, "]");
-        top--;
-      }
-    } else if (n->type == AST_STRUCT || n->type == AST_UNION ||
-               n->type == AST_ENUM) {
-      bool is_enum = (n->type == AST_ENUM);
-      bool is_nested = n->is_nested_sue;
-
-      bool is_opaque = (n->type == AST_STRUCT && !n->as.struct_def.contents) ||
-                       (n->type == AST_UNION && !n->as.union_def.contents);
-
-      if (f->step == 0) {
-        if (is_nested) {
-          sb_append(sb, is_enum                   ? "enum {\n"
-                        : (n->type == AST_STRUCT) ? "struct {\n"
-                                                  : "union {\n");
-        } else {
-          Token tag = is_enum                   ? n->as.enum_def.enumn
-                      : (n->type == AST_STRUCT) ? n->as.struct_def.structn
-                                                : n->as.union_def.unionn;
-
-          if (is_opaque && !is_enum) {
-            sb_append(sb, "typedef ");
-            sb_append(sb, (n->type == AST_STRUCT) ? "struct " : "union ");
-            sb_append_len(sb, tag.start, tag.len);
-            sb_append(sb, " ");
-            sb_append_len(sb, tag.start, tag.len);
-            sb_append(sb, ";\n");
-            top--;
-            continue;
-          }
-
-          if (is_enum) {
-            sb_append(sb, "typedef enum ");
-            sb_append_len(sb, tag.start, tag.len);
-            sb_append(sb, " {\n");
-          } else {
-            sb_append(sb, "typedef ");
-            sb_append(sb, (n->type == AST_STRUCT) ? "struct " : "union ");
-            sb_append_len(sb, tag.start, tag.len);
-            sb_append(sb, " ");
-            sb_append_len(sb, tag.start, tag.len);
-            sb_append(sb, ";\n");
-            sb_append(sb, (n->type == AST_STRUCT) ? "struct " : "union ");
-            sb_append_len(sb, tag.start, tag.len);
-            sb_append(sb, " {\n");
-          }
-        }
-        f->flags = is_nested ? 1 : 0;
-        f->aux = is_enum                   ? n->as.enum_def.contents
-                 : (n->type == AST_STRUCT) ? n->as.struct_def.contents
-                                           : n->as.union_def.contents;
-        f->step = 1;
-      } else if (f->step == 1) {
-        if (f->aux) {
-          AstNode *member = f->aux;
-          f->aux = f->aux->next;
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){member, 0, NULL, NULL, 0};
-          f->step = 2;
-        } else {
-          f->step = 3;
-        }
-      } else if (f->step == 2) {
-        f->step = 1;
-      } else {
-        if (f->flags) {
-          Token tag = is_enum                   ? n->as.enum_def.enumn
-                      : (n->type == AST_STRUCT) ? n->as.struct_def.structn
-                                                : n->as.union_def.unionn;
-          sb_append(sb, "} ");
-          sb_append_len(sb, tag.start, tag.len);
-          sb_append(sb, ";\n");
-        } else {
-          if (is_enum) {
-            sb_append(sb, "} ");
-            Token tag = n->as.enum_def.enumn;
-            sb_append_len(sb, tag.start, tag.len);
-            sb_append(sb, ";\n");
-          } else {
-            sb_append(sb, "};\n");
-          }
-        }
-        top--;
-      }
-    } else if (n->type == AST_ENUM_MEMBER) {
-      if (f->step == 0) {
-        sb_append_len(sb, n->as.enum_member.name.start,
-                      n->as.enum_member.name.len);
-        if (n->as.enum_member.val) {
-          sb_append(sb, " = ");
-          f->step = 1;
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (IterFrame){n->as.enum_member.val, 0, NULL, NULL, 2};
-        } else {
-          sb_append(sb, ",\n");
-          top--;
-        }
-      } else {
-        sb_append(sb, ",\n");
-        top--;
-      }
-    } else if (n->type == AST_NUM_LIT) {
-      sb_append_len(sb, n->as.num_lit.val.start, n->as.num_lit.val.len);
-      top--;
-    } else if (n->type == AST_IDENTIF) {
-      sb_append_len(sb, n->as.identif.val.start, n->as.identif.val.len);
-      top--;
-    } else if (n->type == AST_STR_LIT) {
-      sb_append_len(sb, n->as.str_lit.val.start, n->as.str_lit.val.len);
-      top--;
-    } else if (n->type == AST_BOOL_LIT) {
-      sb_append_len(sb, n->as.bool_lit.val.start, n->as.bool_lit.val.len);
-      top--;
-    } else if (n->type == AST_CHAR_LIT) {
-      sb_append_len(sb, n->as.char_lit.val.start, n->as.char_lit.val.len);
-      top--;
-    } else if (n->type == AST_NULL_LIT) {
-      sb_append(sb, "NULL");
-      top--;
-    } else if (n->type == AST_BREAK) {
-      sb_append(sb, "break;\n");
-      top--;
-    } else if (n->type == AST_CONTINUE) {
-      sb_append(sb, "continue;\n");
-      top--;
-    } else if (n->type == AST_SIZEOF) {
-      if (f->step == 0) {
-        sb_append(sb, "sizeof(");
-        if (n->as.sizeof_expr.is_type) {
-          gen_type(n->as.sizeof_expr.target_type, sb);
-          sb_append(sb, ")");
-          top--;
-        } else {
-          f->step = 1;
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            IterFrame *new_stack = realloc(stack, sizeof(IterFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] =
-              (IterFrame){n->as.sizeof_expr.target_expr, 0, NULL, NULL, 2};
-        }
-      } else if (f->step == 1) {
-        sb_append(sb, ")");
-        top--;
-      }
-    } else {
-      top--;
+  // Context dependent items
+  if (parent) {
+    if (parent->type == AST_BINOP && n == parent->as.binop.right) {
+      sb_append(sb, " ");
+      sb_append_len(sb, parent->as.binop.op.start, parent->as.binop.op.len);
+      sb_append(sb, " ");
+    } else if (parent->type == AST_INDEX && n == parent->as.index.index) {
+      sb_append(sb, "[");
+    } else if (parent->type == AST_CAST && n == parent->as.cast.op) {
+      sb_append(sb, ")(");
     }
   }
 
-  free(stack);
+  switch (n->type) {
+  case AST_BLOCK:
+    sb_append(sb, "{\n");
+    break;
+
+  case AST_FUNC: {
+    if (n->as.func_def.fn_name.len == 4 &&
+        strncmp(n->as.func_def.fn_name.start, "main", 4) == 0 &&
+        ctx->is_main_mod) {
+      AstNode *params = n->as.func_def.params;
+      int param_count = 0;
+      AstNode *p = params;
+      while (p) {
+        param_count++;
+        p = p->next;
+      }
+
+      if (param_count != 2) {
+        fprintf(stderr,
+                "Error: main function must have exactly 2 parameters (an "
+                "integer and a string array). Found %d.\n",
+                param_count);
+        return VISIT_SKIP_CHILDREN;
+      }
+
+      AstNode *param1 = params;
+      DataType t1 = param1->as.fn_param.type;
+      int width;
+      bool is_signed, is_float;
+      if (!get_numeric_info(t1, &width, &is_signed, &is_float) || width < 32) {
+        fprintf(stderr, "Error: first parameter of main must be a integer with "
+                        "at least 32 bits (e.g. i32, i64).\n");
+        return VISIT_SKIP_CHILDREN;
+      }
+
+      AstNode *param2 = param1->next;
+      DataType t2 = param2->as.fn_param.type;
+      if (!(t2.name.len == 3 && strncmp(t2.name.start, "str", 3) == 0 &&
+            (t2.ptr_depth + t2.array_dimens >= 1))) {
+        fprintf(stderr,
+                "Error: second parameter of main must be str[] or **str.\n");
+        return VISIT_SKIP_CHILDREN;
+      }
+
+      if (n->as.func_def.is_extern)
+        sb_append(sb, "extern ");
+      if (n->as.func_def.is_inline)
+        sb_append(sb, "inline ");
+      sb_append(sb, "int main(int ");
+      sb_append_len(sb, param1->as.fn_param.id.start,
+                    param1->as.fn_param.id.len);
+      sb_append(sb, ", char **");
+      sb_append_len(sb, param2->as.fn_param.id.start,
+                    param2->as.fn_param.id.len);
+      sb_append(sb, ") ");
+    } else {
+      if (n->as.func_def.is_extern)
+        sb_append(sb, "extern ");
+      if (n->as.func_def.is_inline)
+        sb_append(sb, "inline ");
+
+      DataType clean_ret = n->as.func_def.ret_type;
+      clean_ret.is_extern = false;
+      clean_ret.is_static = false;
+      if (clean_ret.ptr_depth == 0 && clean_ret.array_dimens == 0)
+        clean_ret.is_mut = true;
+
+      gen_type(clean_ret, sb);
+      sb_append_len(sb, n->as.func_def.fn_name.start,
+                    n->as.func_def.fn_name.len);
+      sb_append(sb, "(");
+
+      AstNode *p = n->as.func_def.params;
+      while (p) {
+        gen_type(p->as.fn_param.type, sb);
+        sb_append_len(sb, p->as.fn_param.id.start, p->as.fn_param.id.len);
+        p = p->next;
+        if (p)
+          sb_append(sb, ", ");
+      }
+      sb_append(sb, ") ");
+    }
+    if (n->as.func_def.block)
+      ast_traverse(v, n->as.func_def.block);
+    else
+      sb_append(sb, ";\n");
+
+    return VISIT_SKIP_CHILDREN;
+  }
+
+  case AST_VAR_DECL: {
+    DataType decl_type = n->as.var_decl.type;
+    if (n->as.var_decl.init)
+      decl_type.is_extern = false;
+
+    gen_type(decl_type, sb);
+    sb_append_len(sb, n->as.var_decl.id.start, n->as.var_decl.id.len);
+    if (n->as.var_decl.init) {
+      sb_append(sb, " = ");
+      ast_traverse(v, n->as.var_decl.init);
+    }
+    return VISIT_SKIP_CHILDREN;
+  }
+
+  case AST_BINOP:
+    sb_append(sb, "(");
+    break;
+
+  case AST_UOP:
+  case AST_ADDR_OF:
+  case AST_DEREF:
+    if (n->type == AST_ADDR_OF)
+      sb_append(sb, "&(");
+    else if (n->type == AST_DEREF)
+      sb_append(sb, "*(");
+    else {
+      if (!n->as.unop.is_postfix)
+        sb_append_len(sb, n->as.unop.op.start, n->as.unop.op.len);
+      sb_append(sb, "(");
+    }
+    break;
+
+  case AST_IF:
+    sb_append(sb, "if (");
+    ast_traverse(v, n->as.if_check.check);
+    sb_append(sb, ") ");
+    ast_traverse(v, n->as.if_check.action);
+    if (n->as.if_check.elseAct) {
+      sb_append(sb, " else ");
+      ast_traverse(v, n->as.if_check.elseAct);
+    }
+    return VISIT_SKIP_CHILDREN;
+
+  case AST_WHILE:
+    sb_append(sb, "while (");
+    ast_traverse(v, n->as.while_loop.check);
+    sb_append(sb, ") ");
+    ast_traverse(v, n->as.while_loop.action);
+    return VISIT_SKIP_CHILDREN;
+
+  case AST_FOR:
+    sb_append(sb, "for (");
+    if (n->as.for_loop.init)
+      ast_traverse(v, n->as.for_loop.init);
+    if (!n->as.for_loop.init || n->as.for_loop.init->type != AST_VAR_DECL)
+      sb_append(sb, "; ");
+
+    if (n->as.for_loop.check)
+      ast_traverse(v, n->as.for_loop.check);
+    sb_append(sb, "; ");
+
+    if (n->as.for_loop.inc)
+      ast_traverse(v, n->as.for_loop.inc);
+    sb_append(sb, ") ");
+
+    if (n->as.for_loop.action)
+      ast_traverse(v, n->as.for_loop.action);
+    return VISIT_SKIP_CHILDREN;
+
+  case AST_FUNC_CALL: {
+    bool is_ctor = false;
+    Sym *sym = NULL;
+
+    if (n->as.func_call.caller && n->as.func_call.caller->type == AST_MEMBER) {
+      AstNode *member_node = n->as.func_call.caller;
+      AstNode *base = member_node->as.member.base;
+
+      if (base->type == AST_IDENTIF && base->as.identif.res_sm &&
+          base->as.identif.res_sm->is_imported_mod) {
+        sb_append_len(sb, base->as.identif.val.start, base->as.identif.val.len);
+        sb_append(sb, "_");
+        sb_append_len(sb, member_node->as.member.name.start,
+                      member_node->as.member.name.len);
+        sb_append(sb, "(");
+      } else {
+        Token method = member_node->as.member.name;
+        DataType base_eval = base->eval_type;
+        Token base_type = base_eval.name;
+        if (base_type.len == 0)
+          base_type = member_node->as.member.type;
+
+        size_t mangled_len = base_type.len + 1 + method.len;
+        char *mangled = arena_alloc(ctx->arena, mangled_len + 1);
+        memcpy(mangled, base_type.start, base_type.len);
+        mangled[base_type.len] = '_';
+        memcpy(mangled + base_type.len + 1, method.start, method.len);
+        mangled[mangled_len] = '\0';
+
+        AstNode *func_def = map_get(ctx->func_map, mangled, mangled_len);
+        bool has_self = false;
+        bool needs_addrof = false;
+        bool needs_deref = false;
+
+        if (func_def && func_def->type == AST_FUNC) {
+          AstNode *first_param = func_def->as.func_def.params;
+          if (first_param) {
+            DataType pt = first_param->as.fn_param.type;
+            if (pt.name.len == base_type.len &&
+                strncmp(pt.name.start, base_type.start, pt.name.len) == 0 &&
+                pt.array_dimens == 0) {
+              has_self = true;
+              if (pt.ptr_depth > base_eval.ptr_depth)
+                needs_addrof = true;
+              else if (pt.ptr_depth < base_eval.ptr_depth)
+                needs_deref = true;
+            }
+          }
+        }
+
+        sb_append_len(sb, mangled, mangled_len);
+        sb_append(sb, "(");
+
+        if (has_self) {
+          AstNode *self_arg = base;
+          if (needs_addrof) {
+            AstNode addrof = {0};
+            addrof.type = AST_ADDR_OF;
+            addrof.as.unop.operand = self_arg;
+            ast_traverse(v, &addrof);
+          } else if (needs_deref) {
+            AstNode deref = {0};
+            deref.type = AST_DEREF;
+            deref.as.unop.operand = self_arg;
+            ast_traverse(v, &deref);
+          } else {
+            ast_traverse(v, self_arg);
+          }
+          if (n->as.func_call.args)
+            sb_append(sb, ", ");
+        }
+      }
+    } else {
+      if (n->as.func_call.caller &&
+          n->as.func_call.caller->type == AST_IDENTIF) {
+        sym = n->as.func_call.caller->as.identif.res_sm;
+        if (sym && (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
+                    sym->kind == SYM_ENUM))
+          is_ctor = true;
+      }
+      if (is_ctor) {
+        if (sym->kind == SYM_STRUCT)
+          sb_append(sb, "(struct ");
+        else if (sym->kind == SYM_UNION)
+          sb_append(sb, "(union ");
+        else
+          sb_append(sb, "(enum ");
+      } else {
+        sb_append(sb, "(");
+      }
+
+      ast_traverse(v, n->as.func_call.caller);
+      sb_append(sb, is_ctor ? "){" : "(");
+    }
+
+    AstNode *arg = n->as.func_call.args;
+    while (arg) {
+      ast_traverse(v, arg);
+      arg = arg->next;
+      if (arg)
+        sb_append(sb, ", ");
+    }
+    sb_append(sb, is_ctor ? "}" : ")");
+    return VISIT_SKIP_CHILDREN;
+  }
+
+  case AST_ARRAY_LIT: {
+    DataType t = n->eval_type;
+    if (t.name.len > 0) {
+      sb_append(sb, "(");
+      int array_lit_depth = 0;
+      for (int i = (int)ctx->parent_top - 1; i >= 0; i--) {
+        if (ctx->parent_stack[i]->type == AST_ARRAY_LIT)
+          array_lit_depth++;
+        else
+          break;
+      }
+
+      int total = t.ptr_depth + t.array_dimens;
+      total -= array_lit_depth;
+      if (total < 0)
+        total = 0;
+
+      t.ptr_depth = total > 0 ? total - 1 : 0;
+      t.array_dimens = 0;
+      gen_type(t, sb);
+      sb_append(sb, "[])");
+    }
+    sb_append(sb, "{");
+
+    AstNode *elem = n->as.array_lit.elements;
+    while (elem) {
+      ast_traverse(v, elem);
+      elem = elem->next;
+      if (elem)
+        sb_append(sb, ", ");
+    }
+    sb_append(sb, "}");
+    return VISIT_SKIP_CHILDREN;
+  }
+
+  case AST_RET:
+    if (n->as.ret_stmt.expr && n->as.ret_stmt.expr->type == AST_BLOCK) {
+      AstNode *block = n->as.ret_stmt.expr;
+      AstNode *unwrapped = block;
+      while (unwrapped && unwrapped->type == AST_BLOCK &&
+             unwrapped->as.block.first_stmt &&
+             !unwrapped->as.block.first_stmt->next) {
+        AstNode *stmt = unwrapped->as.block.first_stmt;
+        if (is_c_expr(stmt))
+          unwrapped = stmt;
+        else
+          break;
+      }
+
+      if (unwrapped->type != AST_BLOCK) {
+        sb_append(sb, "return ");
+        ast_traverse(v, unwrapped);
+        sb_append(sb, ";\n");
+      } else {
+        bool is_void = (block->eval_type.name.len == 4 &&
+                        strncmp(block->eval_type.name.start, "void", 4) == 0 &&
+                        block->eval_type.ptr_depth == 0 &&
+                        block->eval_type.array_dimens == 0) ||
+                       (block->eval_type.name.len == 0);
+        char var_name[64];
+        sprintf(var_name, "_tx_blk_%zu", ++ctx->yield_blk_ctr);
+
+        if (!is_void) {
+          DataType mut_type = block->eval_type;
+          mut_type.is_mut = true;
+          mut_type.is_threadlocal = false;
+          mut_type.is_static = false;
+          mut_type.is_extern = false;
+          gen_type(mut_type, sb);
+          sb_append(sb, var_name);
+          sb_append(sb, ";\n");
+          inject_yield_assignments(block, var_name, ctx->arena);
+        }
+
+        AstNode *stmt = block->as.block.first_stmt;
+        while (stmt) {
+          ast_traverse(v, stmt);
+          stmt = stmt->next;
+        }
+
+        if (!is_void) {
+          sb_append(sb, "return ");
+          sb_append(sb, var_name);
+          sb_append(sb, ";\n");
+        } else {
+          sb_append(sb, "return;\n");
+        }
+      }
+    } else {
+      sb_append(sb, "return ");
+      if (n->as.ret_stmt.expr)
+        ast_traverse(v, n->as.ret_stmt.expr);
+      sb_append(sb, ";\n");
+    }
+    return VISIT_SKIP_CHILDREN;
+
+  case AST_CAST:
+    sb_append(sb, "(");
+    gen_type(n->as.cast.target, sb);
+    sb_append(sb, ")(");
+    break;
+
+  case AST_STRUCT:
+  case AST_UNION:
+  case AST_ENUM: {
+    bool is_enum = (n->type == AST_ENUM);
+    bool is_nested = n->is_nested_sue;
+    bool is_opaque = (n->type == AST_STRUCT && !n->as.struct_def.contents) ||
+                     (n->type == AST_UNION && !n->as.union_def.contents);
+
+    Token tag = is_enum ? n->as.enum_def.enumn
+                        : (n->type == AST_STRUCT ? n->as.struct_def.structn
+                                                 : n->as.union_def.unionn);
+
+    if (is_nested) {
+      sb_append(sb, is_enum
+                        ? "enum {\n"
+                        : (n->type == AST_STRUCT ? "struct {\n" : "union {\n"));
+    } else {
+      if (is_opaque && !is_enum) {
+        sb_append(sb, "typedef ");
+        sb_append(sb, n->type == AST_STRUCT ? "struct " : "union ");
+        sb_append_len(sb, tag.start, tag.len);
+        sb_append(sb, " ");
+        sb_append_len(sb, tag.start, tag.len);
+        sb_append(sb, ";\n");
+        return VISIT_SKIP_CHILDREN;
+      }
+
+      if (is_enum) {
+        sb_append(sb, "typedef enum ");
+        sb_append_len(sb, tag.start, tag.len);
+        sb_append(sb, " {\n");
+      } else {
+        sb_append(sb, "typedef ");
+        sb_append(sb, n->type == AST_STRUCT ? "struct " : "union ");
+        sb_append_len(sb, tag.start, tag.len);
+        sb_append(sb, " ");
+        sb_append_len(sb, tag.start, tag.len);
+        sb_append(sb, ";\n");
+        sb_append(sb, n->type == AST_STRUCT ? "struct " : "union ");
+        sb_append_len(sb, tag.start, tag.len);
+        sb_append(sb, " {\n");
+      }
+    }
+
+    AstNode *child = is_enum
+                         ? n->as.enum_def.contents
+                         : (n->type == AST_STRUCT ? n->as.struct_def.contents
+                                                  : n->as.union_def.contents);
+    while (child) {
+      ast_traverse(v, child);
+      child = child->next;
+    }
+
+    if (is_nested) {
+      sb_append(sb, "} ");
+      sb_append_len(sb, tag.start, tag.len);
+      sb_append(sb, ";\n");
+    } else {
+      if (is_enum) {
+        sb_append(sb, "} ");
+        sb_append_len(sb, tag.start, tag.len);
+        sb_append(sb, ";\n");
+      } else
+        sb_append(sb, "};\n");
+    }
+    return VISIT_SKIP_CHILDREN;
+  }
+
+  case AST_ENUM_MEMBER:
+    sb_append_len(sb, n->as.enum_member.name.start, n->as.enum_member.name.len);
+    if (n->as.enum_member.val) {
+      sb_append(sb, " = ");
+      ast_traverse(v, n->as.enum_member.val);
+    }
+    sb_append(sb, ",\n");
+    return VISIT_SKIP_CHILDREN;
+
+  case AST_NUM_LIT:
+    sb_append_len(sb, n->as.num_lit.val.start, n->as.num_lit.val.len);
+    break;
+  case AST_IDENTIF:
+    sb_append_len(sb, n->as.identif.val.start, n->as.identif.val.len);
+    break;
+  case AST_STR_LIT:
+    sb_append_len(sb, n->as.str_lit.val.start, n->as.str_lit.val.len);
+    break;
+  case AST_BOOL_LIT:
+    sb_append_len(sb, n->as.bool_lit.val.start, n->as.bool_lit.val.len);
+    break;
+  case AST_CHAR_LIT:
+    sb_append_len(sb, n->as.char_lit.val.start, n->as.char_lit.val.len);
+    break;
+  case AST_NULL_LIT:
+    sb_append(sb, "NULL");
+    break;
+  case AST_BREAK:
+    sb_append(sb, "break;\n");
+    break;
+  case AST_CONTINUE:
+    sb_append(sb, "continue;\n");
+    break;
+
+  case AST_SWITCH:
+    sb_append(sb, "switch (");
+    ast_traverse(v, n->as.switch_stmt.check);
+    sb_append(sb, ") {\n");
+
+    AstNode *c = n->as.switch_stmt.cases;
+    while (c) {
+      ast_traverse(v, c);
+      c = c->next;
+    }
+    if (n->as.switch_stmt.default_case)
+      ast_traverse(v, n->as.switch_stmt.default_case);
+    sb_append(sb, "}\n");
+    return VISIT_SKIP_CHILDREN;
+
+  case AST_CASE:
+    if (n->as.case_stmt.val) {
+      sb_append(sb, "case ");
+      ast_traverse(v, n->as.case_stmt.val);
+      sb_append(sb, ":\n");
+    } else
+      sb_append(sb, "default:\n");
+    if (n->as.case_stmt.action)
+      ast_traverse(v, n->as.case_stmt.action);
+    return VISIT_SKIP_CHILDREN;
+
+  case AST_SIZEOF:
+    sb_append(sb, "sizeof(");
+    if (n->as.sizeof_expr.is_type) {
+      gen_type(n->as.sizeof_expr.target_type, sb);
+      sb_append(sb, ")");
+    } else {
+      ast_traverse(v, n->as.sizeof_expr.target_expr);
+      sb_append(sb, ")");
+    }
+    return VISIT_SKIP_CHILDREN;
+
+  default:
+    break;
+  }
+
+  return VISIT_CONTINUE;
+}
+
+void gen_exit(AstVisitor *v, AstNode *n) {
+  GenCtx *ctx = v->user_data;
+  StringBuilder *sb = ctx->sb;
+  AstNode *parent =
+      ctx->parent_top > 1 ? ctx->parent_stack[ctx->parent_top - 2] : NULL;
+
+  switch (n->type) {
+  case AST_BLOCK:
+    if (!(is_expr_context(parent, n) && is_auto_unwrap(n))) {
+      sb_append(sb, "}\n");
+    }
+    break;
+  case AST_BINOP:
+    sb_append(sb, ")");
+    break;
+  case AST_UOP:
+  case AST_ADDR_OF:
+  case AST_DEREF:
+    sb_append(sb, ")");
+    if (n->type == AST_UOP && n->as.unop.is_postfix)
+      sb_append_len(sb, n->as.unop.op.start, n->as.unop.op.len);
+    break;
+  case AST_CAST:
+    sb_append(sb, ")");
+    break;
+  case AST_MEMBER:
+    if (n->as.member.base->eval_type.ptr_depth > 0)
+      sb_append(sb, "->");
+    else
+      sb_append(sb, ".");
+    sb_append_len(sb, n->as.member.name.start, n->as.member.name.len);
+    break;
+  case AST_INDEX:
+    sb_append(sb, "]");
+    break;
+  default:
+    break;
+  }
+
+  // Top level semicolons are implicitly added for parent items
+  if (parent && (parent->type == AST_BLOCK || parent->type == AST_PROGRAM ||
+                 parent->type == AST_EXTERN)) {
+    bool needs_semi = (n->type == AST_FUNC_CALL || n->type == AST_BINOP ||
+                       n->type == AST_UOP || n->type == AST_IDENTIF ||
+                       n->type == AST_NUM_LIT || n->type == AST_STR_LIT ||
+                       n->type == AST_MEMBER || n->type == AST_VAR_DECL);
+    if (needs_semi)
+      sb_append(sb, ";\n");
+  }
+
+  ctx->parent_top--;
+}
+
+void generate_c_code(AstNode *root, StringBuilder *sb, HashMap *func_map,
+                     Arena *arena, bool is_main_mod) {
+  GenCtx data = {0};
+  data.sb = sb;
+  data.func_map = func_map;
+  data.arena = arena;
+  data.is_main_mod = is_main_mod;
+  data.yield_blk_ctr = 0;
+  data.parent_top = 0;
+
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = gen_enter;
+  visitor.exit_node = gen_exit;
+
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
+
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "OOM encountered during C code generation.\n");
+  }
 }
 
 typedef struct {
@@ -1668,398 +1190,286 @@ AstNode *clone_ast(AstNode *root, Arena *arena) {
   return new_root;
 }
 
+typedef struct LowerCtx {
+  Arena *arena;
+  AstNode **defers;
+  size_t defer_count;
+  size_t defer_cap;
+  LowerFrame *frames;
+  size_t frame_top;
+  size_t frame_cap;
+  uint64_t ret_id_ctr; // for generating unique temp variable names
+} LowerCtx;
+
+// Push defer into pool
+void push_defer(LowerCtx *ctx, AstNode *defer) {
+  if (ctx->defer_count >= ctx->defer_cap) {
+    ctx->defer_cap = ctx->defer_cap ? ctx->defer_cap * 2 : 64;
+    ctx->defers = realloc(ctx->defers, sizeof(AstNode *) * ctx->defer_cap);
+    if (!ctx->defers) { /* handle OOM */
+    }
+  }
+  ctx->defers[ctx->defer_count++] = defer;
+}
+
+// Helper to push a frame
+static void push_frame(LowerCtx *ctx, AstNode *n, size_t func_base,
+                       size_t loop_base, size_t block_base) {
+  if (ctx->frame_top >= ctx->frame_cap) {
+    ctx->frame_cap = ctx->frame_cap ? ctx->frame_cap * 2 : 64;
+    ctx->frames = realloc(ctx->frames, sizeof(LowerFrame) * ctx->frame_cap);
+    if (!ctx->frames) { /* handle OOM */
+    }
+  }
+  ctx->frames[ctx->frame_top++] = (LowerFrame){.node = n,
+                                               .func_base = func_base,
+                                               .loop_base = loop_base,
+                                               .block_base = block_base,
+                                               .step = 0};
+}
+
+// Get the top frame for a given node or NULL if not found
+LowerFrame *get_frame(LowerCtx *ctx, AstNode *n) {
+  for (size_t i = ctx->frame_top; i > 0; --i) {
+    if (ctx->frames[i - 1].node == n)
+      return &ctx->frames[i - 1];
+  }
+  return NULL;
+}
+
+// Visitor enter callback
+VisitResult lower_enter(AstVisitor *v, AstNode *n) {
+  LowerCtx *ctx = v->user_data;
+
+  // Get current frame
+  LowerFrame *frame =
+      ctx->frame_top > 0 ? &ctx->frames[ctx->frame_top - 1] : NULL;
+
+  switch (n->type) {
+  case AST_FUNC: {
+    push_frame(ctx, n, ctx->defer_count, ctx->defer_count, ctx->defer_count);
+    break;
+  }
+  case AST_BLOCK: {
+    // Remove all AST_DEFER children from the block and store them
+    AstNode **p = &n->as.block.first_stmt;
+    while (*p) {
+      if ((*p)->type == AST_DEFER) {
+        push_defer(ctx, *p);
+        *p = (*p)->next;
+      } else {
+        p = &(*p)->next;
+      }
+    }
+    // Push a block frame with current defer count
+    push_frame(ctx, n, frame ? frame->func_base : 0,
+               frame ? frame->loop_base : 0, ctx->defer_count);
+    break;
+  }
+  case AST_WHILE:
+  case AST_FOR: {
+    size_t func_base = frame ? frame->func_base : 0;
+    size_t loop_base = ctx->defer_count;
+    push_frame(ctx, n, func_base, loop_base, ctx->defer_count);
+    break;
+  }
+  case AST_IF:
+  case AST_SWITCH:
+  case AST_CASE: {
+    // These only need to preserve function/loop bases for control flow
+    size_t func_base = frame ? frame->func_base : 0;
+    size_t loop_base = frame ? frame->loop_base : 0;
+    push_frame(ctx, n, func_base, loop_base, ctx->defer_count);
+    break;
+  }
+  case AST_RET: {
+    // Replace return with a block that runs defers then returns
+    if (frame && ctx->defer_count > frame->func_base) {
+      AstNode *blk = arena_alloc(ctx->arena, sizeof(AstNode));
+      memset(blk, 0, sizeof(AstNode));
+      blk->type = AST_BLOCK;
+
+      AstNode *tail = NULL;
+      // If the return has an expression store it in a temp var
+      AstNode *ret_expr = n->as.ret_stmt.expr;
+      AstNode *ret_val_ident = NULL;
+      if (ret_expr) {
+        AstNode *decl = arena_alloc(ctx->arena, sizeof(AstNode));
+        memset(decl, 0, sizeof(AstNode));
+        decl->type = AST_VAR_DECL;
+        decl->as.var_decl.type = ret_expr->eval_type;
+        decl->as.var_decl.type.is_threadlocal = false;
+        decl->as.var_decl.type.is_static = false;
+        decl->as.var_decl.type.is_extern = false;
+
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "_tx_ret_%zu", ++ctx->ret_id_ctr);
+        decl->as.var_decl.id =
+            (Token){.start = arena_alloc(ctx->arena, strlen(tmp) + 1),
+                    .len = strlen(tmp),
+                    .type = TOKEN_IDENTIF};
+        strcpy((char *)decl->as.var_decl.id.start, tmp);
+        decl->as.var_decl.init = ret_expr;
+
+        ret_val_ident = arena_alloc(ctx->arena, sizeof(AstNode));
+        memset(ret_val_ident, 0, sizeof(AstNode));
+        ret_val_ident->type = AST_IDENTIF;
+        ret_val_ident->as.identif.val = decl->as.var_decl.id;
+
+        blk->as.block.first_stmt = decl;
+        tail = decl;
+      }
+
+      // Inject clones of defers in reverse
+      for (size_t i = ctx->defer_count; i > frame->func_base; --i) {
+        AstNode *cloned =
+            clone_ast(ctx->defers[i - 1]->as.defer_stmt.contents, ctx->arena);
+        if (!blk->as.block.first_stmt) {
+          blk->as.block.first_stmt = cloned;
+          tail = cloned;
+        } else {
+          tail->next = cloned;
+        }
+        while (tail->next)
+          tail = tail->next;
+      }
+
+      // New return statement
+      AstNode *new_ret = arena_alloc(ctx->arena, sizeof(AstNode));
+      memset(new_ret, 0, sizeof(AstNode));
+      new_ret->type = AST_RET;
+      new_ret->as.ret_stmt.expr = ret_val_ident;
+
+      if (!blk->as.block.first_stmt)
+        blk->as.block.first_stmt = new_ret;
+      else
+        tail->next = new_ret;
+
+      // Replace the current node with the block
+      AstNode *next = n->next;
+      *n = *blk;
+      n->next = next;
+    }
+    break;
+  }
+  case AST_BREAK:
+  case AST_CONTINUE: {
+    // Run defers up to loop_base
+    if (frame && ctx->defer_count > frame->loop_base) {
+      AstNode *blk = arena_alloc(ctx->arena, sizeof(AstNode));
+      memset(blk, 0, sizeof(AstNode));
+      blk->type = AST_BLOCK;
+      AstNode *tail = NULL;
+
+      for (size_t i = ctx->defer_count; i > frame->loop_base; --i) {
+        AstNode *cloned =
+            clone_ast(ctx->defers[i - 1]->as.defer_stmt.contents, ctx->arena);
+        if (!blk->as.block.first_stmt) {
+          blk->as.block.first_stmt = cloned;
+          tail = cloned;
+        } else {
+          tail->next = cloned;
+        }
+        while (tail->next)
+          tail = tail->next;
+      }
+
+      AstNode *ctrl = arena_alloc(ctx->arena, sizeof(AstNode));
+      memset(ctrl, 0, sizeof(AstNode));
+      ctrl->type = n->type;
+      if (n->type == AST_BREAK)
+        ctrl->as.break_stmt = n->as.break_stmt;
+      else
+        ctrl->as.continue_stmt = n->as.continue_stmt;
+
+      if (!blk->as.block.first_stmt)
+        blk->as.block.first_stmt = ctrl;
+      else
+        tail->next = ctrl;
+
+      AstNode *next = n->next;
+      *n = *blk;
+      n->next = next;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+  return VISIT_CONTINUE;
+}
+
+void lower_exit(AstVisitor *v, AstNode *n) {
+  LowerCtx *ctx = v->user_data;
+  LowerFrame *frame = get_frame(ctx, n);
+  if (!frame)
+    return;
+
+  switch (n->type) {
+  case AST_BLOCK: {
+    // Inject defers registered at end
+    AstNode *tail = n->as.block.first_stmt;
+    while (tail && tail->next)
+      tail = tail->next;
+
+    for (size_t i = ctx->defer_count; i > frame->block_base; --i) {
+      AstNode *cloned =
+          clone_ast(ctx->defers[i - 1]->as.defer_stmt.contents, ctx->arena);
+      if (!n->as.block.first_stmt) {
+        n->as.block.first_stmt = cloned;
+        tail = cloned;
+      } else {
+        tail->next = cloned;
+      }
+      while (tail->next)
+        tail = tail->next;
+    }
+    // Remove defers from pool
+    ctx->defer_count = frame->block_base;
+    break;
+  }
+  case AST_FUNC:
+  case AST_WHILE:
+  case AST_FOR:
+  case AST_IF:
+  case AST_SWITCH:
+  case AST_CASE:
+    // Pop the frame
+    ctx->frame_top--;
+    break;
+  default:
+    break;
+  }
+}
+
 void lower_defers(AstNode *root, Arena *arena) {
   if (!root)
     return;
 
-  size_t cap = 1024;
-  LowerFrame *stack = malloc(sizeof(LowerFrame) * cap);
-  size_t top = 0;
+  LowerCtx ctx = {.arena = arena,
+                  .defers = NULL,
+                  .defer_count = 0,
+                  .defer_cap = 0,
+                  .frames = NULL,
+                  .frame_top = 0,
+                  .frame_cap = 0,
+                  .ret_id_ctr = 0};
 
-  AstNode **defers = malloc(sizeof(AstNode *) * 1024);
-  size_t defer_count = 0;
+  AstVisitor visitor = {0};
+  visitor.user_data = &ctx;
+  visitor.enter_node = lower_enter;
+  visitor.exit_node = lower_exit;
 
-  stack[top++] = (LowerFrame){root, 0, 0, 0, 0};
-
-  uint64_t rid_c = 0;
-  while (top > 0) {
-    LowerFrame *f = &stack[top - 1];
-    AstNode *n = f->node;
-
-    if (n->type == AST_FUNC) {
-      if (f->step == 0) {
-        f->func_base = defer_count;
-        f->step = 1;
-        if (n->as.func_def.block) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            LowerFrame *new_stack =
-                realloc(stack, sizeof(LowerFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (LowerFrame){n->as.func_def.block, 0, f->func_base,
-                                      f->loop_base, defer_count};
-        }
-      } else {
-        top--;
-      }
-    } else if (n->type == AST_WHILE || n->type == AST_FOR) {
-      if (f->step == 0) {
-        f->loop_base = defer_count;
-        f->step = 1;
-        AstNode *body = (n->type == AST_WHILE) ? n->as.while_loop.action
-                                               : n->as.for_loop.action;
-        if (body) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            LowerFrame *new_stack =
-                realloc(stack, sizeof(LowerFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] =
-              (LowerFrame){body, 0, f->func_base, f->loop_base, defer_count};
-        }
-      } else {
-        top--;
-      }
-    } else if (n->type == AST_BLOCK) {
-      if (f->step == 0) {
-        f->block_base = defer_count;
-
-        AstNode **ptr = &n->as.block.first_stmt;
-        while (*ptr) {
-          if ((*ptr)->type == AST_DEFER) {
-            defers[defer_count++] = *ptr;
-            *ptr = (*ptr)->next;
-          } else {
-            ptr = &(*ptr)->next;
-          }
-        }
-
-        f->step = 1;
-
-        AstNode *stmt = n->as.block.first_stmt;
-        size_t count = 0;
-        while (stmt) {
-          count++;
-          stmt = stmt->next;
-        }
-        if (count > 0) {
-          AstNode **arr = malloc(sizeof(AstNode *) * count);
-          stmt = n->as.block.first_stmt;
-          for (size_t i = 0; i < count; i++) {
-            arr[i] = stmt;
-            stmt = stmt->next;
-          }
-          for (int i = count - 1; i >= 0; i--) {
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              LowerFrame *new_stack =
-                  realloc(stack, sizeof(LowerFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-              f = &stack[top - 1];
-            }
-            stack[top++] = (LowerFrame){arr[i], 0, f->func_base, f->loop_base,
-                                        defer_count};
-          }
-          free(arr);
-        }
-      } else if (f->step == 1) {
-        AstNode *tail = n->as.block.first_stmt;
-        while (tail && tail->next)
-          tail = tail->next;
-
-        // Inject block-specific defers at the very end of the block
-        for (size_t i = defer_count; i > f->block_base; i--) {
-          AstNode *cloned =
-              clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
-          if (!n->as.block.first_stmt) {
-            n->as.block.first_stmt = cloned;
-            tail = cloned;
-          } else {
-            tail->next = cloned;
-          }
-          while (tail->next)
-            tail = tail->next;
-        }
-        defer_count = f->block_base;
-        top--;
-      }
-    } else if (n->type == AST_RET) {
-      if (defer_count > f->func_base) {
-        AstNode *blk = arena_alloc(arena, sizeof(AstNode));
-        memset(blk, 0, sizeof(AstNode));
-        blk->type = AST_BLOCK;
-
-        AstNode *ret_val_decl = NULL;
-        AstNode *ret_val_ident = NULL;
-
-        if (n->as.ret_stmt.expr) {
-          ret_val_decl = arena_alloc(arena, sizeof(AstNode));
-          memset(ret_val_decl, 0, sizeof(AstNode));
-          ret_val_decl->type = AST_VAR_DECL;
-          ret_val_decl->as.var_decl.type = n->as.ret_stmt.expr->eval_type;
-          ret_val_decl->as.var_decl.type.is_threadlocal = false;
-          ret_val_decl->as.var_decl.type.is_static = false;
-          ret_val_decl->as.var_decl.type.is_extern = false;
-
-          char *tmp_name = arena_alloc(arena, 64);
-          sprintf(tmp_name, "_tx_ret_%zu", ++rid_c);
-          ret_val_decl->as.var_decl.id = (Token){
-              tmp_name, (unsigned int)strlen(tmp_name), TOKEN_IDENTIF, 0, 0};
-          ret_val_decl->as.var_decl.init = n->as.ret_stmt.expr;
-
-          ret_val_ident = arena_alloc(arena, sizeof(AstNode));
-          memset(ret_val_ident, 0, sizeof(AstNode));
-          ret_val_ident->type = AST_IDENTIF;
-          ret_val_ident->as.identif.val = ret_val_decl->as.var_decl.id;
-        }
-
-        AstNode *tail = NULL;
-        if (ret_val_decl) {
-          blk->as.block.first_stmt = ret_val_decl;
-          tail = ret_val_decl;
-        }
-
-        for (size_t i = defer_count; i > f->func_base; i--) {
-          AstNode *cloned =
-              clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
-          if (!blk->as.block.first_stmt) {
-            blk->as.block.first_stmt = cloned;
-            tail = cloned;
-          } else {
-            tail->next = cloned;
-          }
-          while (tail->next)
-            tail = tail->next;
-        }
-
-        AstNode *new_ret = arena_alloc(arena, sizeof(AstNode));
-        memset(new_ret, 0, sizeof(AstNode));
-        new_ret->type = AST_RET;
-        new_ret->as.ret_stmt.expr = ret_val_ident;
-
-        if (!blk->as.block.first_stmt)
-          blk->as.block.first_stmt = new_ret;
-        else
-          tail->next = new_ret;
-
-        AstNode *nxt = n->next;
-        *n = *blk;
-        n->next = nxt;
-      }
-      top--;
-    } else if (n->type == AST_BREAK || n->type == AST_CONTINUE) {
-      if (defer_count > f->loop_base) {
-        AstNode *blk = arena_alloc(arena, sizeof(AstNode));
-        memset(blk, 0, sizeof(AstNode));
-        blk->type = AST_BLOCK;
-        AstNode *tail = NULL;
-
-        for (size_t i = defer_count; i > f->loop_base; i--) {
-          AstNode *cloned =
-              clone_ast(defers[i - 1]->as.defer_stmt.contents, arena);
-          if (!blk->as.block.first_stmt) {
-            blk->as.block.first_stmt = cloned;
-            tail = cloned;
-          } else {
-            tail->next = cloned;
-          }
-          while (tail->next)
-            tail = tail->next;
-        }
-
-        AstNode *new_ctrl = arena_alloc(arena, sizeof(AstNode));
-        memset(new_ctrl, 0, sizeof(AstNode));
-        new_ctrl->type = n->type;
-        if (n->type == AST_BREAK)
-          new_ctrl->as.break_stmt = n->as.break_stmt;
-        else
-          new_ctrl->as.continue_stmt = n->as.continue_stmt;
-
-        if (!blk->as.block.first_stmt)
-          blk->as.block.first_stmt = new_ctrl;
-        else
-          tail->next = new_ctrl;
-
-        AstNode *nxt = n->next;
-        *n = *blk;
-        n->next = nxt;
-      }
-      top--;
-    } else if (n->type == AST_IF) {
-      if (f->step == 0) {
-        f->step = 1;
-        if (n->as.if_check.elseAct) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            LowerFrame *new_stack =
-                realloc(stack, sizeof(LowerFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (LowerFrame){n->as.if_check.elseAct, 0, f->func_base,
-                                      f->loop_base, f->block_base};
-        }
-        if (n->as.if_check.action) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            LowerFrame *new_stack =
-                realloc(stack, sizeof(LowerFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (LowerFrame){n->as.if_check.action, 0, f->func_base,
-                                      f->loop_base, f->block_base};
-        }
-      } else {
-        top--;
-      }
-    } else if (n->type == AST_SWITCH) {
-      if (f->step == 0) {
-        f->step = 1;
-        f->loop_base = defer_count;
-        if (n->as.switch_stmt.default_case) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            LowerFrame *new_stack =
-                realloc(stack, sizeof(LowerFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] =
-              (LowerFrame){n->as.switch_stmt.default_case, 0, f->func_base,
-                           f->loop_base, f->block_base};
-        }
-        AstNode *c = n->as.switch_stmt.cases;
-        while (c) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            LowerFrame *new_stack =
-                realloc(stack, sizeof(LowerFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] =
-              (LowerFrame){c, 0, f->func_base, f->loop_base, f->block_base};
-          c = c->next;
-        }
-      } else {
-        top--;
-      }
-    } else if (n->type == AST_CASE) {
-      if (f->step == 0) {
-        f->step = 1;
-        if (n->as.case_stmt.action) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            LowerFrame *new_stack =
-                realloc(stack, sizeof(LowerFrame) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-            f = &stack[top - 1];
-          }
-          stack[top++] = (LowerFrame){n->as.case_stmt.action, 0, f->func_base,
-                                      f->loop_base, f->block_base};
-        }
-      } else {
-        top--;
-      }
-    } else if (n->type == AST_PROGRAM || n->type == AST_EXTERN) {
-      if (f->step == 0) {
-        f->step = 1;
-        AstNode *stmt = (n->type == AST_PROGRAM) ? n->as.block.first_stmt
-                                                 : n->as.extern_block.contents;
-        size_t count = 0;
-        while (stmt) {
-          count++;
-          stmt = stmt->next;
-        }
-        if (count > 0) {
-          AstNode **arr = malloc(sizeof(AstNode *) * count);
-          stmt = (n->type == AST_PROGRAM) ? n->as.block.first_stmt
-                                          : n->as.extern_block.contents;
-          for (size_t i = 0; i < count; i++) {
-            arr[i] = stmt;
-            stmt = stmt->next;
-          }
-          for (int i = count - 1; i >= 0; i--) {
-            if (top >= cap) {
-              size_t new_cap = cap * 2;
-              LowerFrame *new_stack =
-                  realloc(stack, sizeof(LowerFrame) * new_cap);
-              if (!new_stack) {
-                fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-                free(stack);
-                return;
-              }
-              stack = new_stack;
-              cap = new_cap;
-              f = &stack[top - 1];
-            }
-            stack[top++] = (LowerFrame){arr[i], 0, f->func_base, f->loop_base,
-                                        f->block_base};
-          }
-          free(arr);
-        }
-      } else {
-        top--;
-      }
-    } else {
-      top--;
-    }
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "OOM encountered while lowering defers.\n");
   }
-  free(stack);
-  free(defers);
+
+  free(ctx.defers);
+  free(ctx.frames);
 }
 
 bool compile_from_memory(const char *compiler, const char **flags,
@@ -2305,575 +1715,124 @@ bool output_to_c_and_compile(SemCtx *sem, const char *out_binary_name,
   return compile_success;
 }
 
+typedef struct MangleCtx {
+  Arena *arena;
+  HashMap *rename_map;
+} MangleCtx;
+
+// Rename a token if present
+void rename_token(MangleCtx *ctx, Token *tok) {
+  if (!tok || tok->len == 0)
+    return;
+  Token *replacement = map_get(ctx->rename_map, tok->start, tok->len);
+  if (replacement) {
+    *tok = *replacement;
+  }
+}
+
+// Rename name of DataType
+void rename_type(MangleCtx *ctx, DataType *t) {
+  if (t)
+    rename_token(ctx, &t->name);
+}
+
+VisitResult mangle_enter(AstVisitor *v, AstNode *n) {
+  MangleCtx *ctx = v->user_data;
+
+  // Always rename eval_type name
+  rename_type(ctx, &n->eval_type);
+
+  switch (n->type) {
+  case AST_FUNC:
+    rename_token(ctx, &n->as.func_def.fn_name);
+    rename_type(ctx, &n->as.func_def.ret_type);
+    break;
+  case AST_VAR_DECL:
+    rename_token(ctx, &n->as.var_decl.id);
+    rename_type(ctx, &n->as.var_decl.type);
+    break;
+  case AST_STRUCT:
+    rename_token(ctx, &n->as.struct_def.structn);
+    break;
+  case AST_UNION:
+    rename_token(ctx, &n->as.union_def.unionn);
+    break;
+  case AST_ENUM:
+    rename_token(ctx, &n->as.enum_def.enumn);
+    break;
+  case AST_ENUM_MEMBER:
+    rename_token(ctx, &n->as.enum_member.name);
+    break;
+  case AST_PARAM:
+    rename_token(ctx, &n->as.fn_param.id);
+    rename_type(ctx, &n->as.fn_param.type);
+    break;
+  case AST_IDENTIF:
+    rename_token(ctx, &n->as.identif.val);
+    break;
+  case AST_CAST:
+    rename_type(ctx, &n->as.cast.target);
+    break;
+  case AST_MEMBER:
+    // The member name itself is not mangled, only the base might be
+    break;
+  default:
+    break;
+  }
+  return VISIT_CONTINUE;
+}
+
 void mangle_mod_symbols(Arena *arena, Module *mod) {
+  if (!mod || !mod->ast_root)
+    return;
+
   HashMap *rename_map = arena_alloc(arena, sizeof(HashMap));
   map_init(rename_map, arena, 128);
 
   AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
-    Token *old_tok = NULL;
-
+    Token *tok = NULL;
     if (stmt->type == AST_FUNC && !stmt->as.func_def.is_extern) {
-      old_tok = &stmt->as.func_def.fn_name;
+      tok = &stmt->as.func_def.fn_name;
     } else if ((stmt->type == AST_STRUCT && stmt->as.struct_def.contents) ||
                (stmt->type == AST_UNION && stmt->as.union_def.contents) ||
                stmt->type == AST_ENUM) {
-      old_tok = (stmt->type == AST_STRUCT)  ? &stmt->as.struct_def.structn
-                : (stmt->type == AST_UNION) ? &stmt->as.union_def.unionn
-                                            : &stmt->as.enum_def.enumn;
+      if (stmt->type == AST_STRUCT)
+        tok = &stmt->as.struct_def.structn;
+      else if (stmt->type == AST_UNION)
+        tok = &stmt->as.union_def.unionn;
+      else
+        tok = &stmt->as.enum_def.enumn;
     } else if (stmt->type == AST_VAR_DECL) {
-      old_tok = &stmt->as.var_decl.id;
+      tok = &stmt->as.var_decl.id;
     }
 
-    if (old_tok && old_tok->len > 0) {
-      size_t nlen = strlen(mod->mod_name) + 1 + old_tok->len;
-      char *new_name = arena_alloc(arena, nlen + 1);
-      sprintf(new_name, "%s_%.*s", mod->mod_name, (int)old_tok->len,
-              old_tok->start);
-
+    if (tok && tok->len > 0) {
+      size_t new_len = strlen(mod->mod_name) + 1 + tok->len;
+      char *new_name = arena_alloc(arena, new_len + 1);
+      snprintf(new_name, new_len + 1, "%s_%.*s", mod->mod_name, (int)tok->len,
+               tok->start);
       Token *mangled = arena_alloc(arena, sizeof(Token));
       mangled->start = new_name;
-      mangled->len = nlen;
-
-      map_set(rename_map, old_tok->start, old_tok->len, mangled);
+      mangled->len = new_len;
+      map_set(rename_map, tok->start, tok->len, mangled);
     }
     stmt = stmt->next;
   }
 
-  size_t cap = 1024;
-  AstNode **stack = malloc(sizeof(AstNode *) * cap);
-  size_t top = 0;
+  // Traverse AST and rename all occurrences
+  MangleCtx ctx = {.arena = arena, .rename_map = rename_map};
+  AstVisitor visitor = {0};
+  visitor.user_data = &ctx;
+  visitor.enter_node = mangle_enter;
 
-  stack[top++] = mod->ast_root;
-
-#define RENAME_TOK(tok)                                                        \
-  do {                                                                         \
-    if ((tok).len > 0) {                                                       \
-      Token *rep = map_get(rename_map, (tok).start, (tok).len);                \
-      if (rep) {                                                               \
-        (tok) = *rep;                                                          \
-      }                                                                        \
-    }                                                                          \
-  } while (0)
-
-  while (top > 0) {
-    AstNode *n = stack[--top];
-    if (!n)
-      continue;
-
-    RENAME_TOK(n->eval_type.name);
-
-    switch (n->type) {
-    case AST_PROGRAM:
-    case AST_BLOCK:
-    case AST_EXTERN: {
-      AstNode *curr = (n->type == AST_EXTERN) ? n->as.extern_block.contents
-                                              : n->as.block.first_stmt;
-      while (curr) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = curr;
-        curr = curr->next;
-      }
-      break;
-    }
-    case AST_FUNC:
-      RENAME_TOK(n->as.func_def.fn_name);
-      RENAME_TOK(n->as.func_def.ret_type.name);
-      if (n->as.func_def.params) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.func_def.params;
-      }
-      if (n->as.func_def.block) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.func_def.block;
-      }
-      break;
-    case AST_PARAM:
-      RENAME_TOK(n->as.fn_param.id);
-      RENAME_TOK(n->as.fn_param.type.name);
-      break;
-    case AST_VAR_DECL:
-      RENAME_TOK(n->as.var_decl.id);
-      RENAME_TOK(n->as.var_decl.type.name);
-      if (n->as.var_decl.init) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.var_decl.init;
-      }
-      break;
-    case AST_STRUCT:
-    case AST_UNION:
-    case AST_ENUM: {
-      Token *tag = (n->type == AST_STRUCT)  ? &n->as.struct_def.structn
-                   : (n->type == AST_UNION) ? &n->as.union_def.unionn
-                                            : &n->as.enum_def.enumn;
-      RENAME_TOK(*tag);
-      AstNode *child = (n->type == AST_STRUCT)  ? n->as.struct_def.contents
-                       : (n->type == AST_UNION) ? n->as.union_def.contents
-                                                : n->as.enum_def.contents;
-      while (child) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = child;
-        child = child->next;
-      }
-      break;
-    }
-    case AST_ENUM_MEMBER:
-      RENAME_TOK(n->as.enum_member.name);
-      if (n->as.enum_member.val) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.enum_member.val;
-      }
-      break;
-    case AST_IDENTIF:
-      RENAME_TOK(n->as.identif.val);
-      break;
-    case AST_CAST:
-      RENAME_TOK(n->as.cast.target.name);
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.cast.op;
-      break;
-    case AST_FUNC_CALL: {
-      AstNode *arg = n->as.func_call.args;
-      while (arg) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = arg;
-        arg = arg->next;
-      }
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.func_call.caller;
-      break;
-    }
-    case AST_BINOP:
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.binop.right;
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.binop.left;
-      break;
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF:
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.unop.operand;
-      break;
-    case AST_IF:
-      if (n->as.if_check.elseAct) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.if_check.elseAct;
-      }
-      if (n->as.if_check.action) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.if_check.action;
-      }
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.if_check.check;
-      break;
-    case AST_WHILE:
-      if (n->as.while_loop.action) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.while_loop.action;
-      }
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.while_loop.check;
-      break;
-    case AST_FOR:
-      if (n->as.for_loop.action) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.for_loop.action;
-      }
-      if (n->as.for_loop.inc) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.for_loop.inc;
-      }
-      if (n->as.for_loop.check) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.for_loop.check;
-      }
-      if (n->as.for_loop.init) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.for_loop.init;
-      }
-      break;
-    case AST_MEMBER:
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.member.base;
-      break;
-    case AST_INDEX:
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.index.index;
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.index.base;
-      break;
-    case AST_ARRAY_LIT: {
-      AstNode *elem = n->as.array_lit.elements;
-      while (elem) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = elem;
-        elem = elem->next;
-      }
-      break;
-    }
-    case AST_RET:
-      if (n->as.ret_stmt.expr) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.ret_stmt.expr;
-      }
-      break;
-    case AST_DEFER:
-      if (n->as.defer_stmt.contents) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.defer_stmt.contents;
-      }
-      break;
-    case AST_SWITCH:
-      if (n->as.switch_stmt.default_case) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.switch_stmt.default_case;
-      }
-      {
-        AstNode *c = n->as.switch_stmt.cases;
-        while (c) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = c;
-          c = c->next;
-        }
-      }
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.switch_stmt.check;
-      break;
-    case AST_CASE:
-      if (n->as.case_stmt.action) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = n->as.case_stmt.action;
-      }
-      if (top >= cap) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, sizeof(AstNode *) * new_cap);
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
-        }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = n->as.case_stmt.val;
-      break;
-    default:
-      break;
-    }
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, mod->ast_root);
+  } else {
+    fprintf(stderr, "OOM encountered while mangling symbols.\n");
   }
 
-#undef RENAME_TOK
-  free(stack);
   map_free_buckets(rename_map);
 }
