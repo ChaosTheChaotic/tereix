@@ -592,8 +592,6 @@ VisitResult gen_enter(AstVisitor *v, AstNode *n) {
           sb_append(sb, "(union ");
         else
           sb_append(sb, "(enum ");
-      } else {
-        sb_append(sb, "(");
       }
 
       ast_traverse(v, n->as.func_call.caller);
