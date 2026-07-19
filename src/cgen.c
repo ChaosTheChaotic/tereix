@@ -59,10 +59,8 @@ void gen_type(DataType type, StringBuilder *sb) {
 
   sb_append(sb, " ");
 
-  long total_ptrs = type.ptr_depth + type.array_dimens;
-  for (long i = 0; i < total_ptrs; i++) {
+  for (long i = 0; i < type.ptr_depth; i++)
     sb_append(sb, "*");
-  }
 }
 
 HashMap *build_func_map(Arena *arena, AstNode *root) {
@@ -292,7 +290,7 @@ static bool is_auto_unwrap(AstNode *n) {
   return unwrapped != n;
 }
 
-static VisitResult gen_enter(AstVisitor *v, AstNode *n) {
+VisitResult gen_enter(AstVisitor *v, AstNode *n) {
   GenCtx *ctx = v->user_data;
   StringBuilder *sb = ctx->sb;
   AstNode *parent =
@@ -399,6 +397,11 @@ static VisitResult gen_enter(AstVisitor *v, AstNode *n) {
       clean_ret.is_static = false;
       if (clean_ret.ptr_depth == 0 && clean_ret.array_dimens == 0)
         clean_ret.is_mut = true;
+      if (clean_ret.array_dimens > 0) {
+        // C doesn't allow array return types so treat as pointer to element
+        clean_ret.ptr_depth += clean_ret.array_dimens;
+        clean_ret.array_dimens = 0;
+      }
 
       gen_type(clean_ret, sb);
       sb_append_len(sb, n->as.func_def.fn_name.start,
@@ -425,6 +428,20 @@ static VisitResult gen_enter(AstVisitor *v, AstNode *n) {
 
   case AST_VAR_DECL: {
     DataType decl_type = n->as.var_decl.type;
+    long saved_dims = decl_type.array_dimens;
+    decl_type.array_dimens = 0;
+    gen_type(decl_type, sb);
+    decl_type.array_dimens = saved_dims;
+
+    sb_append_len(sb, n->as.var_decl.id.start, n->as.var_decl.id.len);
+
+    for (unsigned int i = 0; i < decl_type.array_dimens; i++) {
+      sb_append(sb, "[");
+      if (decl_type.dim_sizes[i]) {
+        ast_traverse(v, decl_type.dim_sizes[i]); // gen size expr
+      }
+      sb_append(sb, "]");
+    }
     if (n->as.var_decl.init)
       decl_type.is_extern = false;
 
