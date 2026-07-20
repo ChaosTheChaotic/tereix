@@ -951,114 +951,84 @@ void add_completion_item(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
   yyjson_mut_arr_append(arr, item);
 }
 
-void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
-                           AstNode *func_node, int target_line) {
-  if (!func_node || func_node->type != AST_FUNC)
-    return;
+typedef struct {
+  yyjson_mut_doc *jdoc;
+  yyjson_mut_val *arr;
+  unsigned int target_line;    // 1 based line number of the cursor
+  AstNode *root_func; // the function we are inside to skip nested funcs
+} LocalCompData;
 
-  AstNode *param = func_node->as.func_def.params;
-  while (param && param->type == AST_PARAM) {
-    Token id = param->as.fn_param.id;
-    if (id.len > 0 && id.line <= (unsigned int)target_line) {
-      char name_buf[256];
-      snprintf(name_buf, sizeof(name_buf), "%.*s", (int)id.len, id.start);
+VisitResult local_comp_enter(AstVisitor *visitor, AstNode *node) {
+    LocalCompData *data = (LocalCompData*)visitor->user_data;
 
-      char detail_buf[1024] = {0};
-      format_type_to_buf(param->as.fn_param.type, detail_buf,
-                         sizeof(detail_buf));
-
-      add_completion_item(jdoc, arr, name_buf, 6,
-                          detail_buf[0] != '\0' ? detail_buf : "parameter",
-                          NULL, NULL);
+    // Skip nested functions entirely
+    if (node->type == AST_FUNC && node != data->root_func) {
+        return VISIT_SKIP_CHILDREN;
     }
-    param = param->next;
-  }
 
-  if (!func_node->as.func_def.block)
-    return;
+    if (node->type == AST_PARAM) {
+        Token id = node->as.fn_param.id;
+        if (id.line <= data->target_line && id.len > 0) {
+            char name_buf[256];
+            if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
+                return VISIT_CONTINUE;
 
-  size_t cap = 256;
-  AstNode **stack = malloc(sizeof(AstNode *) * cap);
-  size_t top = 0;
-  stack[top++] = func_node->as.func_def.block;
+            char detail_buf[1024] = {0};
+            format_type_to_buf(node->as.fn_param.type, detail_buf, sizeof(detail_buf));
 
-  while (top > 0) {
-    AstNode *node = stack[--top];
-    if (!node)
-      continue;
+            add_completion_item(data->jdoc, data->arr, name_buf, 6,
+                                detail_buf[0] ? detail_buf : "parameter",
+                                NULL, NULL);
+        }
+        // Parameters have no children we care about
+        return VISIT_SKIP_CHILDREN;
+    }
 
     if (node->type == AST_VAR_DECL) {
-      Token id = node->as.var_decl.id;
-      // Only suggest variables declared BEFORE or ON the cursor line
-      if (id.line <= (unsigned int)target_line) {
-        char name_buf[256];
-        if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
-          continue;
+        Token id = node->as.var_decl.id;
+        if (id.line <= data->target_line && id.len > 0) {
+            char name_buf[256];
+            if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
+                return VISIT_CONTINUE;
 
-        char detail_buf[1024] = {0};
-        format_type_to_buf(node->as.var_decl.type, detail_buf,
-                           sizeof(detail_buf));
+            char detail_buf[1024] = {0};
+            format_type_to_buf(node->as.var_decl.type, detail_buf, sizeof(detail_buf));
 
-        add_completion_item(
-            jdoc, arr, name_buf, 6,
-            detail_buf[0] != '\0' ? detail_buf : "local variable", NULL, NULL);
-      }
-    }
-
-    // Push sibling
-    if (node->next) {
-      if (top >= cap - 1) {
-        size_t new_cap = cap * 2;
-        AstNode **new_stack = realloc(stack, new_cap * sizeof(AstNode *));
-        if (!new_stack) {
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-          free(stack);
-          return;
+            add_completion_item(data->jdoc, data->arr, name_buf, 6,
+                                detail_buf[0] ? detail_buf : "local variable",
+                                NULL, NULL);
         }
-        stack = new_stack;
-        cap = new_cap;
-      }
-      stack[top++] = node->next;
+        // Skip the initializer
+        return VISIT_SKIP_CHILDREN;
     }
 
-// Push children based on node type
-#define PUSH_CHILD(n)                                                          \
-  do {                                                                         \
-    if (n) {                                                                   \
-      if (top >= cap - 1) {                                                    \
-        size_t new_cap = cap * 2;                                              \
-        AstNode **new_stack = realloc(stack, new_cap * sizeof(AstNode *));     \
-        if (!new_stack) {                                                      \
-          fprintf(stderr, "OOM encountered whilst reallocating stack.\n");     \
-          free(stack);                                                         \
-          return;                                                              \
-        }                                                                      \
-        stack = new_stack;                                                     \
-        cap = new_cap;                                                         \
-      }                                                                        \
-      stack[top++] = (n);                                                      \
-    }                                                                          \
-  } while (0)
+    return VISIT_CONTINUE;
+}
 
-    if (node->type == AST_BLOCK)
-      PUSH_CHILD(node->as.block.first_stmt);
-    else if (node->type == AST_IF) {
-      PUSH_CHILD(node->as.if_check.elseAct);
-      PUSH_CHILD(node->as.if_check.action);
-    } else if (node->type == AST_WHILE)
-      PUSH_CHILD(node->as.while_loop.action);
-    else if (node->type == AST_FOR)
-      PUSH_CHILD(node->as.for_loop.action);
-    else if (node->type == AST_DEFER)
-      PUSH_CHILD(node->as.defer_stmt.contents);
-    else if (node->type == AST_SWITCH) {
-      PUSH_CHILD(node->as.switch_stmt.default_case);
-      PUSH_CHILD(node->as.switch_stmt.cases);
-    } else if (node->type == AST_CASE)
-      PUSH_CHILD(node->as.case_stmt.action);
-#undef PUSH_CHILD
-  }
-  free(stack);
+void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
+                           AstNode *func_node, int target_line) {
+    if (!func_node || func_node->type != AST_FUNC)
+        return;
+
+    LocalCompData data = {
+        .jdoc = jdoc,
+        .arr = arr,
+        .target_line = target_line,
+        .root_func = func_node
+    };
+
+    AstVisitor visitor = {0};
+    visitor.user_data = &data;
+    visitor.enter_node = local_comp_enter;
+
+    jmp_buf panic_env;
+    visitor.panic_env = &panic_env;
+
+    if (setjmp(panic_env) == 0) {
+        ast_traverse(&visitor, func_node);
+    } else {
+        fprintf(stderr, "OOM encountered during local completion collection.\n");
+    }
 }
 
 AstNode *find_sue_decl(AstNode *root, const char *target_name,
