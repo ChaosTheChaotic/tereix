@@ -98,444 +98,195 @@ bool buf_append(ByteBuffer *buf, const void *data, size_t len) {
   return true;
 }
 
+static inline DataType *get_node_datatype(AstNode *n) {
+  if (!n)
+    return NULL;
+  switch (n->type) {
+  case AST_VAR_DECL:
+    return &n->as.var_decl.type;
+  case AST_FUNC:
+    return &n->as.func_def.ret_type;
+  case AST_PARAM:
+    return &n->as.fn_param.type;
+  case AST_CAST:
+    return &n->as.cast.target;
+  case AST_SIZEOF:
+    return &n->as.sizeof_expr.target_type;
+  default:
+    return NULL;
+  }
+}
+
+typedef struct {
+  AstNode **queue;
+  uint32_t q_cap;
+  uint32_t tail;
+  PtrMap *map;
+} GatherCtx;
+
+// Gathers nodes in DFS order
+VisitResult gather_enter(AstVisitor *visitor, AstNode *n) {
+  GatherCtx *ctx = (GatherCtx *)visitor->user_data;
+
+  // Add to map, preventing duplicates
+  if (!ptrmap_put(ctx->map, n, ctx->tail)) {
+    return VISIT_CONTINUE;
+  }
+
+  if (ctx->tail >= ctx->q_cap) {
+    ctx->q_cap *= 2;
+    ctx->queue = realloc(ctx->queue, ctx->q_cap * sizeof(AstNode *));
+  }
+  ctx->queue[ctx->tail++] = n;
+
+  // Traverse dim_sizes manually since ast_traverse doesnt natively follow them
+  if (n->eval_type.array_dimens > 0 && n->eval_type.dim_sizes) {
+    for (uint32_t d = 0; d < n->eval_type.array_dimens; d++) {
+      if (n->eval_type.dim_sizes[d])
+        ast_traverse(visitor, n->eval_type.dim_sizes[d]);
+    }
+  }
+
+  DataType *dt2 = get_node_datatype(n);
+  if (dt2 && dt2->array_dimens > 0 && dt2->dim_sizes) {
+    for (uint32_t d = 0; d < dt2->array_dimens; d++) {
+      if (dt2->dim_sizes[d])
+        ast_traverse(visitor, dt2->dim_sizes[d]);
+    }
+  }
+
+  return VISIT_CONTINUE;
+}
+
+#define TAG_MASK 0xFFF0000000000000ULL
+#define TAG_AST 0xA570000000000000ULL
+#define TAG_TOK 0x70B0000000000000ULL
+#define TAG_KWD 0x5DD0000000000000ULL
+#define TAG_NUL 0x1D10000000000000ULL
+
 void cache_write_ast(const char *cache_path, AstNode *root,
                      const char *source_base, uint64_t content_hash) {
   if (!root)
     return;
 
-  uint32_t q_cap = 1024;
-  AstNode **queue = malloc(q_cap * sizeof(AstNode *));
-  uint32_t head = 0, tail = 0;
-
   PtrMap map;
   ptrmap_init(&map, 2048);
 
-#define PUSH_Q(n)                                                              \
-  do {                                                                         \
-    if ((n) && ptrmap_put(&map, (n), tail)) {                                  \
-      if (tail >= q_cap) {                                                     \
-        size_t new_q_cap = q_cap * 2;                                          \
-        AstNode **new_queue = realloc(queue, new_q_cap * sizeof(AstNode *));   \
-        if (!new_queue) {                                                      \
-          fprintf(stderr, "Failed to realloc stack during cache write\n");     \
-          free(queue);                                                         \
-          return;                                                              \
-        }                                                                      \
-        queue = new_queue;                                                     \
-        q_cap = new_q_cap;                                                     \
-      }                                                                        \
-      queue[tail++] = (n);                                                     \
-    }                                                                          \
-  } while (0)
+  GatherCtx ctx = {0};
+  ctx.q_cap = 1024;
+  ctx.queue = malloc(ctx.q_cap * sizeof(AstNode *));
+  ctx.map = &map;
 
-  PUSH_Q(root);
+  AstVisitor visitor = {0};
+  visitor.user_data = &ctx;
+  visitor.enter_node = gather_enter;
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-  // BFS
-  while (head < tail) {
-    AstNode *node = queue[head++];
-    PUSH_Q(node->next);
-
-    // Enqueue EvalType arrays
-    if (node->eval_type.array_dimens > 0 && node->eval_type.dim_sizes != NULL) {
-      for (uint32_t d = 0; d < node->eval_type.array_dimens; d++)
-        PUSH_Q(node->eval_type.dim_sizes[d]);
-    }
-
-    DataType *dt2 = NULL;
-    switch (node->type) {
-    case AST_BINOP:
-      PUSH_Q(node->as.binop.left);
-      PUSH_Q(node->as.binop.right);
-      break;
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF:
-      PUSH_Q(node->as.unop.operand);
-      break;
-    case AST_ARRAY_LIT:
-      PUSH_Q(node->as.array_lit.elements);
-      break;
-    case AST_VAR_DECL:
-      PUSH_Q(node->as.var_decl.init);
-      dt2 = &node->as.var_decl.type;
-      break;
-    case AST_IF:
-      PUSH_Q(node->as.if_check.check);
-      PUSH_Q(node->as.if_check.action);
-      PUSH_Q(node->as.if_check.elseAct);
-      break;
-    case AST_STRUCT:
-      PUSH_Q(node->as.struct_def.contents);
-      break;
-    case AST_UNION:
-      PUSH_Q(node->as.union_def.contents);
-      break;
-    case AST_ENUM:
-      PUSH_Q(node->as.enum_def.contents);
-      break;
-    case AST_ENUM_MEMBER:
-      PUSH_Q(node->as.enum_member.val);
-      break;
-    case AST_DEFER:
-      PUSH_Q(node->as.defer_stmt.contents);
-      break;
-    case AST_FOR:
-      PUSH_Q(node->as.for_loop.init);
-      PUSH_Q(node->as.for_loop.check);
-      PUSH_Q(node->as.for_loop.inc);
-      PUSH_Q(node->as.for_loop.action);
-      break;
-    case AST_WHILE:
-      PUSH_Q(node->as.while_loop.check);
-      PUSH_Q(node->as.while_loop.action);
-      break;
-    case AST_FUNC:
-      PUSH_Q(node->as.func_def.params);
-      PUSH_Q(node->as.func_def.block);
-      dt2 = &node->as.func_def.ret_type;
-      break;
-    case AST_PARAM:
-      dt2 = &node->as.fn_param.type;
-      break;
-    case AST_RET:
-      PUSH_Q(node->as.ret_stmt.expr);
-      break;
-    case AST_BLOCK:
-      PUSH_Q(node->as.block.first_stmt);
-      break;
-    case AST_FUNC_CALL:
-      PUSH_Q(node->as.func_call.caller);
-      PUSH_Q(node->as.func_call.args);
-      break;
-    case AST_INDEX:
-      PUSH_Q(node->as.index.base);
-      PUSH_Q(node->as.index.index);
-      break;
-    case AST_MEMBER:
-      PUSH_Q(node->as.member.base);
-      break;
-    case AST_SWITCH:
-      PUSH_Q(node->as.switch_stmt.check);
-      PUSH_Q(node->as.switch_stmt.cases);
-      PUSH_Q(node->as.switch_stmt.default_case);
-      break;
-    case AST_CASE:
-      PUSH_Q(node->as.case_stmt.val);
-      PUSH_Q(node->as.case_stmt.action);
-      break;
-    case AST_EXTERN:
-      PUSH_Q(node->as.extern_block.contents);
-      break;
-    case AST_CAST:
-      PUSH_Q(node->as.cast.op);
-      dt2 = &node->as.cast.target;
-      break;
-    case AST_SIZEOF:
-      PUSH_Q(node->as.sizeof_expr.target_expr);
-      dt2 = &node->as.sizeof_expr.target_type;
-      break;
-    case AST_PROGRAM:
-      PUSH_Q(node->as.block.first_stmt);
-      break;
-    default:
-      break;
-    }
-
-    if (dt2 != NULL && dt2->array_dimens > 0 && dt2->dim_sizes != NULL) {
-      for (uint32_t d = 0; d < dt2->array_dimens; d++)
-        PUSH_Q(dt2->dim_sizes[d]);
-    }
-  }
-
-  ByteBuffer out_buf = {0};
-
-  uint32_t node_count = tail;
-  if (!buf_append(&out_buf, &node_count, sizeof(uint32_t))) {
-    free(queue);
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "OOM encountered during cache write gathering\n");
+    free(ctx.queue);
     free(map.entries);
     return;
   }
 
-// Tokens mapping to file offset
-#define P_TOK(tok)                                                             \
-  do {                                                                         \
-    if ((tok).start && (tok).start >= source_base &&                           \
-        (tok).start <= source_base + strlen(source_base)) {                    \
-      (tok).start = (const char *)(size_t)((tok).start - source_base);         \
-    } else if ((tok).start) {                                                  \
-      bool _found = false;                                                     \
-      for (size_t _k = 0; _k < typelistlen; _k++) {                            \
-        if (strcmp((tok).start, typelist[_k]) == 0) {                          \
-          (tok).start = (const char *)(size_t)(0xFFFFFF00 + _k);               \
-          _found = true;                                                       \
-          break;                                                               \
-        }                                                                      \
-      }                                                                        \
-      if (!_found)                                                             \
-        (tok).start = (const char *)(size_t)(-1);                              \
-    } else {                                                                   \
-      (tok).start = (const char *)(size_t)(-1);                                \
-    }                                                                          \
-  } while (0)
+  ByteBuffer out_buf = {0};
+  uint32_t node_count = ctx.tail;
+  if (!buf_append(&out_buf, &node_count, sizeof(uint32_t))) {
+    free(ctx.queue);
+    free(map.entries);
+    return;
+  }
 
-#define P_RAW_PTR(ptr)                                                         \
-  do {                                                                         \
-    if ((ptr) && (ptr) >= source_base &&                                       \
-        (ptr) < source_base + strlen(source_base)) {                           \
-      (ptr) = (const char *)(size_t)((ptr) - source_base);                     \
-    } else {                                                                   \
-      (ptr) = (const char *)(size_t)(-1);                                      \
-    }                                                                          \
-  } while (0)
+  size_t source_len = source_base ? strlen(source_base) : 0;
 
   for (uint32_t i = 0; i < node_count; i++) {
-    AstNode flat = *queue[i];
+    AstNode flat = *ctx.queue[i];
 
-    flat.next = (AstNode *)(size_t)ptrmap_get(&map, flat.next);
-    P_TOK(flat.eval_type.name);
-
-    P_RAW_PTR(flat.src_start);
-    P_RAW_PTR(flat.src_end);
-
+    // Isolate dynamic array sizes
     AstNode **dim1 = flat.eval_type.dim_sizes;
     uint32_t len1 = flat.eval_type.array_dimens;
-    AstNode **dim2 = NULL;
-    uint32_t len2 = 0;
     flat.eval_type.dim_sizes = NULL;
 
-    switch (flat.type) {
-    case AST_NUM_LIT:
-      P_TOK(flat.as.num_lit.val);
-      break;
-    case AST_STR_LIT:
-      P_TOK(flat.as.str_lit.val);
-      break;
-    case AST_CHAR_LIT:
-      P_TOK(flat.as.char_lit.val);
-      break;
-    case AST_BOOL_LIT:
-      P_TOK(flat.as.bool_lit.val);
-      break;
-    case AST_ARRAY_LIT:
-      flat.as.array_lit.elements =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.array_lit.elements);
-      break;
-    case AST_IDENTIF:
-      P_TOK(flat.as.identif.val);
-      flat.as.identif.res_sm = NULL;
-      break;
-    case AST_BINOP:
-      P_TOK(flat.as.binop.op);
-      flat.as.binop.left =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.binop.left);
-      flat.as.binop.right =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.binop.right);
-      break;
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF:
-      P_TOK(flat.as.unop.op);
-      flat.as.unop.operand =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.unop.operand);
-      break;
-    case AST_VAR_DECL:
-      P_TOK(flat.as.var_decl.id);
-      P_TOK(flat.as.var_decl.type.name);
-      flat.as.var_decl.init =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.var_decl.init);
-      dim2 = flat.as.var_decl.type.dim_sizes;
-      len2 = flat.as.var_decl.type.array_dimens;
-      flat.as.var_decl.type.dim_sizes = NULL;
-      break;
-    case AST_IF:
-      P_TOK(flat.as.if_check.if_stmt);
-      flat.as.if_check.check =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.if_check.check);
-      flat.as.if_check.action =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.if_check.action);
-      flat.as.if_check.elseAct =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.if_check.elseAct);
-      break;
-    case AST_STRUCT:
-      P_TOK(flat.as.struct_def.structn);
-      flat.as.struct_def.contents =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.struct_def.contents);
-      break;
-    case AST_UNION:
-      P_TOK(flat.as.union_def.unionn);
-      flat.as.union_def.contents =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.union_def.contents);
-      break;
-    case AST_ENUM:
-      P_TOK(flat.as.enum_def.enumn);
-      flat.as.enum_def.contents =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.enum_def.contents);
-      break;
-    case AST_ENUM_MEMBER:
-      P_TOK(flat.as.enum_member.name);
-      flat.as.enum_member.val =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.enum_member.val);
-      break;
-    case AST_DEFER:
-      P_TOK(flat.as.defer_stmt.defer);
-      flat.as.defer_stmt.contents =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.defer_stmt.contents);
-      break;
-    case AST_FOR:
-      P_TOK(flat.as.for_loop.for_stmt);
-      flat.as.for_loop.init =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.for_loop.init);
-      flat.as.for_loop.check =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.for_loop.check);
-      flat.as.for_loop.inc =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.for_loop.inc);
-      flat.as.for_loop.action =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.for_loop.action);
-      break;
-    case AST_WHILE:
-      P_TOK(flat.as.while_loop.while_stmt);
-      flat.as.while_loop.check =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.while_loop.check);
-      flat.as.while_loop.action =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.while_loop.action);
-      break;
-    case AST_FUNC:
-      P_TOK(flat.as.func_def.fn_name);
-      P_TOK(flat.as.func_def.ret_type.name);
-      flat.as.func_def.params =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.func_def.params);
-      flat.as.func_def.block =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.func_def.block);
-      dim2 = flat.as.func_def.ret_type.dim_sizes;
-      len2 = flat.as.func_def.ret_type.array_dimens;
-      flat.as.func_def.ret_type.dim_sizes = NULL;
-      break;
-    case AST_PARAM:
-      P_TOK(flat.as.fn_param.id);
-      P_TOK(flat.as.fn_param.type.name);
-      dim2 = flat.as.fn_param.type.dim_sizes;
-      len2 = flat.as.fn_param.type.array_dimens;
-      flat.as.fn_param.type.dim_sizes = NULL;
-      break;
-    case AST_RET:
-      P_TOK(flat.as.ret_stmt.ret_kw);
-      flat.as.ret_stmt.expr =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.ret_stmt.expr);
-      break;
-    case AST_BLOCK:
-      flat.as.block.first_stmt =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.block.first_stmt);
-      break;
-    case AST_FUNC_CALL:
-      flat.as.func_call.caller =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.func_call.caller);
-      flat.as.func_call.args =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.func_call.args);
-      break;
-    case AST_INDEX:
-      flat.as.index.base =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.index.base);
-      flat.as.index.index =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.index.index);
-      break;
-    case AST_MEMBER:
-      flat.as.member.base =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.member.base);
-      P_TOK(flat.as.member.name);
-      P_TOK(flat.as.member.type);
-      break;
-    case AST_SWITCH:
-      flat.as.switch_stmt.check =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.switch_stmt.check);
-      flat.as.switch_stmt.cases =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.switch_stmt.cases);
-      flat.as.switch_stmt.default_case =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.switch_stmt.default_case);
-      break;
-    case AST_CASE:
-      flat.as.case_stmt.val =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.case_stmt.val);
-      flat.as.case_stmt.action =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.case_stmt.action);
-      break;
-    case AST_EXTERN:
-      flat.as.extern_block.contents =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.extern_block.contents);
-      break;
-    case AST_USE:
-      P_TOK(flat.as.use_stmt.path);
-      P_TOK(flat.as.use_stmt.alias);
-      P_TOK(flat.as.use_stmt.use_kw);
-      P_TOK(flat.as.use_stmt.semicln);
-      break;
-    case AST_NULL_LIT:
-      P_TOK(flat.as.null_lit.val);
-      break;
-    case AST_BREAK:
-      P_TOK(flat.as.break_stmt.kw);
-      break;
-    case AST_CONTINUE:
-      P_TOK(flat.as.continue_stmt.kw);
-      break;
-    case AST_CAST:
-      P_TOK(flat.as.cast.target.name);
-      flat.as.cast.op = (AstNode *)(size_t)ptrmap_get(&map, flat.as.cast.op);
-      dim2 = flat.as.cast.target.dim_sizes;
-      len2 = flat.as.cast.target.array_dimens;
-      flat.as.cast.target.dim_sizes = NULL;
-      break;
-    case AST_SIZEOF:
-      P_TOK(flat.as.sizeof_expr.target_type.name);
-      flat.as.sizeof_expr.target_expr =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.sizeof_expr.target_expr);
-      dim2 = flat.as.sizeof_expr.target_type.dim_sizes;
-      len2 = flat.as.sizeof_expr.target_type.array_dimens;
-      flat.as.sizeof_expr.target_type.dim_sizes = NULL;
-      break;
-    case AST_PROGRAM:
-      flat.as.block.first_stmt =
-          (AstNode *)(size_t)ptrmap_get(&map, flat.as.block.first_stmt);
-      break;
-    default:
-      break;
+    AstNode **dim2 = NULL;
+    uint32_t len2 = 0;
+    DataType *dt2 = get_node_datatype(&flat);
+    if (dt2) {
+      dim2 = dt2->dim_sizes;
+      len2 = dt2->array_dimens;
+      dt2->dim_sizes = NULL;
+    }
+
+    // Taget ptr scan
+    void **ptrs = (void **)&flat;
+    size_t num_ptrs = sizeof(AstNode) / sizeof(void *);
+    for (size_t p = 0; p < num_ptrs; p++) {
+      void *val = ptrs[p];
+      if (!val)
+        continue;
+
+      uint32_t idx = ptrmap_get(&map, val);
+      if (idx != 0xFFFFFFFF) {
+        ptrs[p] = (void *)(TAG_AST | idx);
+        continue;
+      }
+
+      if (source_base && (const char *)val >= source_base &&
+          (const char *)val <= source_base + source_len) {
+        uint32_t offset = (uint32_t)((const char *)val - source_base);
+        ptrs[p] = (void *)(TAG_TOK | offset);
+        continue;
+      }
+
+      bool is_kw = false;
+      for (size_t k = 0; k < typelistlen; k++) {
+        if ((const char *)val == typelist[k]) {
+          ptrs[p] = (void *)(TAG_KWD | k);
+          is_kw = true;
+          break;
+        }
+      }
+      if (is_kw)
+        continue;
+
+      // If it's larger than 0x000000FFFFFFFFFFULL, it's an unresolved heap pointer
+      // (like generated metadata tokens). Nullify to prevent dangling pointers.
+      if ((uintptr_t)val > 0x000000FFFFFFFFFFULL) {
+        ptrs[p] = (void *)TAG_NUL;
+      }
     }
 
     if (!buf_append(&out_buf, &flat, sizeof(AstNode))) {
-      free(queue);
+      free(ctx.queue);
       free(map.entries);
       free(out_buf.data);
       return;
     }
 
+    // Write dim indices
     if (len1 > 0) {
       for (uint32_t d = 0; d < len1; d++) {
         uint32_t idx =
             (dim1 && dim1[d]) ? ptrmap_get(&map, dim1[d]) : 0xFFFFFFFF;
-        if (!buf_append(&out_buf, &idx, sizeof(uint32_t))) {
-          free(queue);
-          free(map.entries);
-          free(out_buf.data);
+        if (!buf_append(&out_buf, &idx, sizeof(uint32_t)))
           return;
-        }
       }
     }
     if (len2 > 0) {
       for (uint32_t d = 0; d < len2; d++) {
         uint32_t idx =
             (dim2 && dim2[d]) ? ptrmap_get(&map, dim2[d]) : 0xFFFFFFFF;
-        if (!buf_append(&out_buf, &idx, sizeof(uint32_t))) {
-          free(queue);
-          free(map.entries);
-          free(out_buf.data);
+        if (!buf_append(&out_buf, &idx, sizeof(uint32_t)))
           return;
-        }
       }
     }
   }
 
   FILE *fp = fopen(cache_path, "wb");
   if (!fp) {
-    free(queue);
+    free(ctx.queue);
     free(map.entries);
     free(out_buf.data);
     return;
@@ -549,7 +300,7 @@ void cache_write_ast(const char *cache_path, AstNode *root,
   size_t cSize = ZSTD_compress(cBuff, cBuffSize, out_buf.data, out_buf.size, 1);
 
   if (!ZSTD_isError(cSize)) {
-    uint32_t magic = 0x5A4D4341; // 'ZMCA' - Zstd Compressed Ast
+    uint32_t magic = 0x5A4D4341;
     uint64_t uncomp_size = out_buf.size;
     fwrite(&magic, sizeof(uint32_t), 1, fp);
     fwrite(&uncomp_size, sizeof(uint64_t), 1, fp);
@@ -559,14 +310,14 @@ void cache_write_ast(const char *cache_path, AstNode *root,
   }
   free(cBuff);
 #else
-  uint32_t magic = 0x554E4341; // 'UNCA' - Uncompressed Ast
+  uint32_t magic = 0x554E4341;
   fwrite(&magic, sizeof(uint32_t), 1, fp);
   fwrite(out_buf.data, 1, out_buf.size, fp);
 #endif
 
   fclose(fp);
   free(out_buf.data);
-  free(queue);
+  free(ctx.queue);
   free(map.entries);
 }
 
@@ -596,19 +347,16 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
   void *read_buffer = NULL;
   size_t read_offset = 0;
 
-  if (magic == 0x5A4D4341) { // Compressed
+  if (magic == 0x5A4D4341) {
 #ifdef ENABLE_AST_COMPRESSION
     uint64_t uncomp_size;
     if (fread(&uncomp_size, sizeof(uint64_t), 1, fp) != 1) {
       fclose(fp);
       return NULL;
     }
-
-    // Current position = start of compressed data
     long data_start = ftell(fp);
     fseek(fp, 0, SEEK_END);
-    long file_size = ftell(fp);
-    long comp_size = file_size - data_start;
+    long comp_size = ftell(fp) - data_start;
     fseek(fp, data_start, SEEK_SET);
 
     void *comp_buf = malloc(comp_size);
@@ -617,7 +365,7 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       fclose(fp);
       return NULL;
     }
-    fclose(fp); // Done with the file
+    fclose(fp);
 
     read_buffer = malloc(uncomp_size);
     size_t dSize =
@@ -634,11 +382,10 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
     fclose(fp);
     return NULL;
 #endif
-  } else if (magic == 0x554E4341) { // Uncompressed
-    long data_start = ftell(fp);    // after magic
+  } else if (magic == 0x554E4341) {
+    long data_start = ftell(fp);
     fseek(fp, 0, SEEK_END);
-    long file_size = ftell(fp);
-    long data_size = file_size - data_start;
+    long data_size = ftell(fp) - data_start;
     fseek(fp, data_start, SEEK_SET);
 
     read_buffer = malloc(data_size);
@@ -648,12 +395,8 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       return NULL;
     }
     fclose(fp);
-  } else {
-    fclose(fp);
-    return NULL; // Invalid or old cache format
   }
 
-// Macro to read from our decompressed memory buffer instead of fread
 #define READ_MEM(dest, size)                                                   \
   do {                                                                         \
     memcpy((dest), (char *)read_buffer + read_offset, (size));                 \
@@ -667,14 +410,9 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
     return NULL;
   }
 
-  if (node_count == 0) {
-    fprintf(stderr, "Error reading ast: node_count is 0\n");
-    free(read_buffer);
-    return NULL;
-  }
-
   AstNode *nodes = arena_alloc(arena, node_count * sizeof(AstNode));
 
+  // Read nodes and their dimension sizes
   for (uint32_t i = 0; i < node_count; i++) {
     READ_MEM(&nodes[i], sizeof(AstNode));
 
@@ -689,27 +427,7 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       }
     }
 
-    DataType *dt2 = NULL;
-    switch (nodes[i].type) {
-    case AST_VAR_DECL:
-      dt2 = &nodes[i].as.var_decl.type;
-      break;
-    case AST_PARAM:
-      dt2 = &nodes[i].as.fn_param.type;
-      break;
-    case AST_FUNC:
-      dt2 = &nodes[i].as.func_def.ret_type;
-      break;
-    case AST_CAST:
-      dt2 = &nodes[i].as.cast.target;
-      break;
-    case AST_SIZEOF:
-      dt2 = &nodes[i].as.sizeof_expr.target_type;
-      break;
-    default:
-      break;
-    }
-
+    DataType *dt2 = get_node_datatype(&nodes[i]);
     if (dt2 && dt2->array_dimens > 0) {
       dt2->dim_sizes =
           arena_alloc(arena, dt2->array_dimens * sizeof(AstNode *));
@@ -721,199 +439,38 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
     }
   }
 
-#define PATCH_STR(tok)                                                         \
-  do {                                                                         \
-    size_t _val = (size_t)(tok).start;                                         \
-    if (_val >= 0xFFFFFF00 && _val < 0xFFFFFF00 + typelistlen) {               \
-      (tok).start = typelist[_val - 0xFFFFFF00];                               \
-    } else if (_val == (size_t)-1) {                                           \
-      (tok).start = NULL;                                                      \
-    } else {                                                                   \
-      (tok).start = source_base + _val;                                        \
-    }                                                                          \
-  } while (0)
-
-#define PATCH_PTR(ptr)                                                         \
-  do {                                                                         \
-    uintptr_t _idx = (uintptr_t)(ptr);                                         \
-    if (_idx == 0xFFFFFFFF)                                                    \
-      (ptr) = NULL;                                                            \
-    else if (_idx >= node_count) {                                             \
-      fprintf(stderr, "Error: PATCH_PTR index %zu out of range\n", _idx);      \
-      free(read_buffer);                                                       \
-      return NULL;                                                             \
-    } else                                                                     \
-      (ptr) = &nodes[_idx];                                                    \
-  } while (0)
-
-#define PATCH_RAW_PTR(ptr)                                                     \
-  do {                                                                         \
-    if ((size_t)(ptr) == (size_t)-1)                                           \
-      (ptr) = NULL;                                                            \
-    else                                                                       \
-      (ptr) = source_base + (size_t)(ptr);                                     \
-  } while (0)
-
+  // Tagged pointer resolution
   for (uint32_t i = 0; i < node_count; i++) {
     AstNode *n = &nodes[i];
-    PATCH_PTR(n->next);
-    PATCH_STR(n->eval_type.name);
+    void **ptrs = (void **)n;
+    size_t num_ptrs = sizeof(AstNode) / sizeof(void *);
 
-    PATCH_RAW_PTR(n->src_start);
-    PATCH_RAW_PTR(n->src_end);
+    for (size_t p = 0; p < num_ptrs; p++) {
+      uint64_t val = (uint64_t)ptrs[p];
+      uint64_t tag = val & TAG_MASK;
 
-    switch (n->type) {
-    case AST_NUM_LIT:
-      PATCH_STR(n->as.num_lit.val);
-      break;
-    case AST_STR_LIT:
-      PATCH_STR(n->as.str_lit.val);
-      break;
-    case AST_CHAR_LIT:
-      PATCH_STR(n->as.char_lit.val);
-      break;
-    case AST_BOOL_LIT:
-      PATCH_STR(n->as.bool_lit.val);
-      break;
-    case AST_ARRAY_LIT:
-      PATCH_PTR(n->as.array_lit.elements);
-      break;
-    case AST_IDENTIF:
-      PATCH_STR(n->as.identif.val);
-      break;
-    case AST_BINOP:
-      PATCH_STR(n->as.binop.op);
-      PATCH_PTR(n->as.binop.left);
-      PATCH_PTR(n->as.binop.right);
-      break;
-    case AST_UOP:
-    case AST_ADDR_OF:
-    case AST_DEREF:
-      PATCH_STR(n->as.unop.op);
-      PATCH_PTR(n->as.unop.operand);
-      break;
-    case AST_VAR_DECL:
-      PATCH_STR(n->as.var_decl.id);
-      PATCH_STR(n->as.var_decl.type.name);
-      PATCH_PTR(n->as.var_decl.init);
-      break;
-    case AST_IF:
-      PATCH_STR(n->as.if_check.if_stmt);
-      PATCH_PTR(n->as.if_check.check);
-      PATCH_PTR(n->as.if_check.action);
-      PATCH_PTR(n->as.if_check.elseAct);
-      break;
-    case AST_STRUCT:
-      PATCH_STR(n->as.struct_def.structn);
-      PATCH_PTR(n->as.struct_def.contents);
-      break;
-    case AST_UNION:
-      PATCH_STR(n->as.union_def.unionn);
-      PATCH_PTR(n->as.union_def.contents);
-      break;
-    case AST_ENUM:
-      PATCH_STR(n->as.enum_def.enumn);
-      PATCH_PTR(n->as.enum_def.contents);
-      break;
-    case AST_ENUM_MEMBER:
-      PATCH_STR(n->as.enum_member.name);
-      PATCH_PTR(n->as.enum_member.val);
-      break;
-    case AST_DEFER:
-      PATCH_STR(n->as.defer_stmt.defer);
-      PATCH_PTR(n->as.defer_stmt.contents);
-      break;
-    case AST_FOR:
-      PATCH_STR(n->as.for_loop.for_stmt);
-      PATCH_PTR(n->as.for_loop.init);
-      PATCH_PTR(n->as.for_loop.check);
-      PATCH_PTR(n->as.for_loop.inc);
-      PATCH_PTR(n->as.for_loop.action);
-      break;
-    case AST_WHILE:
-      PATCH_STR(n->as.while_loop.while_stmt);
-      PATCH_PTR(n->as.while_loop.check);
-      PATCH_PTR(n->as.while_loop.action);
-      break;
-    case AST_FUNC:
-      PATCH_STR(n->as.func_def.fn_name);
-      PATCH_STR(n->as.func_def.ret_type.name);
-      PATCH_PTR(n->as.func_def.params);
-      PATCH_PTR(n->as.func_def.block);
-      break;
-    case AST_PARAM:
-      PATCH_STR(n->as.fn_param.id);
-      if (((size_t)n->as.fn_param.id.start == (size_t)-1 ||
-           n->as.fn_param.id.start == NULL) &&
-          n->as.fn_param.id.len == 4) {
-        n->as.fn_param.id.start = "self";
-        n->as.fn_param.id.type = TOKEN_IDENTIF;
+      if (tag == TAG_AST) {
+        uint32_t idx = (uint32_t)(val & ~TAG_MASK);
+        ptrs[p] = (idx < node_count) ? &nodes[idx] : NULL;
+      } else if (tag == TAG_TOK) {
+        uint32_t offset = (uint32_t)(val & ~TAG_MASK);
+        ptrs[p] = (void *)(source_base + offset);
+      } else if (tag == TAG_KWD) {
+        uint32_t idx = (uint32_t)(val & ~TAG_MASK);
+        ptrs[p] = (idx < typelistlen) ? (void *)typelist[idx] : NULL;
+      } else if (tag == TAG_NUL) {
+        ptrs[p] = NULL;
       }
-      PATCH_STR(n->as.fn_param.type.name);
-      break;
-    case AST_RET:
-      PATCH_STR(n->as.ret_stmt.ret_kw);
-      PATCH_PTR(n->as.ret_stmt.expr);
-      break;
-    case AST_BLOCK:
-      PATCH_PTR(n->as.block.first_stmt);
-      break;
-    case AST_FUNC_CALL:
-      PATCH_PTR(n->as.func_call.caller);
-      PATCH_PTR(n->as.func_call.args);
-      break;
-    case AST_INDEX:
-      PATCH_PTR(n->as.index.base);
-      PATCH_PTR(n->as.index.index);
-      break;
-    case AST_MEMBER:
-      PATCH_PTR(n->as.member.base);
-      PATCH_STR(n->as.member.name);
-      PATCH_STR(n->as.member.type);
-      break;
-    case AST_SWITCH:
-      PATCH_PTR(n->as.switch_stmt.check);
-      PATCH_PTR(n->as.switch_stmt.cases);
-      PATCH_PTR(n->as.switch_stmt.default_case);
-      break;
-    case AST_CASE:
-      PATCH_PTR(n->as.case_stmt.val);
-      PATCH_PTR(n->as.case_stmt.action);
-      break;
-    case AST_EXTERN:
-      PATCH_PTR(n->as.extern_block.contents);
-      break;
-    case AST_USE:
-      PATCH_STR(n->as.use_stmt.path);
-      PATCH_STR(n->as.use_stmt.alias);
-      PATCH_STR(n->as.use_stmt.use_kw);
-      PATCH_STR(n->as.use_stmt.semicln);
-      break;
-    case AST_NULL_LIT:
-      PATCH_STR(n->as.null_lit.val);
-      break;
-    case AST_BREAK:
-      PATCH_STR(n->as.break_stmt.kw);
-      break;
-    case AST_CONTINUE:
-      PATCH_STR(n->as.continue_stmt.kw);
-      break;
-    case AST_CAST:
-      PATCH_STR(n->as.cast.target.name);
-      PATCH_PTR(n->as.cast.op);
-      break;
-    case AST_SIZEOF:
-      PATCH_STR(n->as.sizeof_expr.target_type.name);
-      PATCH_PTR(n->as.sizeof_expr.target_expr);
-      break;
-    case AST_PROGRAM:
-      PATCH_PTR(n->as.block.first_stmt);
-      break;
-    default:
-      break;
+    }
+
+    // Special edge case logic intact
+    if (n->type == AST_PARAM && n->as.fn_param.id.start == NULL &&
+        n->as.fn_param.id.len == 4) {
+      n->as.fn_param.id.start = "self";
+      n->as.fn_param.id.type = TOKEN_IDENTIF;
     }
   }
-  // Free the buffer now that weve deserialized everything into the arena
+
   free(read_buffer);
   return &nodes[0];
 }
