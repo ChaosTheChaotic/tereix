@@ -359,6 +359,7 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
 
   void *read_buffer = NULL;
   size_t read_offset = 0;
+  size_t buf_size = 0;
 
   if (magic == 0x5A4D4341) {
 #ifdef ENABLE_AST_COMPRESSION
@@ -389,6 +390,7 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       free(read_buffer);
       return NULL;
     }
+    buf_size = uncomp_size;
 #else
     fprintf(stderr,
             "Error: Cache is compressed but ENABLE_AST_COMPRESSION is off.\n");
@@ -407,11 +409,20 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
       fclose(fp);
       return NULL;
     }
+    buf_size = data_size;
     fclose(fp);
   }
 
 #define READ_MEM(dest, size)                                                   \
   do {                                                                         \
+    if (read_offset + (size) > buf_size) {                                     \
+      fprintf(stderr,                                                          \
+              "Cache read: buffer over-read at offset %zu, size %zu, buffer "  \
+              "size %zu\n",                                                    \
+              read_offset, (size_t)(size), buf_size);                          \
+      free(read_buffer);                                                       \
+      return NULL;                                                             \
+    }                                                                          \
     memcpy((dest), (char *)read_buffer + read_offset, (size));                 \
     read_offset += (size);                                                     \
   } while (0)
