@@ -251,8 +251,9 @@ void cache_write_ast(const char *cache_path, AstNode *root,
       if (is_kw)
         continue;
 
-      // If it's larger than 0x000000FFFFFFFFFFULL, it's an unresolved heap pointer
-      // (like generated metadata tokens). Nullify to prevent dangling pointers.
+      // If it's larger than 0x000000FFFFFFFFFFULL, it's an unresolved heap
+      // pointer (like generated metadata tokens). Nullify to prevent dangling
+      // pointers.
       if ((uintptr_t)val > 0x000000FFFFFFFFFFULL) {
         ptrs[p] = (void *)TAG_NUL;
       }
@@ -959,6 +960,9 @@ void propagate_declaration_invalidation(DeclMetadata *old_cached_decls,
       n->is_dirty = false;
     }
   }
+
+  if (total_decls == 0)
+    return;
 
   DeclMetadata **worklist = malloc(sizeof(DeclMetadata *) * total_decls);
   size_t wl_top = 0;
