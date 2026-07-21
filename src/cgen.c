@@ -1196,27 +1196,33 @@ typedef struct LowerCtx {
   size_t frame_top;
   size_t frame_cap;
   uint64_t ret_id_ctr; // for generating unique temp variable names
+  jmp_buf *panic_env;
 } LowerCtx;
 
 // Push defer into pool
 void push_defer(LowerCtx *ctx, AstNode *defer) {
   if (ctx->defer_count >= ctx->defer_cap) {
     ctx->defer_cap = ctx->defer_cap ? ctx->defer_cap * 2 : 64;
-    ctx->defers = realloc(ctx->defers, sizeof(AstNode *) * ctx->defer_cap);
-    if (!ctx->defers) { /* handle OOM */
+    AstNode **new_defers =
+        realloc(ctx->defers, sizeof(AstNode *) * ctx->defer_cap);
+    if (!new_defers) {
+      longjmp(*ctx->panic_env, ERR_OOM);
     }
+    ctx->defers = new_defers;
   }
   ctx->defers[ctx->defer_count++] = defer;
 }
 
-// Helper to push a frame
-static void push_frame(LowerCtx *ctx, AstNode *n, size_t func_base,
-                       size_t loop_base, size_t block_base) {
+void push_frame(LowerCtx *ctx, AstNode *n, size_t func_base, size_t loop_base,
+                size_t block_base) {
   if (ctx->frame_top >= ctx->frame_cap) {
     ctx->frame_cap = ctx->frame_cap ? ctx->frame_cap * 2 : 64;
-    ctx->frames = realloc(ctx->frames, sizeof(LowerFrame) * ctx->frame_cap);
-    if (!ctx->frames) { /* handle OOM */
+    LowerFrame *new_frames =
+        realloc(ctx->frames, sizeof(LowerFrame) * ctx->frame_cap);
+    if (!new_frames) {
+      longjmp(*ctx->panic_env, ERR_OOM);
     }
+    ctx->frames = new_frames;
   }
   ctx->frames[ctx->frame_top++] = (LowerFrame){.node = n,
                                                .func_base = func_base,
@@ -1459,6 +1465,7 @@ void lower_defers(AstNode *root, Arena *arena) {
 
   jmp_buf panic_env;
   visitor.panic_env = &panic_env;
+  ctx.panic_env = &panic_env;
   if (setjmp(panic_env) == 0) {
     ast_traverse(&visitor, root);
   } else {
