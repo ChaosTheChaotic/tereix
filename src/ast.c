@@ -4,6 +4,7 @@
 #include "parse_types.h"
 #include "util.h"
 #include <errno.h>
+#include <stdarg.h>
 
 void init_lex_maps(LexCtx *ctx, Arena *arena) {
   // Capacities padded to powers of 2 for minimal collisions
@@ -132,56 +133,76 @@ AstNode *file_to_ast(Arena *arena, const char *path, bool partial) {
   return root;
 }
 
+static inline bool safe_fprintf(FILE *fp, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  int ret = vfprintf(fp, fmt, args);
+  va_end(args);
+
+  if (ret < 0) {
+    fprintf(stderr, "printing type info failed: %s\n", strerror(errno));
+    fclose(fp);
+    return false;
+  }
+  return true;
+}
+
+static inline bool safe_fputc(FILE *fp, int ch) {
+  if (fputc(ch, fp) == EOF) {
+    fprintf(stderr, "printing type info failed: %s\n", strerror(errno));
+    fclose(fp);
+    return false;
+  }
+  return true;
+}
+
 bool print_type_info(DataType type, FILE *out_fp) {
-#define FPRINTF_SAFE(fmt, ...)                                                 \
-  do {                                                                         \
-    if (fprintf(out_fp, fmt, __VA_ARGS__) < 0) {                               \
-      fprintf(stderr, "printing type info failed: %s\n", strerror(errno));     \
-      fclose(out_fp);                                                          \
-      return false;                                                            \
-    }                                                                          \
-  } while (0)
-#define FPUTC_SAFE(ch)                                                         \
-  do {                                                                         \
-    if (fprintf(out_fp, "%c", ch) < 0) {                                       \
-      fprintf(stderr, "printing type info failed: %s\n", strerror(errno));     \
-      fclose(out_fp);                                                          \
-      return false;                                                            \
-    }                                                                          \
-  } while (0)
   if (type.ptr_depth != 0) {
     char symbol = (type.ptr_depth < 0) ? '*' : '&';
     int count = (type.ptr_depth > 0) ? type.ptr_depth : -type.ptr_depth;
 
     for (int i = 0; i < count; i++) {
-      FPUTC_SAFE(symbol);
+      if (!safe_fputc(out_fp, symbol))
+        return false;
     }
-    FPUTC_SAFE(' ');
+    if (!safe_fputc(out_fp, ' '))
+      return false;
   }
 
-  if (type.is_static)
-    FPRINTF_SAFE("%s", "static ");
-  if (type.is_mut)
-    FPRINTF_SAFE("%s", "mut ");
-  if (type.is_threadlocal)
-    FPRINTF_SAFE("%s", "threadlocal ");
-  if (type.is_extern)
-    FPRINTF_SAFE("%s", "extern ");
+  if (type.is_static) {
+    if (!safe_fprintf(out_fp, "static "))
+      return false;
+  }
+  if (type.is_mut) {
+    if (!safe_fprintf(out_fp, "mut "))
+      return false;
+  }
+  if (type.is_threadlocal) {
+    if (!safe_fprintf(out_fp, "threadlocal "))
+      return false;
+  }
+  if (type.is_extern) {
+    if (!safe_fprintf(out_fp, "extern "))
+      return false;
+  }
 
-  FPRINTF_SAFE("%.*s", type.name.len, type.name.start);
+  if (!safe_fprintf(out_fp, "%.*s", type.name.len, type.name.start))
+    return false;
 
   for (unsigned int i = 0; i < type.array_dimens; i++) {
     if (type.dim_sizes != NULL && type.dim_sizes[i] != NULL) {
       AstNode *dim_node = type.dim_sizes[i];
-
       if (dim_node->type == AST_NUM_LIT) {
-        FPRINTF_SAFE("[%.*s]", dim_node->as.num_lit.val.len,
-                     dim_node->as.num_lit.val.start);
+        if (!safe_fprintf(out_fp, "[%.*s]", dim_node->as.num_lit.val.len,
+                          dim_node->as.num_lit.val.start))
+          return false;
       } else {
-        FPRINTF_SAFE("%s", "[expr]");
+        if (!safe_fprintf(out_fp, "[expr]"))
+          return false;
       }
     } else {
-      FPRINTF_SAFE("%s", "[]");
+      if (!safe_fprintf(out_fp, "[]"))
+        return false;
     }
   }
   return true;

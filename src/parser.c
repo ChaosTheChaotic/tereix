@@ -9,7 +9,8 @@ void compiler_panic(jmp_buf env, PanicCode code, const char *msg) {
   longjmp(env, code);
 }
 
-static inline AstNode *new_node_with_src(Arena *arena, ASTN_TYPE type, ParseCtx *ctx) {
+static inline AstNode *new_node_with_src(Arena *arena, ASTN_TYPE type,
+                                         ParseCtx *ctx) {
   AstNode *n = new_node(arena, type);
   if (!n) {
     compiler_panic(ctx->panic_env, ERR_OOM, "Failed to allocate AST node");
@@ -143,8 +144,6 @@ ParseState pop_state(ParseCtx *ctx) {
                    "Parser Error: State stack underflow");
   return ctx->state_stack[--ctx->state_count];
 }
-
-inline bool is_newline(char c) { return (c == '\n' || c == '\r'); }
 
 void skip_irrelevant(LexCtx *ctx) {
   while (*ctx->curr != '\0') {
@@ -634,7 +633,7 @@ bool is_decl(ParseCtx *ctx) {
   return is_type(ctx);
 }
 
-inline bool is_lit_type(TOKEN_TYPE t) {
+static inline bool is_lit_type(TOKEN_TYPE t) {
   return (t == TOKEN_NUM_LIT || t == TOKEN_STR_LIT || t == TOKEN_BOOL_LIT ||
           t == TOKEN_CHAR_LIT);
 }
@@ -3246,7 +3245,6 @@ DataType parse_type(ParseCtx *ctx) {
 
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
-
       }
     }
   } else {
@@ -3255,7 +3253,6 @@ DataType parse_type(ParseCtx *ctx) {
 
     AstNode *err_node = new_node(ctx->arena, AST_ERROR);
     push_node(ctx, err_node);
-
   }
 
   while (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '[') {
@@ -3292,7 +3289,6 @@ DataType parse_type(ParseCtx *ctx) {
 
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
-
     }
   }
 
@@ -3342,7 +3338,7 @@ inline bool is_punc(char c) {
   }
 }
 
-inline bool is_numeric_slice(const char *start, unsigned int len) {
+static inline bool is_numeric_slice(const char *start, unsigned int len) {
   if (len == 0)
     return false;
 

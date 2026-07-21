@@ -500,7 +500,7 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
   return &nodes[0];
 }
 
-inline uint32_t hash_token(uint32_t hash, Token tok) {
+static inline uint32_t hash_token(uint32_t hash, Token tok) {
   hash = combine_hash(hash, tok.type);
   if (tok.start && tok.len > 0 && (size_t)tok.start != (size_t)-1) {
     uint32_t str_hash = hash_string(tok.start, tok.len);
@@ -509,7 +509,7 @@ inline uint32_t hash_token(uint32_t hash, Token tok) {
   return hash;
 }
 
-inline uint32_t hash_datatype(uint32_t hash, DataType dt) {
+static inline uint32_t hash_datatype(uint32_t hash, DataType dt) {
   hash = hash_token(hash, dt.name);
   hash = combine_hash(hash, dt.ptr_depth);
   hash = combine_hash(hash, dt.array_dimens);
