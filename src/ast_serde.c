@@ -30,12 +30,24 @@ void ptrmap_expand(PtrMap *map) {
   map->cap = old_cap * 2;
   map->entries = calloc(map->cap, sizeof(PtrMapEntry));
   map->count = 0;
+
   for (uint32_t i = 0; i < old_cap; i++) {
     if (old_entries[i].ptr) {
-      uint32_t idx =
-          (((uintptr_t)old_entries[i].ptr >> 3) * 2654435761u) % map->cap;
-      while (map->entries[idx].ptr != NULL)
+      uintptr_t ptr = (uintptr_t)old_entries[i].ptr;
+      uint32_t h = (uint32_t)(ptr ^ (ptr >> 32));
+      h = (h >> 16) ^ h;
+      h = h * 0x45d9f3b;
+      h = (h >> 16) ^ h;
+      uint32_t idx = h % map->cap;
+
+      uint32_t attempts = 0;
+      while (map->entries[idx].ptr != NULL) {
         idx = (idx + 1) % map->cap;
+        if (++attempts >= map->cap) {
+          fprintf(stderr, "Fatal: ptrmap_expand: table full during rehash\n");
+          abort(); // Should never happen so abort to prevent corruption
+        }
+      }
       map->entries[idx] = old_entries[i];
       map->count++;
     }
