@@ -2,6 +2,7 @@
 #include "ast_visitor.h"
 #include "c_gen_types.h"
 #include "hashutils.h"
+#include "parse_types.h"
 #include "sem_types.h"
 #include "string_builder.h"
 #include "util.h"
@@ -91,139 +92,125 @@ bool is_c_expr(AstNode *n) {
          n->type == AST_SIZEOF;
 }
 
+typedef struct {
+  const char *var_name;
+  Arena *arena;
+  AstNode *parent_stack[2048];
+  size_t parent_top;
+} InjectYieldCtx;
+
+VisitResult inject_yield_enter(AstVisitor *v, AstNode *n) {
+  InjectYieldCtx *ctx = v->user_data;
+  AstNode *parent =
+      ctx->parent_top > 0 ? ctx->parent_stack[ctx->parent_top - 1] : NULL;
+
+  // Only follow exec tail
+  if (parent) {
+    if (parent->type == AST_BLOCK) {
+      // Only process the very last statement in a block
+      if (n->next != NULL)
+        return VISIT_SKIP_CHILDREN;
+    } else if (parent->type == AST_IF) {
+      if (n == parent->as.if_check.check)
+        return VISIT_SKIP_CHILDREN;
+    } else if (parent->type == AST_SWITCH) {
+      if (n == parent->as.switch_stmt.check)
+        return VISIT_SKIP_CHILDREN;
+    } else if (parent->type == AST_CASE) {
+      if (n == parent->as.case_stmt.val)
+        return VISIT_SKIP_CHILDREN;
+    } else {
+      // Any other parent relationship
+      return VISIT_SKIP_CHILDREN;
+    }
+  }
+
+  // Push current node to context parent stack
+  if (ctx->parent_top >= 2048) {
+    if (v->panic_env)
+      longjmp(*v->panic_env, ERR_OOM);
+    return VISIT_ABORT;
+  }
+  ctx->parent_stack[ctx->parent_top++] = n;
+
+  if (n->type == AST_BLOCK || n->type == AST_IF || n->type == AST_SWITCH ||
+      n->type == AST_CASE) {
+    return VISIT_CONTINUE;
+  }
+
+  if (n->type == AST_BREAK || n->type == AST_CONTINUE || n->type == AST_RET ||
+      n->type == AST_DEFER || n->type == AST_VAR_DECL) {
+    return VISIT_SKIP_CHILDREN;
+  }
+
+  // Inject assignment
+  AstNode *target = arena_alloc(ctx->arena, sizeof(AstNode));
+  memset(target, 0, sizeof(AstNode));
+  target->type = AST_IDENTIF;
+
+  size_t vlen = strlen(ctx->var_name);
+  char *vstr = arena_alloc(ctx->arena, vlen + 1);
+  strcpy(vstr, ctx->var_name);
+
+  target->as.identif.val.start = vstr;
+  target->as.identif.val.len = vlen;
+  target->eval_type = n->eval_type;
+
+  // Save the original expression and clear its next pointer to isolate it
+  AstNode *original_expr = arena_alloc(ctx->arena, sizeof(AstNode));
+  *original_expr = *n;
+  original_expr->next = NULL;
+
+  // Backup the chain
+  AstNode *next_node = n->next;
+
+  // Mutate n in place to become the assignment operator
+  memset(n, 0, sizeof(AstNode));
+  n->type = AST_BINOP;
+  n->as.binop.op.start = "=";
+  n->as.binop.op.len = 1;
+  n->as.binop.left = target;
+  n->as.binop.right = original_expr;
+  n->eval_type = original_expr->eval_type;
+
+  // Restore chain linking
+  n->next = next_node;
+
+  // Dont go deeper
+  return VISIT_SKIP_CHILDREN;
+}
+
+void inject_yield_exit(AstVisitor *v, AstNode *n) {
+  InjectYieldCtx *ctx = v->user_data;
+  // Only pop if node was pushed
+  if (ctx->parent_top > 0 && ctx->parent_stack[ctx->parent_top - 1] == n) {
+    ctx->parent_top--;
+  }
+}
+
 void inject_yield_assignments(AstNode *node, const char *var_name,
                               Arena *arena) {
   if (!node)
     return;
 
-  size_t cap = 128;
-  AstNode ***stack = malloc(sizeof(AstNode **) * cap);
-  size_t top = 0;
+  InjectYieldCtx ctx = {0};
+  ctx.var_name = var_name;
+  ctx.arena = arena;
+  ctx.parent_top = 0;
 
-  stack[top++] = &node;
+  AstVisitor visitor = {0};
+  visitor.user_data = &ctx;
+  visitor.enter_node = inject_yield_enter;
+  visitor.exit_node = inject_yield_exit;
 
-  while (top > 0) {
-    AstNode **p_n = stack[--top];
-    AstNode *n = *p_n;
-    if (!n)
-      continue;
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-    if (n->type == AST_BLOCK) {
-      AstNode **last = &n->as.block.first_stmt;
-      while (*last && (*last)->next) {
-        last = &(*last)->next;
-      }
-      if (*last) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = last;
-      }
-    } else if (n->type == AST_IF) {
-      if (n->as.if_check.action) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = &n->as.if_check.action;
-      }
-      if (n->as.if_check.elseAct) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = &n->as.if_check.elseAct;
-      }
-    } else if (n->type == AST_SWITCH) {
-      AstNode *c = n->as.switch_stmt.cases;
-      while (c) {
-        if (c->type == AST_CASE && c->as.case_stmt.action) {
-          if (top >= cap) {
-            size_t new_cap = cap * 2;
-            AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
-            if (!new_stack) {
-              fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-              free(stack);
-              return;
-            }
-            stack = new_stack;
-            cap = new_cap;
-          }
-          stack[top++] = &c->as.case_stmt.action;
-        }
-        c = c->next;
-      }
-      if (n->as.switch_stmt.default_case) {
-        if (top >= cap) {
-          size_t new_cap = cap * 2;
-          AstNode ***new_stack = realloc(stack, sizeof(AstNode **) * new_cap);
-          if (!new_stack) {
-            fprintf(stderr, "OOM encountered whilst reallocating stack.\n");
-            free(stack);
-            return;
-          }
-          stack = new_stack;
-          cap = new_cap;
-        }
-        stack[top++] = &n->as.switch_stmt.default_case;
-      }
-    } else {
-      if (n->type == AST_BREAK || n->type == AST_CONTINUE ||
-          n->type == AST_RET || n->type == AST_DEFER ||
-          n->type == AST_VAR_DECL) {
-        continue;
-      }
-
-      AstNode *target = arena_alloc(arena, sizeof(AstNode));
-      memset(target, 0, sizeof(AstNode));
-      target->type = AST_IDENTIF;
-
-      size_t vlen = strlen(var_name);
-      char *vstr = arena_alloc(arena, vlen + 1);
-      strcpy(vstr, var_name);
-
-      target->as.identif.val.start = vstr;
-      target->as.identif.val.len = vlen;
-      target->eval_type = n->eval_type;
-
-      AstNode *assign = arena_alloc(arena, sizeof(AstNode));
-      memset(assign, 0, sizeof(AstNode));
-      assign->type = AST_BINOP;
-      assign->as.binop.op.start = "=";
-      assign->as.binop.op.len = 1;
-      assign->as.binop.left = target;
-      assign->as.binop.right = n;
-      assign->eval_type = n->eval_type;
-
-      assign->next = n->next;
-      n->next = NULL;
-
-      *p_n = assign;
-    }
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, node);
+  } else {
+    fprintf(stderr, "OOM encountered whilst injecting yield assignments.\n");
   }
-  free(stack);
 }
 
 typedef struct {
