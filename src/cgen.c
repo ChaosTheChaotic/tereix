@@ -7,6 +7,8 @@
 #include "string_builder.h"
 #include "util.h"
 #include <errno.h>
+#include <setjmp.h>
+#include <stdlib.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -975,6 +977,15 @@ VisitResult flatten_enter(AstVisitor *visitor, AstNode *n) {
         base->as.identif.res_sm->is_imported_mod) {
       Token mod_name = base->as.identif.val;
       Token mem_name = n->as.member.name;
+      if (mod_name.len > SIZE_MAX - mem_name.len - 2) {
+        if (visitor->panic_env) {
+          longjmp(*visitor->panic_env, 1);
+        } else {
+          fprintf(stderr, "Integer overflow check failed and visitor has no "
+                          "panic_env (jmp_buf), aborting");
+          abort();
+        }
+      }
       size_t new_len = mod_name.len + 1 + mem_name.len;
       char *new_name = arena_alloc(data->arena, new_len + 1);
       sprintf(new_name, "%.*s_%.*s", (int)mod_name.len, mod_name.start,
@@ -1004,6 +1015,15 @@ void flatten_exit(AstVisitor *visitor, AstNode *n) {
       if (child->type == AST_FUNC) {
         Token old_name = child->as.func_def.fn_name;
         if (sue.len > 0 && old_name.len > 0) {
+          if (sue.len > SIZE_MAX - old_name.len - 2) {
+            if (visitor->panic_env) {
+              longjmp(*visitor->panic_env, 1);
+            } else {
+              fprintf(stderr, "Integer overflow check failed when constructing "
+                              "function name, aborting");
+              abort();
+            }
+          }
           size_t new_len = sue.len + 1 + old_name.len;
           char *new_name = arena_alloc(data->arena, new_len + 1);
           memcpy(new_name, sue.start, sue.len);

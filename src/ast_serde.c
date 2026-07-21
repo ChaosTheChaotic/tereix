@@ -2,6 +2,7 @@
 #include "ast_visitor.h"
 #include "hashmap.h"
 #include "hashutils.h"
+#include <stdio.h>
 #include <string.h>
 #ifdef ENABLE_AST_COMPRESSION
 #include <zstd.h>
@@ -755,6 +756,16 @@ VisitResult ext_decl_dep_enter(AstVisitor *visitor, AstNode *node) {
           Token *real_mod = map_get(alias_map, base_name.start, base_name.len);
           if (real_mod)
             base_name = *real_mod;
+        }
+
+        if (base_name.len > SIZE_MAX - mem_name.len - 2) {
+          if (visitor->panic_env) {
+            longjmp(*visitor->panic_env, 1);
+          } else {
+            fprintf(stderr, "Integer overflow encountered and visitor has no "
+                            "panic env, aborting");
+            abort();
+          }
         }
 
         size_t combined_len = base_name.len + 1 + mem_name.len;
