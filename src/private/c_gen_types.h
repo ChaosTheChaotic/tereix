@@ -19,11 +19,6 @@ typedef struct {
 } FlattenFrame;
 
 typedef struct {
-  AstNode *src;
-  AstNode *dst;
-} ClonePair;
-
-typedef struct {
   AstNode *node;
   int step;
   size_t func_base;

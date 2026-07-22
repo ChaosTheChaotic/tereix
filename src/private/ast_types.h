@@ -297,4 +297,6 @@ bool print_type_info(DataType type, FILE *out_fp);
 
 void print_ast(AstNode *root);
 
+AstNode *clone_ast(AstNode *root, Arena *arena);
+
 #endif // !AST_TYPES_H
