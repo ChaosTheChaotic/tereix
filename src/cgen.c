@@ -150,20 +150,20 @@ VisitResult inject_yield_enter(AstVisitor *v, AstNode *n) {
   *original_expr = *n;
   original_expr->next = NULL;
 
-  // Backup the chain
-  AstNode *next_node = n->next;
+  // Construct the newly injected assignment completely before altering the tree
+  AstNode new_assignment = {0};
+  new_assignment.type = AST_BINOP;
+  new_assignment.as.binop.op.start = "=";
+  new_assignment.as.binop.op.len = 1;
+  new_assignment.as.binop.left = target;
+  new_assignment.as.binop.right = original_expr;
+  new_assignment.eval_type = original_expr->eval_type;
 
-  // Mutate n in place to become the assignment operator
-  memset(n, 0, sizeof(AstNode));
-  n->type = AST_BINOP;
-  n->as.binop.op.start = "=";
-  n->as.binop.op.len = 1;
-  n->as.binop.left = target;
-  n->as.binop.right = original_expr;
-  n->eval_type = original_expr->eval_type;
+  // Preserve chain linking for siblings
+  new_assignment.next = n->next;
 
-  // Restore chain linking
-  n->next = next_node;
+  // Atomically swap the fully formed state into n
+  *n = new_assignment;
 
   // Dont go deeper
   return VISIT_SKIP_CHILDREN;

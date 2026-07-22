@@ -702,7 +702,7 @@ bool ast_is_expr_node(const AstNode *node) {
   }
 }
 
-bool ast_is_expr_context(const AstNode *parent, const AstNode *child) {
+bool ast_is_expr_ctx(const AstNode *parent, const AstNode *child) {
   if (!parent)
     return false;
 
