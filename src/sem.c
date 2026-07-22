@@ -2,6 +2,7 @@
 #include "sem_types.h"
 #include "util.h"
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -730,23 +731,26 @@ bool fits_in_type(long long val, DataType t) {
     return true; // any integer can be converted to float
   if (is_signed) {
     if (width == 8)
-      return val >= -128 && val <= 127;
+      return val >= SCHAR_MIN && val <= SCHAR_MAX;
     if (width == 16)
-      return val >= -32768 && val <= 32767;
+      return val >= SHRT_MIN && val <= SHRT_MAX;
     if (width == 32)
-      return val >= -2147483648LL && val <= 2147483647LL;
+      return val >= INT_MIN && val <= INT_MAX;
     if (width == 64)
-      return true; // any 64 bit signed can hold all long long values
+      return val >= LLONG_MIN && val <= LLONG_MAX;
   } else {
+    // Prevent negative signed values from passing unsigned checks
+    if (val < 0)
+      return false;
     unsigned long long uval = (unsigned long long)val;
     if (width == 8)
-      return uval <= 255;
+      return uval <= UCHAR_MAX;
     if (width == 16)
-      return uval <= 65535;
+      return uval <= USHRT_MAX;
     if (width == 32)
-      return uval <= 4294967295ULL;
+      return uval <= UINT_MAX;
     if (width == 64)
-      return true;
+      return uval <= ULLONG_MAX;
   }
   return false;
 }

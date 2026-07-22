@@ -75,14 +75,14 @@ bool ptrmap_put(PtrMap *map, AstNode *ptr, uint32_t idx) {
 
 uint32_t ptrmap_get(PtrMap *map, AstNode *ptr) {
   if (!ptr || map->cap == 0)
-    return 0xFFFFFFFF;
+    return UINT32_MAX;
   uint32_t i = (((uintptr_t)ptr >> 3) * 2654435761u) % map->cap;
   while (map->entries[i].ptr != NULL) {
     if (map->entries[i].ptr == ptr)
       return map->entries[i].idx;
     i = (i + 1) % map->cap;
   }
-  return 0xFFFFFFFF;
+  return UINT32_MAX;
 }
 
 typedef struct {
@@ -241,7 +241,7 @@ void cache_write_ast(const char *cache_path, AstNode *root,
         continue;
 
       uint32_t idx = ptrmap_get(&map, val);
-      if (idx != 0xFFFFFFFF) {
+      if (idx != UINT32_MAX) {
         ptrs[p] = (void *)(TAG_AST | idx);
         continue;
       }
@@ -283,7 +283,7 @@ void cache_write_ast(const char *cache_path, AstNode *root,
     if (len1 > 0) {
       for (uint32_t d = 0; d < len1; d++) {
         uint32_t idx =
-            (dim1 && dim1[d]) ? ptrmap_get(&map, dim1[d]) : 0xFFFFFFFF;
+            (dim1 && dim1[d]) ? ptrmap_get(&map, dim1[d]) : UINT32_MAX;
         if (!buf_append(&out_buf, &idx, sizeof(uint32_t)))
           return;
       }
@@ -291,7 +291,7 @@ void cache_write_ast(const char *cache_path, AstNode *root,
     if (len2 > 0) {
       for (uint32_t d = 0; d < len2; d++) {
         uint32_t idx =
-            (dim2 && dim2[d]) ? ptrmap_get(&map, dim2[d]) : 0xFFFFFFFF;
+            (dim2 && dim2[d]) ? ptrmap_get(&map, dim2[d]) : UINT32_MAX;
         if (!buf_append(&out_buf, &idx, sizeof(uint32_t)))
           return;
       }
@@ -460,7 +460,7 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
           return NULL;
         }
         nodes[i].eval_type.dim_sizes[d] =
-            (idx != 0xFFFFFFFF) ? &nodes[idx] : NULL;
+            (idx != UINT32_MAX) ? &nodes[idx] : NULL;
       }
     }
 
@@ -475,7 +475,7 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
           free(read_buffer);
           return NULL;
         }
-        dt2->dim_sizes[d] = (idx != 0xFFFFFFFF) ? &nodes[idx] : NULL;
+        dt2->dim_sizes[d] = (idx != UINT32_MAX) ? &nodes[idx] : NULL;
       }
     }
   }
@@ -1083,10 +1083,10 @@ void cache_write_decl_meta(const char *path, DeclMetadata *meta,
 
     uint32_t start_off = (m->src_start && m->src_start >= src_base)
                              ? (uint32_t)(m->src_start - src_base)
-                             : 0xFFFFFFFF;
+                             : UINT32_MAX;
     uint32_t end_off = (m->src_end && m->src_end >= src_base)
                            ? (uint32_t)(m->src_end - src_base)
-                           : 0xFFFFFFFF;
+                           : UINT32_MAX;
     fwrite(&start_off, sizeof(uint32_t), 1, fp);
     fwrite(&end_off, sizeof(uint32_t), 1, fp);
 
@@ -1161,8 +1161,8 @@ DeclMetadata *cache_read_decl_meta(Arena *arena, const char *path,
       fclose(fp);
       return NULL;
     }
-    m->src_start = (start_off == 0xFFFFFFFF) ? NULL : (src_base + start_off);
-    m->src_end = (end_off == 0xFFFFFFFF) ? NULL : (src_base + end_off);
+    m->src_start = (start_off == UINT32_MAX) ? NULL : (src_base + start_off);
+    m->src_end = (end_off == UINT32_MAX) ? NULL : (src_base + end_off);
 
     uint32_t dep_count;
 
