@@ -23,36 +23,41 @@ extern Module *sem_main_mod;
 
 static LspState server_state = {.state = UNINITIALIZED};
 
-static void lsp_write_stdout(const char *json_out) {
-  fprintf(stdout, "Content-Length: %zu\r\n\r\n%s", strlen(json_out), json_out);
-  fflush(stdout);
+static inline yyjson_mut_doc *lsp_start_response(yyjson_val *id,
+                                                 yyjson_mut_val **root_out) {
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(doc);
+  yyjson_mut_doc_set_root(doc, root);
+  yyjson_mut_obj_add_str(doc, root, "jsonrpc", "2.0");
+  if (id) {
+    yyjson_mut_val *mut_id = yyjson_val_mut_copy(doc, id);
+    yyjson_mut_obj_add_val(doc, root, "id", mut_id);
+  }
+  *root_out = root;
+  return doc;
 }
 
-#define LSP_BEGIN_RESPONSE(doc_var, root_var, id_val)                          \
-  yyjson_mut_doc *doc_var = yyjson_mut_doc_new(NULL);                          \
-  yyjson_mut_val *root_var = yyjson_mut_obj(doc_var);                          \
-  yyjson_mut_obj_add_str(doc_var, root_var, "jsonrpc", "2.0");                 \
-  if (id_val) {                                                                \
-    yyjson_mut_val *mut_id = yyjson_val_mut_copy(doc_var, id_val);             \
-    yyjson_mut_obj_add_val(doc_var, root_var, "id", mut_id);                   \
+static inline yyjson_mut_doc *
+lsp_start_notification(const char *method, yyjson_mut_val **root_out) {
+  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+  yyjson_mut_val *root = yyjson_mut_obj(doc);
+  yyjson_mut_doc_set_root(doc, root);
+  yyjson_mut_obj_add_str(doc, root, "jsonrpc", "2.0");
+  yyjson_mut_obj_add_str(doc, root, "method", method);
+  *root_out = root;
+  return doc;
+}
+
+static inline void lsp_send_doc(yyjson_mut_doc *doc) {
+  const char *json_out = yyjson_mut_write(doc, 0, NULL);
+  if (json_out) {
+    fprintf(stdout, "Content-Length: %zu\r\n\r\n%s", strlen(json_out),
+            json_out);
+    fflush(stdout);
+    free((void *)json_out);
   }
-
-#define LSP_BEGIN_NOTIFICATION(doc_var, root_var, method_name)                 \
-  yyjson_mut_doc *doc_var = yyjson_mut_doc_new(NULL);                          \
-  yyjson_mut_val *root_var = yyjson_mut_obj(doc_var);                          \
-  yyjson_mut_obj_add_str(doc_var, root_var, "jsonrpc", "2.0");                 \
-  yyjson_mut_obj_add_str(doc_var, root_var, "method", method_name)
-
-#define LSP_SEND_AND_FREE(doc_var, root_var, write_func)                       \
-  do {                                                                         \
-    yyjson_mut_doc_set_root(doc_var, root_var);                                \
-    const char *json_out = yyjson_mut_write(doc_var, 0, NULL);                 \
-    if (json_out) {                                                            \
-      write_func(json_out);                                                    \
-      free((void *)json_out);                                                  \
-    }                                                                          \
-    yyjson_mut_doc_free(doc_var);                                              \
-  } while (0)
+  yyjson_mut_doc_free(doc);
+}
 
 uint64_t hash_module_interface(Module *mod) {
   uint32_t hash = 2166136261u;
@@ -313,38 +318,15 @@ void format_func_signature(AstNode *func_node, char *buf, size_t size) {
 }
 
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
-  LSP_BEGIN_RESPONSE(doc, root, id_val);
+  yyjson_mut_val *root;
+  yyjson_mut_doc *doc = lsp_start_response(id_val, &root);
 
   yyjson_mut_val *error_obj = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_int(doc, error_obj, "code", error_code);
   yyjson_mut_obj_add_str(doc, error_obj, "message", message);
   yyjson_mut_obj_add_val(doc, root, "error", error_obj);
 
-  LSP_SEND_AND_FREE(doc, root, lsp_write_stdout);
-}
-
-yyjson_mut_doc *lsp_start_response(yyjson_val *id, yyjson_mut_val **root_ptr) {
-  yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-  yyjson_mut_val *root = yyjson_mut_obj(doc);
-  yyjson_mut_doc_set_root(doc, root);
-  yyjson_mut_obj_add_str(doc, root, "jsonrpc", "2.0");
-  if (id) {
-    yyjson_mut_val *mut_id = yyjson_val_mut_copy(doc, id);
-    yyjson_mut_obj_add_val(doc, root, "id", mut_id);
-  }
-  *root_ptr = root;
-  return doc;
-}
-
-void lsp_send_doc(yyjson_mut_doc *doc) {
-  const char *json_str = yyjson_mut_write(doc, 0, NULL);
-  if (json_str) {
-    fprintf(stdout, "Content-Length: %zu\r\n\r\n%s", strlen(json_str),
-            json_str);
-    fflush(stdout);
-    free((void *)json_str);
-  }
-  yyjson_mut_doc_free(doc);
+  lsp_send_doc(doc);
 }
 
 Token get_decl_token(AstNode *node) {
@@ -578,7 +560,8 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
         const char *resolved =
             resolve_module_path(&tmp_arena, current_abs, rel_path);
         if (resolved) {
-          LSP_BEGIN_RESPONSE(jdoc, root, id);
+          yyjson_mut_val *root;
+          yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
           yyjson_mut_val *result = yyjson_mut_obj(jdoc);
 
           char target_uri[8192];
@@ -597,7 +580,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
           yyjson_mut_obj_add_val(jdoc, result, "range", range);
           yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-          LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+          lsp_send_doc(jdoc);
           free(current_abs);
           arena_free_all(&tmp_arena);
           return;
@@ -616,7 +599,8 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
     const char *target_fpath = res.fpath;
 
     if (target_tok.len > 0) {
-      LSP_BEGIN_RESPONSE(jdoc, root, id);
+      yyjson_mut_val *root;
+      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
       yyjson_mut_val *result = yyjson_mut_obj(jdoc);
 
       char target_uri[8192];
@@ -643,7 +627,7 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
       yyjson_mut_obj_add_val(jdoc, result, "range", range);
       yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-      LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+      lsp_send_doc(jdoc);
       arena_free_all(&tmp_arena);
       return;
     }
@@ -652,9 +636,10 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
   arena_free_all(&tmp_arena);
 
 empty_response: {
-  LSP_BEGIN_RESPONSE(jdoc, root, id);
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
   yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+  lsp_send_doc(jdoc);
 }
 }
 
@@ -893,7 +878,8 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
       if (comments)
         free(comments);
 
-      LSP_BEGIN_RESPONSE(jdoc, root, id);
+      yyjson_mut_val *root;
+      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
       yyjson_mut_val *result = yyjson_mut_obj(jdoc);
 
       yyjson_mut_val *contents = yyjson_mut_obj(jdoc);
@@ -903,7 +889,7 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
       yyjson_mut_obj_add_val(jdoc, result, "contents", contents);
       yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-      LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+      lsp_send_doc(jdoc);
       arena_free_all(&tmp_arena);
       return;
     }
@@ -912,9 +898,10 @@ void handle_hover(yyjson_val *params, yyjson_val *id) {
   arena_free_all(&tmp_arena);
 
 empty_response: {
-  LSP_BEGIN_RESPONSE(jdoc, root, id);
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
   yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+  lsp_send_doc(jdoc);
 }
 }
 
@@ -954,81 +941,80 @@ void add_completion_item(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
 typedef struct {
   yyjson_mut_doc *jdoc;
   yyjson_mut_val *arr;
-  unsigned int target_line;    // 1 based line number of the cursor
-  AstNode *root_func; // the function we are inside to skip nested funcs
+  unsigned int target_line; // 1 based line number of the cursor
+  AstNode *root_func;       // the function we are inside to skip nested funcs
 } LocalCompData;
 
 VisitResult local_comp_enter(AstVisitor *visitor, AstNode *node) {
-    LocalCompData *data = (LocalCompData*)visitor->user_data;
+  LocalCompData *data = (LocalCompData *)visitor->user_data;
 
-    // Skip nested functions entirely
-    if (node->type == AST_FUNC && node != data->root_func) {
-        return VISIT_SKIP_CHILDREN;
+  // Skip nested functions entirely
+  if (node->type == AST_FUNC && node != data->root_func) {
+    return VISIT_SKIP_CHILDREN;
+  }
+
+  if (node->type == AST_PARAM) {
+    Token id = node->as.fn_param.id;
+    if (id.line <= data->target_line && id.len > 0) {
+      char name_buf[256];
+      if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
+        return VISIT_CONTINUE;
+
+      char detail_buf[1024] = {0};
+      format_type_to_buf(node->as.fn_param.type, detail_buf,
+                         sizeof(detail_buf));
+
+      add_completion_item(data->jdoc, data->arr, name_buf, 6,
+                          detail_buf[0] ? detail_buf : "parameter", NULL, NULL);
     }
+    // Parameters have no children we care about
+    return VISIT_SKIP_CHILDREN;
+  }
 
-    if (node->type == AST_PARAM) {
-        Token id = node->as.fn_param.id;
-        if (id.line <= data->target_line && id.len > 0) {
-            char name_buf[256];
-            if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
-                return VISIT_CONTINUE;
+  if (node->type == AST_VAR_DECL) {
+    Token id = node->as.var_decl.id;
+    if (id.line <= data->target_line && id.len > 0) {
+      char name_buf[256];
+      if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
+        return VISIT_CONTINUE;
 
-            char detail_buf[1024] = {0};
-            format_type_to_buf(node->as.fn_param.type, detail_buf, sizeof(detail_buf));
+      char detail_buf[1024] = {0};
+      format_type_to_buf(node->as.var_decl.type, detail_buf,
+                         sizeof(detail_buf));
 
-            add_completion_item(data->jdoc, data->arr, name_buf, 6,
-                                detail_buf[0] ? detail_buf : "parameter",
-                                NULL, NULL);
-        }
-        // Parameters have no children we care about
-        return VISIT_SKIP_CHILDREN;
+      add_completion_item(data->jdoc, data->arr, name_buf, 6,
+                          detail_buf[0] ? detail_buf : "local variable", NULL,
+                          NULL);
     }
+    // Skip the initializer
+    return VISIT_SKIP_CHILDREN;
+  }
 
-    if (node->type == AST_VAR_DECL) {
-        Token id = node->as.var_decl.id;
-        if (id.line <= data->target_line && id.len > 0) {
-            char name_buf[256];
-            if (token_to_buf(id, name_buf, sizeof(name_buf)) == 0)
-                return VISIT_CONTINUE;
-
-            char detail_buf[1024] = {0};
-            format_type_to_buf(node->as.var_decl.type, detail_buf, sizeof(detail_buf));
-
-            add_completion_item(data->jdoc, data->arr, name_buf, 6,
-                                detail_buf[0] ? detail_buf : "local variable",
-                                NULL, NULL);
-        }
-        // Skip the initializer
-        return VISIT_SKIP_CHILDREN;
-    }
-
-    return VISIT_CONTINUE;
+  return VISIT_CONTINUE;
 }
 
 void add_local_completions(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
                            AstNode *func_node, int target_line) {
-    if (!func_node || func_node->type != AST_FUNC)
-        return;
+  if (!func_node || func_node->type != AST_FUNC)
+    return;
 
-    LocalCompData data = {
-        .jdoc = jdoc,
-        .arr = arr,
-        .target_line = target_line,
-        .root_func = func_node
-    };
+  LocalCompData data = {.jdoc = jdoc,
+                        .arr = arr,
+                        .target_line = target_line,
+                        .root_func = func_node};
 
-    AstVisitor visitor = {0};
-    visitor.user_data = &data;
-    visitor.enter_node = local_comp_enter;
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = local_comp_enter;
 
-    jmp_buf panic_env;
-    visitor.panic_env = &panic_env;
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
 
-    if (setjmp(panic_env) == 0) {
-        ast_traverse(&visitor, func_node);
-    } else {
-        fprintf(stderr, "OOM encountered during local completion collection.\n");
-    }
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, func_node);
+  } else {
+    fprintf(stderr, "OOM encountered during local completion collection.\n");
+  }
 }
 
 AstNode *find_sue_decl(AstNode *root, const char *target_name,
@@ -1128,7 +1114,8 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
     goto empty_response;
   }
 
-  LSP_BEGIN_RESPONSE(jdoc, root, id);
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
   yyjson_mut_val *result = yyjson_mut_arr(jdoc);
 
   AstNode *containing_func = NULL;
@@ -1271,7 +1258,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
         arena_free_all(&tmp_arena);
         yyjson_mut_obj_add_val(jdoc, root, "result", result);
-        LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+        lsp_send_doc(jdoc);
         return;
       }
 
@@ -1598,7 +1585,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
         arena_free_all(&tmp_arena);
         yyjson_mut_obj_add_val(jdoc, root, "result", result);
-        LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+        lsp_send_doc(jdoc);
         return;
       }
       arena_free_all(&tmp_arena);
@@ -1688,13 +1675,14 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
   }
 
   yyjson_mut_obj_add_val(jdoc, root, "result", result);
-  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+  lsp_send_doc(jdoc);
   return;
 
 empty_response: {
-  LSP_BEGIN_RESPONSE(jdoc, root, id);
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
   yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+  lsp_send_doc(jdoc);
 }
 }
 
@@ -1704,13 +1692,15 @@ void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
 
   Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
   if (!doc || !doc->ast_root) {
-    LSP_BEGIN_RESPONSE(jdoc, root, id);
+    yyjson_mut_val *root;
+    yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
     yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-    LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+    lsp_send_doc(jdoc);
     return;
   }
 
-  LSP_BEGIN_RESPONSE(jdoc, root, id);
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
   yyjson_mut_val *result = yyjson_mut_arr(jdoc);
 
   AstNode *stmt = doc->ast_root->as.block.first_stmt;
@@ -1753,12 +1743,13 @@ void handle_document_symbols(yyjson_val *params, yyjson_val *id) {
   }
 
   yyjson_mut_obj_add_val(jdoc, root, "result", result);
-  LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+  lsp_send_doc(jdoc);
 }
 
 void handle_initialize(yyjson_val *params, yyjson_val *id) {
   (void)params; // No use currently
-  LSP_BEGIN_RESPONSE(doc, root, id);
+  yyjson_mut_val *root;
+  yyjson_mut_doc *doc = lsp_start_response(id, &root);
 
   yyjson_mut_val *result = yyjson_mut_obj(doc);
   yyjson_mut_val *capabilities = yyjson_mut_obj(doc);
@@ -1789,14 +1780,15 @@ void handle_initialize(yyjson_val *params, yyjson_val *id) {
   yyjson_mut_obj_add_val(doc, result, "capabilities", capabilities);
   yyjson_mut_obj_add_val(doc, root, "result", result);
 
-  LSP_SEND_AND_FREE(doc, root, lsp_write_stdout);
+  lsp_send_doc(doc);
 }
 
 void handle_shutdown(yyjson_val *id) {
   server_state.state = SHUTDOWN;
-  LSP_BEGIN_RESPONSE(doc, root, id);
+  yyjson_mut_val *root;
+  yyjson_mut_doc *doc = lsp_start_response(id, &root);
   yyjson_mut_obj_add_val(doc, root, "result", yyjson_mut_null(doc));
-  LSP_SEND_AND_FREE(doc, root, lsp_write_stdout);
+  lsp_send_doc(doc);
 }
 
 void handle_exit() {
@@ -1808,7 +1800,9 @@ void handle_exit() {
 }
 
 void publish_diagnostics_from_list(const char *uri, DiagList *diags) {
-  LSP_BEGIN_NOTIFICATION(doc, root, "textDocument/publishDiagnostics");
+  yyjson_mut_val *root;
+  yyjson_mut_doc *doc =
+      lsp_start_notification("textDocument/publishDiagnostics", &root);
 
   yyjson_mut_val *params = yyjson_mut_obj(doc);
   yyjson_mut_obj_add_str(doc, params, "uri", uri);
@@ -1837,7 +1831,7 @@ void publish_diagnostics_from_list(const char *uri, DiagList *diags) {
   yyjson_mut_obj_add_val(doc, params, "diagnostics", arr);
   yyjson_mut_obj_add_val(doc, root, "params", params);
 
-  LSP_SEND_AND_FREE(doc, root, lsp_write_stdout);
+  lsp_send_doc(doc);
 }
 
 #ifdef ENABLE_THREADS
@@ -2562,7 +2556,8 @@ fallback_found:
     Token fn_name = decl->as.func_def.fn_name;
     Token ret_type = decl->as.func_def.ret_type.name;
 
-    LSP_BEGIN_RESPONSE(jdoc, root, id);
+    yyjson_mut_val *root;
+    yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
     yyjson_mut_val *result = yyjson_mut_obj(jdoc);
     yyjson_mut_val *signatures = yyjson_mut_arr(jdoc);
     yyjson_mut_val *sig_obj = yyjson_mut_obj(jdoc);
@@ -2619,7 +2614,7 @@ fallback_found:
     yyjson_mut_obj_add_int(jdoc, result, "activeParameter", active_param);
     yyjson_mut_obj_add_val(jdoc, root, "result", result);
 
-    LSP_SEND_AND_FREE(jdoc, root, lsp_write_stdout);
+    lsp_send_doc(jdoc);
     arena_free_all(&tmp_arena);
     return;
   }
