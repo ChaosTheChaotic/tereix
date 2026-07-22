@@ -645,7 +645,7 @@ DataType create_basic_type(const char *name_str) {
 static DataType EXPECT_BOOL = {
     .name = {.start = "bool", .len = 4, .type = TOKEN_IDENTIF}};
 
-static Token get_expr_token(AstNode *node) {
+Token get_expr_token(AstNode *node) {
   if (!node)
     return (Token){0};
   switch (node->type) {
