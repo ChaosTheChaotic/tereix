@@ -8,6 +8,7 @@
 #include "util.h"
 #include "worklist.h"
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -217,33 +218,40 @@ size_t token_to_buf(Token t, char *buf, size_t buf_size) {
   return copy_len;
 }
 
+static inline void safe_append(char *buf, size_t size, size_t *offset,
+                               const char *fmt, ...) {
+  if (!buf || size == 0 || !offset || *offset >= size - 1)
+    return;
+
+  va_list args;
+  va_start(args, fmt);
+  int w = vsnprintf(buf + *offset, size - *offset, fmt, args);
+  va_end(args);
+
+  if (w < 0)
+    return;
+
+  *offset += w;
+  if (*offset >= size)
+    *offset = size - 1;
+  return;
+}
+
 size_t format_type_to_buf(DataType type, char *buf, size_t size) {
   if (!buf || size == 0)
     return 0;
   size_t offset = 0;
 
-#define S_APP(...)                                                             \
-  do {                                                                         \
-    if (offset < size - 1) {                                                   \
-      int w = snprintf(buf + offset, size - offset, __VA_ARGS__);              \
-      if (w > 0) {                                                             \
-        offset += w;                                                           \
-        if (offset >= size)                                                    \
-          offset = size - 1;                                                   \
-      }                                                                        \
-    }                                                                          \
-  } while (0)
-
   if (type.is_static)
-    S_APP("static ");
+    safe_append(buf, size, &offset, "static ");
   if (type.is_mut)
-    S_APP("mut ");
+    safe_append(buf, size, &offset, "mut ");
   if (type.is_threadlocal)
-    S_APP("threadlocal ");
+    safe_append(buf, size, &offset, "threadlocal ");
   if (type.is_extern)
-    S_APP("extern ");
+    safe_append(buf, size, &offset, "extern ");
   if (type.is_async)
-    S_APP("async ");
+    safe_append(buf, size, &offset, "async ");
 
   if (type.ptr_depth != 0) {
     char symbol = (type.ptr_depth > 0) ? '*' : '&';
@@ -254,23 +262,23 @@ size_t format_type_to_buf(DataType type, char *buf, size_t size) {
   }
 
   if (type.name.len > 0) {
-    S_APP("%.*s", (int)type.name.len, type.name.start);
+    safe_append(buf, size, &offset, "%.*s", (int)type.name.len,
+                type.name.start);
   }
 
   for (unsigned int i = 0; i < type.array_dimens; i++) {
     if (type.dim_sizes && type.dim_sizes[i]) {
       AstNode *dim = type.dim_sizes[i];
       if (dim->type == AST_NUM_LIT) {
-        S_APP("[%.*s]", (int)dim->as.num_lit.val.len,
-              dim->as.num_lit.val.start);
+        safe_append(buf, size, &offset, "[%.*s]", (int)dim->as.num_lit.val.len,
+                    dim->as.num_lit.val.start);
       } else {
-        S_APP("[expr]");
+        safe_append(buf, size, &offset, "[expr]");
       }
     } else {
-      S_APP("[]");
+      safe_append(buf, size, &offset, "[]");
     }
   }
-#undef S_APP
   return offset;
 }
 
@@ -279,25 +287,14 @@ void format_func_signature(AstNode *func_node, char *buf, size_t size) {
     return;
   size_t offset = 0;
 
-#define S_APP(...)                                                             \
-  do {                                                                         \
-    if (offset < size - 1) {                                                   \
-      int w = snprintf(buf + offset, size - offset, __VA_ARGS__);              \
-      if (w > 0) {                                                             \
-        offset += w;                                                           \
-        if (offset >= size)                                                    \
-          offset = size - 1;                                                   \
-      }                                                                        \
-    }                                                                          \
-  } while (0)
-
   offset += format_type_to_buf(func_node->as.func_def.ret_type, buf + offset,
                                size - offset);
   if (offset >= size)
     offset = size - 1;
 
-  S_APP(" %.*s(", (int)func_node->as.func_def.fn_name.len,
-        func_node->as.func_def.fn_name.start);
+  safe_append(buf, size, &offset, " %.*s(",
+              (int)func_node->as.func_def.fn_name.len,
+              func_node->as.func_def.fn_name.start);
 
   AstNode *param = func_node->as.func_def.params;
   while (param && offset < size - 1) {
@@ -306,15 +303,15 @@ void format_func_signature(AstNode *func_node, char *buf, size_t size) {
     if (offset >= size)
       offset = size - 1;
 
-    S_APP(" %.*s", (int)param->as.fn_param.id.len, param->as.fn_param.id.start);
+    safe_append(buf, size, &offset, " %.*s", (int)param->as.fn_param.id.len,
+                param->as.fn_param.id.start);
 
     if (param->next) {
-      S_APP(", ");
+      safe_append(buf, size, &offset, ", ");
     }
     param = param->next;
   }
-  S_APP(")");
-#undef S_APP
+  safe_append(buf, size, &offset, ")");
 }
 
 void lsp_send_error(yyjson_val *id_val, int error_code, const char *message) {
