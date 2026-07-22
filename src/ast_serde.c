@@ -335,6 +335,20 @@ void cache_write_ast(const char *cache_path, AstNode *root,
   free(map.entries);
 }
 
+static inline bool read_mem(void *dest, size_t size, const void *buffer,
+                            size_t buf_size, size_t *offset) {
+  if (*offset + size > buf_size) {
+    fprintf(stderr,
+            "Cache read: buffer over-read at offset %zu, size %zu, "
+            "buffer size %zu\n",
+            *offset, size, buf_size);
+    return false;
+  }
+  memcpy(dest, (const char *)buffer + *offset, size);
+  *offset += size;
+  return true;
+}
+
 AstNode *cache_read_ast(Arena *arena, const char *cache_path,
                         const char *source_base, size_t skip_bytes) {
   FILE *fp = fopen(cache_path, "rb");
@@ -414,22 +428,12 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
     fclose(fp);
   }
 
-#define READ_MEM(dest, size)                                                   \
-  do {                                                                         \
-    if (read_offset + (size) > buf_size) {                                     \
-      fprintf(stderr,                                                          \
-              "Cache read: buffer over-read at offset %zu, size %zu, buffer "  \
-              "size %zu\n",                                                    \
-              read_offset, (size_t)(size), buf_size);                          \
-      free(read_buffer);                                                       \
-      return NULL;                                                             \
-    }                                                                          \
-    memcpy((dest), (char *)read_buffer + read_offset, (size));                 \
-    read_offset += (size);                                                     \
-  } while (0)
-
   uint32_t node_count = 0;
-  READ_MEM(&node_count, sizeof(uint32_t));
+  if (!read_mem(&node_count, sizeof(uint32_t), read_buffer, buf_size,
+                &read_offset)) {
+    free(read_buffer);
+    return NULL;
+  }
   if (node_count == 0) {
     free(read_buffer);
     return NULL;
@@ -439,14 +443,22 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
 
   // Read nodes and their dimension sizes
   for (uint32_t i = 0; i < node_count; i++) {
-    READ_MEM(&nodes[i], sizeof(AstNode));
+    if (!read_mem(&nodes[i], sizeof(AstNode), read_buffer, buf_size,
+                  &read_offset)) {
+      free(read_buffer);
+      return NULL;
+    }
 
     if (nodes[i].eval_type.array_dimens > 0) {
       nodes[i].eval_type.dim_sizes = arena_alloc(
           arena, nodes[i].eval_type.array_dimens * sizeof(AstNode *));
       for (uint32_t d = 0; d < nodes[i].eval_type.array_dimens; d++) {
         uint32_t idx;
-        READ_MEM(&idx, sizeof(uint32_t));
+        if (!read_mem(&idx, sizeof(uint32_t), read_buffer, buf_size,
+                      &read_offset)) {
+          free(read_buffer);
+          return NULL;
+        }
         nodes[i].eval_type.dim_sizes[d] =
             (idx != 0xFFFFFFFF) ? &nodes[idx] : NULL;
       }
@@ -458,7 +470,11 @@ AstNode *cache_read_ast(Arena *arena, const char *cache_path,
           arena_alloc(arena, dt2->array_dimens * sizeof(AstNode *));
       for (uint32_t d = 0; d < dt2->array_dimens; d++) {
         uint32_t idx;
-        READ_MEM(&idx, sizeof(uint32_t));
+        if (!read_mem(&idx, sizeof(uint32_t), read_buffer, buf_size,
+                      &read_offset)) {
+          free(read_buffer);
+          return NULL;
+        }
         dt2->dim_sizes[d] = (idx != 0xFFFFFFFF) ? &nodes[idx] : NULL;
       }
     }
@@ -1097,15 +1113,12 @@ void cache_write_decl_meta(const char *path, DeclMetadata *meta,
   fclose(fp);
 }
 
+static inline bool safe_fread(void *ptr, size_t size, size_t nmemb, FILE *fp) {
+  return fread(ptr, size, nmemb, fp) == nmemb;
+}
+
 DeclMetadata *cache_read_decl_meta(Arena *arena, const char *path,
                                    const char *src_base) {
-#define SAFE_FREAD(ptr, size, nmemb, fp)                                       \
-  do {                                                                         \
-    if (fread((ptr), (size), (nmemb), (fp)) != (nmemb)) {                      \
-      fclose(fp);                                                              \
-      return NULL;                                                             \
-    }                                                                          \
-  } while (0)
   FILE *fp = fopen(path, "rb");
   if (!fp)
     return NULL;
@@ -1122,41 +1135,74 @@ DeclMetadata *cache_read_decl_meta(Arena *arena, const char *path,
     memset(m, 0, sizeof(DeclMetadata));
 
     // Read Name inline to survive source file modifications
-    SAFE_FREAD(&m->name.len, sizeof(uint32_t), 1, fp);
+    if (!safe_fread(&m->name.len, sizeof(uint32_t), 1, fp)) {
+      fclose(fp);
+      return NULL;
+    }
     char *name_str = arena_alloc(arena, m->name.len);
-    SAFE_FREAD(name_str, 1, m->name.len, fp);
+    if (!safe_fread(name_str, 1, m->name.len, fp)) {
+      fclose(fp);
+      return NULL;
+    }
     m->name.start = name_str;
     m->name.type = TOKEN_IDENTIF;
 
-    SAFE_FREAD(&m->node_hash, sizeof(uint32_t), 1, fp);
+    if (!safe_fread(&m->node_hash, sizeof(uint32_t), 1, fp)) {
+      fclose(fp);
+      return NULL;
+    }
 
     uint32_t start_off, end_off;
-    SAFE_FREAD(&start_off, sizeof(uint32_t), 1, fp);
-    SAFE_FREAD(&end_off, sizeof(uint32_t), 1, fp);
+    if (!safe_fread(&start_off, sizeof(uint32_t), 1, fp)) {
+      fclose(fp);
+      return NULL;
+    }
+    if (!safe_fread(&end_off, sizeof(uint32_t), 1, fp)) {
+      fclose(fp);
+      return NULL;
+    }
     m->src_start = (start_off == 0xFFFFFFFF) ? NULL : (src_base + start_off);
     m->src_end = (end_off == 0xFFFFFFFF) ? NULL : (src_base + end_off);
 
     uint32_t dep_count;
 
     // Read Calls
-    SAFE_FREAD(&dep_count, sizeof(uint32_t), 1, fp);
+    if (!safe_fread(&dep_count, sizeof(uint32_t), 1, fp)) {
+      fclose(fp);
+      return NULL;
+    }
     for (uint32_t j = 0; j < dep_count; j++) {
       DepNode *d = arena_alloc(arena, sizeof(DepNode));
-      SAFE_FREAD(&d->name.len, sizeof(uint32_t), 1, fp);
+      if (!safe_fread(&d->name.len, sizeof(uint32_t), 1, fp)) {
+        fclose(fp);
+        return NULL;
+      }
       char *d_name = arena_alloc(arena, d->name.len);
-      SAFE_FREAD(d_name, 1, d->name.len, fp);
+      if (!safe_fread(d_name, 1, d->name.len, fp)) {
+        fclose(fp);
+        return NULL;
+      }
       d->name.start = d_name;
       d->next = m->calls_to;
       m->calls_to = d;
     }
 
     // Read Types
-    SAFE_FREAD(&dep_count, sizeof(uint32_t), 1, fp);
+    if (!safe_fread(&dep_count, sizeof(uint32_t), 1, fp)) {
+      fclose(fp);
+      return NULL;
+    }
     for (uint32_t j = 0; j < dep_count; j++) {
       DepNode *d = arena_alloc(arena, sizeof(DepNode));
-      SAFE_FREAD(&d->name.len, sizeof(uint32_t), 1, fp);
+      if (!safe_fread(&d->name.len, sizeof(uint32_t), 1, fp)) {
+        fclose(fp);
+        return NULL;
+      }
       char *d_name = arena_alloc(arena, d->name.len);
-      SAFE_FREAD(d_name, 1, d->name.len, fp);
+      if (!safe_fread(d_name, 1, d->name.len, fp)) {
+        fclose(fp);
+        return NULL;
+      }
       d->name.start = d_name;
       d->next = m->uses_types;
       m->uses_types = d;

@@ -1072,6 +1072,37 @@ void flatten_sues(AstNode *root, Arena *arena) {
   }
 }
 
+static inline bool clone_child(AstNode *src_child, AstNode **dst_child_ptr,
+                               Arena *arena, ClonePair **stack, size_t *top,
+                               size_t *cap) {
+  if (!src_child)
+    return true; // nothing to clone
+
+  AstNode *dst = arena_alloc(arena, sizeof(AstNode));
+  if (!dst)
+    return false;
+
+  *dst = *src_child;
+  dst->next = NULL;
+  *dst_child_ptr = dst;
+
+  if (*top >= *cap) {
+    size_t new_cap = *cap * 2;
+    ClonePair *new_stack = realloc(*stack, sizeof(ClonePair) * new_cap);
+    if (!new_stack) {
+      fprintf(stderr,
+              "OOM encountered whilst enlarging stack in cloning AST.\n");
+      free(*stack);
+      return false;
+    }
+    *stack = new_stack;
+    *cap = new_cap;
+  }
+
+  (*stack)[(*top)++] = (ClonePair){src_child, dst};
+  return true;
+}
+
 AstNode *clone_ast(AstNode *root, Arena *arena) {
   if (!root)
     return NULL;
@@ -1090,113 +1121,169 @@ AstNode *clone_ast(AstNode *root, Arena *arena) {
     AstNode *src = p.src;
     AstNode *dst = p.dst;
 
-#define CLONE_CHILD(child_ptr)                                                 \
-  if (src->child_ptr) {                                                        \
-    dst->child_ptr = arena_alloc(arena, sizeof(AstNode));                      \
-    *dst->child_ptr = *src->child_ptr;                                         \
-    dst->child_ptr->next = NULL;                                               \
-    if (top >= cap) {                                                          \
-      size_t new_cap = cap * 2;                                                \
-      ClonePair *new_stack = realloc(stack, sizeof(ClonePair) * new_cap);      \
-      if (!new_stack) {                                                        \
-        fprintf(stderr,                                                        \
-                "OOM encountered whilst enlargig stack in cloning AST.\n");    \
-        free(stack);                                                           \
-        return NULL;                                                           \
-      }                                                                        \
-      stack = new_stack;                                                       \
-      cap = new_cap;                                                           \
-    }                                                                          \
-    stack[top++] = (ClonePair){src->child_ptr, dst->child_ptr};                \
-  }
-
-    CLONE_CHILD(next)
+    if (!clone_child(src->next, &dst->next, arena, &stack, &top, &cap))
+      return NULL;
 
     switch (src->type) {
     case AST_PROGRAM:
     case AST_BLOCK:
-      CLONE_CHILD(as.block.first_stmt);
+      if (!clone_child(src->as.block.first_stmt, &dst->as.block.first_stmt,
+                       arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_FUNC:
-      CLONE_CHILD(as.func_def.params);
-      CLONE_CHILD(as.func_def.block);
+      if (!clone_child(src->as.func_def.params, &dst->as.func_def.params, arena,
+                       &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.func_def.block, &dst->as.func_def.block, arena,
+                       &stack, &top, &cap))
+        return NULL;
       break;
     case AST_VAR_DECL:
-      CLONE_CHILD(as.var_decl.init);
+      if (!clone_child(src->as.var_decl.init, &dst->as.var_decl.init, arena,
+                       &stack, &top, &cap))
+        return NULL;
       break;
     case AST_BINOP:
-      CLONE_CHILD(as.binop.left);
-      CLONE_CHILD(as.binop.right);
+      if (!clone_child(src->as.binop.left, &dst->as.binop.left, arena, &stack,
+                       &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.binop.right, &dst->as.binop.right, arena, &stack,
+                       &top, &cap))
+        return NULL;
       break;
     case AST_UOP:
     case AST_ADDR_OF:
     case AST_DEREF:
-      CLONE_CHILD(as.unop.operand);
+      if (!clone_child(src->as.unop.operand, &dst->as.unop.operand, arena,
+                       &stack, &top, &cap))
+        return NULL;
       break;
     case AST_IF:
-      CLONE_CHILD(as.if_check.check);
-      CLONE_CHILD(as.if_check.action);
-      CLONE_CHILD(as.if_check.elseAct);
+      if (!clone_child(src->as.if_check.check, &dst->as.if_check.check, arena,
+                       &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.if_check.action, &dst->as.if_check.action, arena,
+                       &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.if_check.elseAct, &dst->as.if_check.elseAct,
+                       arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_WHILE:
-      CLONE_CHILD(as.while_loop.check);
-      CLONE_CHILD(as.while_loop.action);
+      if (!clone_child(src->as.while_loop.check, &dst->as.while_loop.check,
+                       arena, &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.while_loop.action, &dst->as.while_loop.action,
+                       arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_FOR:
-      CLONE_CHILD(as.for_loop.init);
-      CLONE_CHILD(as.for_loop.check);
-      CLONE_CHILD(as.for_loop.inc);
-      CLONE_CHILD(as.for_loop.action);
+      if (!clone_child(src->as.for_loop.init, &dst->as.for_loop.init, arena,
+                       &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.for_loop.check, &dst->as.for_loop.check, arena,
+                       &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.for_loop.inc, &dst->as.for_loop.inc, arena,
+                       &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.for_loop.action, &dst->as.for_loop.action, arena,
+                       &stack, &top, &cap))
+        return NULL;
       break;
     case AST_FUNC_CALL:
-      CLONE_CHILD(as.func_call.caller);
-      CLONE_CHILD(as.func_call.args);
+      if (!clone_child(src->as.func_call.caller, &dst->as.func_call.caller,
+                       arena, &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.func_call.args, &dst->as.func_call.args, arena,
+                       &stack, &top, &cap))
+        return NULL;
       break;
     case AST_ARRAY_LIT:
-      CLONE_CHILD(as.array_lit.elements);
+      if (!clone_child(src->as.array_lit.elements, &dst->as.array_lit.elements,
+                       arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_INDEX:
-      CLONE_CHILD(as.index.base);
-      CLONE_CHILD(as.index.index);
+      if (!clone_child(src->as.index.base, &dst->as.index.base, arena, &stack,
+                       &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.index.index, &dst->as.index.index, arena, &stack,
+                       &top, &cap))
+        return NULL;
       break;
     case AST_MEMBER:
-      CLONE_CHILD(as.member.base);
+      if (!clone_child(src->as.member.base, &dst->as.member.base, arena, &stack,
+                       &top, &cap))
+        return NULL;
       break;
     case AST_RET:
-      CLONE_CHILD(as.ret_stmt.expr);
+      if (!clone_child(src->as.ret_stmt.expr, &dst->as.ret_stmt.expr, arena,
+                       &stack, &top, &cap))
+        return NULL;
       break;
     case AST_DEFER:
-      CLONE_CHILD(as.defer_stmt.contents);
+      if (!clone_child(src->as.defer_stmt.contents,
+                       &dst->as.defer_stmt.contents, arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_SWITCH:
-      CLONE_CHILD(as.switch_stmt.check);
-      CLONE_CHILD(as.switch_stmt.cases);
-      CLONE_CHILD(as.switch_stmt.default_case);
+      if (!clone_child(src->as.switch_stmt.check, &dst->as.switch_stmt.check,
+                       arena, &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.switch_stmt.cases, &dst->as.switch_stmt.cases,
+                       arena, &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.switch_stmt.default_case,
+                       &dst->as.switch_stmt.default_case, arena, &stack, &top,
+                       &cap))
+        return NULL;
       break;
     case AST_CASE:
-      CLONE_CHILD(as.case_stmt.val);
-      CLONE_CHILD(as.case_stmt.action);
+      if (!clone_child(src->as.case_stmt.val, &dst->as.case_stmt.val, arena,
+                       &stack, &top, &cap))
+        return NULL;
+      if (!clone_child(src->as.case_stmt.action, &dst->as.case_stmt.action,
+                       arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_EXTERN:
-      CLONE_CHILD(as.extern_block.contents);
+      if (!clone_child(src->as.extern_block.contents,
+                       &dst->as.extern_block.contents, arena, &stack, &top,
+                       &cap))
+        return NULL;
       break;
     case AST_CAST:
-      CLONE_CHILD(as.cast.op);
+      if (!clone_child(src->as.cast.op, &dst->as.cast.op, arena, &stack, &top,
+                       &cap))
+        return NULL;
       break;
     case AST_STRUCT:
-      CLONE_CHILD(as.struct_def.contents);
+      if (!clone_child(src->as.struct_def.contents,
+                       &dst->as.struct_def.contents, arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_UNION:
-      CLONE_CHILD(as.union_def.contents);
+      if (!clone_child(src->as.union_def.contents, &dst->as.union_def.contents,
+                       arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_ENUM:
-      CLONE_CHILD(as.enum_def.contents);
+      if (!clone_child(src->as.enum_def.contents, &dst->as.enum_def.contents,
+                       arena, &stack, &top, &cap))
+        return NULL;
       break;
     case AST_ENUM_MEMBER:
-      CLONE_CHILD(as.enum_member.val);
+      if (!clone_child(src->as.enum_member.val, &dst->as.enum_member.val, arena,
+                       &stack, &top, &cap))
+        return NULL;
       break;
     case AST_SIZEOF:
-      CLONE_CHILD(as.sizeof_expr.target_expr);
+      if (!clone_child(src->as.sizeof_expr.target_expr,
+                       &dst->as.sizeof_expr.target_expr, arena, &stack, &top,
+                       &cap))
+        return NULL;
       break;
     default:
       break;

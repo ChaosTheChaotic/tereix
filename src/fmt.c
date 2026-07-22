@@ -9,6 +9,7 @@
 #include "worklist.h"
 #include <ctype.h>
 #include <dirent.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,7 +168,6 @@ void print_comments_between(const char *start, const char *end, FILE *out_fp,
 
   while (p < end) {
     if (p[0] == '/' && p[1] == '/') {
-      // Check if this comment is on a new line or trailing the previous node
       bool is_new_line = false;
       const char *check = p - 1;
       while (check >= start) {
@@ -188,10 +188,9 @@ void print_comments_between(const char *start, const char *end, FILE *out_fp,
         for (unsigned int i = 0; i < depth; i++)
           fputc('\t', out_fp);
       } else {
-        fputc(' ', out_fp); // Preserve inline spacing for trailing comments
+        fputc(' ', out_fp);
       }
 
-      // Print the comment content up to the newline
       while (p < end && *p != '\n' && *p != '\r') {
         fputc(*p, out_fp);
         p++;
@@ -217,54 +216,86 @@ typedef struct {
   bool oom;
 } FmtData;
 
-#define FPRINTF_SAFE(...)                                                      \
-  do {                                                                         \
-    if (fprintf(data->out_fp, __VA_ARGS__) < 0) {                              \
-      goto err_cleanup;                                                        \
-    }                                                                          \
-  } while (0)
+static inline bool fmt_printf(FmtData *data, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  int ret = vfprintf(data->out_fp, fmt, args);
+  va_end(args);
+  if (ret < 0) {
+    data->oom = true;
+    return false;
+  }
+  return true;
+}
 
-#define FMT_TYPE_SAFE(t)                                                       \
-  do {                                                                         \
-    if ((t).is_static)                                                         \
-      FPRINTF_SAFE("%s", "static ");                                           \
-    if ((t).is_threadlocal)                                                    \
-      FPRINTF_SAFE("%s", "threadlocal ");                                      \
-    if ((t).is_extern)                                                         \
-      FPRINTF_SAFE("%s", "extern ");                                           \
-    if ((t).is_async)                                                          \
-      FPRINTF_SAFE("%s", "async ");                                            \
-    if ((t).is_inline)                                                         \
-      FPRINTF_SAFE("%s", "inline ");                                           \
-    if ((t).ptr_depth != 0) {                                                  \
-      char sym = ((t).ptr_depth > 0) ? '*' : '&';                              \
-      int cnt = ((t).ptr_depth > 0) ? (t).ptr_depth : -(t).ptr_depth;          \
-      for (int _i = 0; _i < cnt; _i++)                                         \
-        FPRINTF_SAFE("%c", sym);                                               \
-    }                                                                          \
-    if ((t).is_mut)                                                            \
-      FPRINTF_SAFE("%s", "mut ");                                              \
-    if ((t).is_self) {                                                         \
-      FPRINTF_SAFE("%s", "self");                                              \
-    } else if ((t).name.len > 0) {                                             \
-      FPRINTF_SAFE("%.*s", (int)(t).name.len, (t).name.start);                 \
-    }                                                                          \
-    for (unsigned int _i = 0; _i < (t).array_dimens; _i++) {                   \
-      if ((t).dim_sizes && _i < (t).array_dimens && (t).dim_sizes[_i]) {       \
-        AstNode *dim = (t).dim_sizes[_i];                                      \
-        if (dim->type == AST_NUM_LIT) {                                        \
-          FPRINTF_SAFE("[%.*s]", (int)dim->as.num_lit.val.len,                 \
-                       dim->as.num_lit.val.start);                             \
-        } else {                                                               \
-          FPRINTF_SAFE("%s", "[expr]");                                        \
-        }                                                                      \
-      } else {                                                                 \
-        FPRINTF_SAFE("%s", "[]");                                              \
-      }                                                                        \
-    }                                                                          \
-  } while (0)
+static inline bool fmt_putc(FmtData *data, int ch) {
+  if (fputc(ch, data->out_fp) == EOF) {
+    data->oom = true;
+    return false;
+  }
+  return true;
+}
 
-// Check if a newline or semicolon is needed
+static inline bool fmt_print_type(FmtData *data, DataType t) {
+  if (t.is_static) {
+    if (!fmt_printf(data, "static "))
+      return false;
+  }
+  if (t.is_threadlocal) {
+    if (!fmt_printf(data, "threadlocal "))
+      return false;
+  }
+  if (t.is_extern) {
+    if (!fmt_printf(data, "extern "))
+      return false;
+  }
+  if (t.is_async) {
+    if (!fmt_printf(data, "async "))
+      return false;
+  }
+  if (t.is_inline) {
+    if (!fmt_printf(data, "inline "))
+      return false;
+  }
+
+  if (t.ptr_depth != 0) {
+    char sym = (t.ptr_depth > 0) ? '*' : '&';
+    int cnt = (t.ptr_depth > 0) ? t.ptr_depth : -t.ptr_depth;
+    for (int i = 0; i < cnt; i++) {
+      if (!fmt_putc(data, sym))
+        return false;
+    }
+    if (!fmt_putc(data, ' '))
+      return false;
+  }
+
+  if (t.is_mut) {
+    if (!fmt_printf(data, "mut "))
+      return false;
+  }
+
+  if (t.is_self) {
+    if (!fmt_printf(data, "self"))
+      return false;
+  } else if (t.name.len > 0) {
+    if (!fmt_printf(data, "%.*s", (int)t.name.len, t.name.start))
+      return false;
+  }
+
+  for (unsigned int i = 0; i < t.array_dimens; i++) {
+    AstNode *dim = (t.dim_sizes && i < t.array_dimens) ? t.dim_sizes[i] : NULL;
+    if (dim && dim->type == AST_NUM_LIT) {
+      if (!fmt_printf(data, "[%.*s]", (int)dim->as.num_lit.val.len,
+                      dim->as.num_lit.val.start))
+        return false;
+    } else {
+      if (!fmt_printf(data, "[]"))
+        return false;
+    }
+  }
+  return true;
+}
+
 bool is_statement_context(AstNode *node, AstNode *parent) {
   if (!parent)
     return true;
@@ -287,7 +318,6 @@ bool is_statement_context(AstNode *node, AstNode *parent) {
   }
 }
 
-// Check if a node does not print its own semicolon
 bool needs_semi(AstNode *stmt) {
   switch (stmt->type) {
   case AST_FUNC_CALL:
@@ -322,7 +352,6 @@ VisitResult fmt_enter_node(AstVisitor *visitor, AstNode *node) {
   AstNode *parent =
       data->parent_top > 0 ? data->parent_stack[data->parent_top - 1] : NULL;
 
-  // Track stack
   if (data->parent_top >= data->parent_cap) {
     data->parent_cap = data->parent_cap == 0 ? 128 : data->parent_cap * 2;
     data->parent_stack =
@@ -334,7 +363,6 @@ VisitResult fmt_enter_node(AstVisitor *visitor, AstNode *node) {
   data->interleave_counts[data->parent_top] = 0;
   data->parent_top++;
 
-  // Base indentation
   if (parent) {
     bool indent = false;
     if (parent->type == AST_PROGRAM || parent->type == AST_BLOCK ||
@@ -349,8 +377,10 @@ VisitResult fmt_enter_node(AstVisitor *visitor, AstNode *node) {
       indent = true;
 
     if (indent) {
-      for (unsigned int i = 0; i < data->depth; i++)
-        FPRINTF_SAFE("%c", '\t');
+      for (unsigned int i = 0; i < data->depth; i++) {
+        if (!fmt_putc(data, '\t'))
+          goto err_cleanup;
+      }
     }
   }
 
@@ -359,43 +389,58 @@ VisitResult fmt_enter_node(AstVisitor *visitor, AstNode *node) {
     if (parent && (parent->type == AST_FUNC || parent->type == AST_IF ||
                    parent->type == AST_WHILE || parent->type == AST_FOR ||
                    parent->type == AST_CASE || parent->type == AST_DEFER)) {
-      if (parent->type == AST_FUNC)
-        FPRINTF_SAFE(") ");
-      else
-        FPRINTF_SAFE(" ");
+      if (parent->type == AST_FUNC) {
+        if (!fmt_printf(data, ") "))
+          goto err_cleanup;
+      } else {
+        if (!fmt_printf(data, " "))
+          goto err_cleanup;
+      }
     }
     if (parent && parent->type == AST_SWITCH &&
         node == parent->as.switch_stmt.default_case) {
-      FPRINTF_SAFE("default ");
+      if (!fmt_printf(data, "default "))
+        goto err_cleanup;
     }
-    FPRINTF_SAFE("{\n");
+    if (!fmt_printf(data, "{\n"))
+      goto err_cleanup;
     data->depth++;
     break;
   case AST_EXTERN:
-    FPRINTF_SAFE("extern {\n");
+    if (!fmt_printf(data, "extern {\n"))
+      goto err_cleanup;
     data->depth++;
     break;
   case AST_FUNC:
-    FMT_TYPE_SAFE(node->as.func_def.ret_type);
-    FPRINTF_SAFE(" %.*s(", (int)node->as.func_def.fn_name.len,
-                 node->as.func_def.fn_name.start);
+    if (!fmt_print_type(data, node->as.func_def.ret_type))
+      goto err_cleanup;
+    if (!fmt_printf(data, " %.*s(", (int)node->as.func_def.fn_name.len,
+                    node->as.func_def.fn_name.start))
+      goto err_cleanup;
     break;
   case AST_PARAM: {
-    FMT_TYPE_SAFE(node->as.fn_param.type);
+    if (!fmt_print_type(data, node->as.fn_param.type))
+      goto err_cleanup;
     bool is_implicit_self = node->as.fn_param.type.is_self &&
                             node->as.fn_param.id.len == 4 &&
                             strncmp(node->as.fn_param.id.start, "self", 4) == 0;
-    if (!is_implicit_self)
-      FPRINTF_SAFE(" %.*s", (int)node->as.fn_param.id.len,
-                   node->as.fn_param.id.start);
+    if (!is_implicit_self) {
+      if (!fmt_printf(data, " %.*s", (int)node->as.fn_param.id.len,
+                      node->as.fn_param.id.start))
+        goto err_cleanup;
+    }
     break;
   }
   case AST_VAR_DECL:
-    FMT_TYPE_SAFE(node->as.var_decl.type);
-    FPRINTF_SAFE(" %.*s", (int)node->as.var_decl.id.len,
-                 node->as.var_decl.id.start);
-    if (node->as.var_decl.init)
-      FPRINTF_SAFE(" = ");
+    if (!fmt_print_type(data, node->as.var_decl.type))
+      goto err_cleanup;
+    if (!fmt_printf(data, " %.*s", (int)node->as.var_decl.id.len,
+                    node->as.var_decl.id.start))
+      goto err_cleanup;
+    if (node->as.var_decl.init) {
+      if (!fmt_printf(data, " = "))
+        goto err_cleanup;
+    }
     break;
   case AST_STRUCT:
   case AST_UNION:
@@ -416,110 +461,155 @@ VisitResult fmt_enter_node(AstVisitor *visitor, AstNode *node) {
     bool is_extern_node =
         (node->type == AST_STRUCT && node->as.struct_def.is_extern) ||
         (node->type == AST_UNION && node->as.union_def.is_extern);
-    if (is_extern_node)
-      FPRINTF_SAFE("extern ");
-    FPRINTF_SAFE("%s ", kw);
+    if (is_extern_node) {
+      if (!fmt_printf(data, "extern "))
+        goto err_cleanup;
+    }
+    if (!fmt_printf(data, "%s ", kw))
+      goto err_cleanup;
 
     if (is_decl_only) {
-      FPRINTF_SAFE("%.*s;\n\n", (int)name_tok.len, name_tok.start);
+      if (!fmt_printf(data, "%.*s;\n\n", (int)name_tok.len, name_tok.start))
+        goto err_cleanup;
       return VISIT_SKIP_CHILDREN;
     } else {
-      FPRINTF_SAFE("%.*s {\n", (int)name_tok.len, name_tok.start);
+      if (!fmt_printf(data, "%.*s {\n", (int)name_tok.len, name_tok.start))
+        goto err_cleanup;
       data->depth++;
     }
     break;
   }
   case AST_IDENTIF:
-    FPRINTF_SAFE("%.*s", (int)node->as.identif.val.len,
-                 node->as.identif.val.start);
+    if (!fmt_printf(data, "%.*s", (int)node->as.identif.val.len,
+                    node->as.identif.val.start))
+      goto err_cleanup;
     break;
   case AST_UOP:
   case AST_ADDR_OF:
   case AST_DEREF:
-    if (!node->as.unop.is_postfix)
-      FPRINTF_SAFE("%.*s", node->as.unop.op.len, node->as.unop.op.start);
+    if (!node->as.unop.is_postfix) {
+      if (!fmt_printf(data, "%.*s", node->as.unop.op.len,
+                      node->as.unop.op.start))
+        goto err_cleanup;
+    }
     break;
   case AST_IF:
-    FPRINTF_SAFE("if (");
+    if (!fmt_printf(data, "if ("))
+      goto err_cleanup;
     break;
   case AST_NUM_LIT:
-    FPRINTF_SAFE("%.*s", node->as.num_lit.val.len, node->as.num_lit.val.start);
+    if (!fmt_printf(data, "%.*s", node->as.num_lit.val.len,
+                    node->as.num_lit.val.start))
+      goto err_cleanup;
     break;
   case AST_STR_LIT:
-    FPRINTF_SAFE("%.*s", node->as.str_lit.val.len, node->as.str_lit.val.start);
+    if (!fmt_printf(data, "%.*s", node->as.str_lit.val.len,
+                    node->as.str_lit.val.start))
+      goto err_cleanup;
     break;
   case AST_CHAR_LIT:
-    FPRINTF_SAFE("%.*s", node->as.char_lit.val.len,
-                 node->as.char_lit.val.start);
+    if (!fmt_printf(data, "%.*s", node->as.char_lit.val.len,
+                    node->as.char_lit.val.start))
+      goto err_cleanup;
     break;
   case AST_BOOL_LIT:
-    FPRINTF_SAFE("%.*s", node->as.bool_lit.val.len,
-                 node->as.bool_lit.val.start);
+    if (!fmt_printf(data, "%.*s", node->as.bool_lit.val.len,
+                    node->as.bool_lit.val.start))
+      goto err_cleanup;
     break;
   case AST_NULL_LIT:
-    FPRINTF_SAFE("null");
+    if (!fmt_printf(data, "null"))
+      goto err_cleanup;
     break;
   case AST_RET:
-    FPRINTF_SAFE("ret");
-    if (node->as.ret_stmt.expr)
-      FPRINTF_SAFE(" ");
+    if (!fmt_printf(data, "ret"))
+      goto err_cleanup;
+    if (node->as.ret_stmt.expr) {
+      if (!fmt_printf(data, " "))
+        goto err_cleanup;
+    }
     break;
   case AST_ARRAY_LIT:
-    FPRINTF_SAFE("[");
+    if (!fmt_printf(data, "["))
+      goto err_cleanup;
     break;
   case AST_ENUM_MEMBER:
-    FPRINTF_SAFE("%.*s", (int)node->as.enum_member.name.len,
-                 node->as.enum_member.name.start);
-    if (node->as.enum_member.val)
-      FPRINTF_SAFE(" = ");
+    if (!fmt_printf(data, "%.*s", (int)node->as.enum_member.name.len,
+                    node->as.enum_member.name.start))
+      goto err_cleanup;
+    if (node->as.enum_member.val) {
+      if (!fmt_printf(data, " = "))
+        goto err_cleanup;
+    }
     break;
   case AST_DEFER:
     if (node->as.defer_stmt.contents &&
-        node->as.defer_stmt.contents->type == AST_BLOCK)
-      FPRINTF_SAFE("defer");
-    else
-      FPRINTF_SAFE("defer ");
+        node->as.defer_stmt.contents->type == AST_BLOCK) {
+      if (!fmt_printf(data, "defer"))
+        goto err_cleanup;
+    } else {
+      if (!fmt_printf(data, "defer "))
+        goto err_cleanup;
+    }
     break;
   case AST_FOR:
-    FPRINTF_SAFE("for (");
+    if (!fmt_printf(data, "for ("))
+      goto err_cleanup;
     break;
   case AST_WHILE:
-    FPRINTF_SAFE("while (");
+    if (!fmt_printf(data, "while ("))
+      goto err_cleanup;
     break;
   case AST_SWITCH:
-    FPRINTF_SAFE("switch (");
+    if (!fmt_printf(data, "switch ("))
+      goto err_cleanup;
     break;
   case AST_CASE:
     if (node->as.case_stmt.val == NULL) {
-      FPRINTF_SAFE("default");
+      if (!fmt_printf(data, "default"))
+        goto err_cleanup;
     } else {
-      FPRINTF_SAFE("case (");
+      if (!fmt_printf(data, "case ("))
+        goto err_cleanup;
     }
     break;
   case AST_USE:
-    FPRINTF_SAFE("use %.*s", (int)node->as.use_stmt.path.len,
-                 node->as.use_stmt.path.start);
-    if (node->as.use_stmt.alias.len > 0)
-      FPRINTF_SAFE(" as %.*s", (int)node->as.use_stmt.alias.len,
-                   node->as.use_stmt.alias.start);
-    FPRINTF_SAFE(";\n");
-    if (node->next && node->next->type != AST_USE)
-      FPRINTF_SAFE("\n");
+    if (!fmt_printf(data, "use %.*s", (int)node->as.use_stmt.path.len,
+                    node->as.use_stmt.path.start))
+      goto err_cleanup;
+    if (node->as.use_stmt.alias.len > 0) {
+      if (!fmt_printf(data, " as %.*s", (int)node->as.use_stmt.alias.len,
+                      node->as.use_stmt.alias.start))
+        goto err_cleanup;
+    }
+    if (!fmt_printf(data, ";\n"))
+      goto err_cleanup;
+    if (node->next && node->next->type != AST_USE) {
+      if (!fmt_printf(data, "\n"))
+        goto err_cleanup;
+    }
     break;
   case AST_BREAK:
-    FPRINTF_SAFE("break;\n");
+    if (!fmt_printf(data, "break;\n"))
+      goto err_cleanup;
     break;
   case AST_CONTINUE:
-    FPRINTF_SAFE("continue;\n");
+    if (!fmt_printf(data, "continue;\n"))
+      goto err_cleanup;
     break;
   case AST_CAST:
-    FPRINTF_SAFE("(");
-    if (node->as.cast.target.is_self)
-      FPRINTF_SAFE("self");
-    else
-      FPRINTF_SAFE("%.*s", (int)node->as.cast.target.name.len,
-                   node->as.cast.target.name.start);
-    FPRINTF_SAFE(")");
+    if (!fmt_printf(data, "("))
+      goto err_cleanup;
+    if (node->as.cast.target.is_self) {
+      if (!fmt_printf(data, "self"))
+        goto err_cleanup;
+    } else {
+      if (!fmt_printf(data, "%.*s", (int)node->as.cast.target.name.len,
+                      node->as.cast.target.name.start))
+        goto err_cleanup;
+    }
+    if (!fmt_printf(data, ")"))
+      goto err_cleanup;
     break;
   case AST_SIZEOF:
     if (!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr &&
@@ -529,45 +619,62 @@ VisitResult fmt_enter_node(AstVisitor *visitor, AstNode *node) {
       if (op && op->type == AST_IDENTIF &&
           map_get(data->type_set, op->as.identif.val.start,
                   op->as.identif.val.len) != NULL) {
-        FPRINTF_SAFE("(");
-        FMT_TYPE_SAFE(cast->as.cast.target);
-        FPRINTF_SAFE(")sizeof(%.*s)", (int)op->as.identif.val.len,
-                     op->as.identif.val.start);
+        if (!fmt_printf(data, "("))
+          goto err_cleanup;
+        if (!fmt_print_type(data, cast->as.cast.target))
+          goto err_cleanup;
+        if (!fmt_printf(data, ")sizeof(%.*s)", (int)op->as.identif.val.len,
+                        op->as.identif.val.start))
+          goto err_cleanup;
         return VISIT_SKIP_CHILDREN;
       }
     }
-    FPRINTF_SAFE("sizeof(");
+    if (!fmt_printf(data, "sizeof("))
+      goto err_cleanup;
     if (node->as.sizeof_expr.is_type) {
-      if (node->as.sizeof_expr.target_type.is_self)
-        FPRINTF_SAFE("self");
-      else
-        FPRINTF_SAFE("%.*s", (int)node->as.sizeof_expr.target_type.name.len,
-                     node->as.sizeof_expr.target_type.name.start);
-      FPRINTF_SAFE(")");
+      if (node->as.sizeof_expr.target_type.is_self) {
+        if (!fmt_printf(data, "self"))
+          goto err_cleanup;
+      } else {
+        if (!fmt_printf(data, "%.*s",
+                        (int)node->as.sizeof_expr.target_type.name.len,
+                        node->as.sizeof_expr.target_type.name.start))
+          goto err_cleanup;
+      }
+      if (!fmt_printf(data, ")"))
+        goto err_cleanup;
     }
     break;
   default:
     break;
   }
 
-  // Handle gap prints before specific statements for `for` loops
   if (parent && parent->type == AST_FOR) {
     if (node == parent->as.for_loop.check) {
-      if (!parent->as.for_loop.init)
-        FPRINTF_SAFE("; ");
+      if (!parent->as.for_loop.init) {
+        if (!fmt_printf(data, "; "))
+          goto err_cleanup;
+      }
     } else if (node == parent->as.for_loop.inc) {
-      if (!parent->as.for_loop.init && !parent->as.for_loop.check)
-        FPRINTF_SAFE("; ; ");
-      else if (!parent->as.for_loop.check)
-        FPRINTF_SAFE("; ");
+      if (!parent->as.for_loop.init && !parent->as.for_loop.check) {
+        if (!fmt_printf(data, "; ; "))
+          goto err_cleanup;
+      } else if (!parent->as.for_loop.check) {
+        if (!fmt_printf(data, "; "))
+          goto err_cleanup;
+      }
     } else if (node == parent->as.for_loop.action) {
       if (!parent->as.for_loop.init && !parent->as.for_loop.check &&
-          !parent->as.for_loop.inc)
-        FPRINTF_SAFE("; ; ) ");
-      else if (!parent->as.for_loop.check && !parent->as.for_loop.inc)
-        FPRINTF_SAFE("; ) ");
-      else if (!parent->as.for_loop.inc)
-        FPRINTF_SAFE(") ");
+          !parent->as.for_loop.inc) {
+        if (!fmt_printf(data, "; ; ) "))
+          goto err_cleanup;
+      } else if (!parent->as.for_loop.check && !parent->as.for_loop.inc) {
+        if (!fmt_printf(data, "; ) "))
+          goto err_cleanup;
+      } else if (!parent->as.for_loop.inc) {
+        if (!fmt_printf(data, ") "))
+          goto err_cleanup;
+      }
     }
   }
 
@@ -579,51 +686,65 @@ err_cleanup:
 }
 
 void fmt_interleave_node(AstVisitor *visitor, AstNode *node, int step) {
-  (void)step; // Unused
+  (void)step;
   FmtData *data = (FmtData *)visitor->user_data;
-
-  // Node here is parent currently at top of stack
   int count = data->interleave_counts[data->parent_top - 1]++;
 
   switch (node->type) {
   case AST_FUNC:
-    FPRINTF_SAFE(", ");
+    if (!fmt_printf(data, ", "))
+      goto err_cleanup;
     break;
   case AST_BINOP:
-    FPRINTF_SAFE(" %.*s ", (int)node->as.binop.op.len, node->as.binop.op.start);
+    if (!fmt_printf(data, " %.*s ", (int)node->as.binop.op.len,
+                    node->as.binop.op.start))
+      goto err_cleanup;
     break;
   case AST_IF:
     if (count == 0) {
       if (node->as.if_check.action &&
-          node->as.if_check.action->type == AST_BLOCK)
-        FPRINTF_SAFE(")");
-      else
-        FPRINTF_SAFE(") ");
+          node->as.if_check.action->type == AST_BLOCK) {
+        if (!fmt_printf(data, ")"))
+          goto err_cleanup;
+      } else {
+        if (!fmt_printf(data, ") "))
+          goto err_cleanup;
+      }
     } else if (count == 1) {
       if (node->as.if_check.elseAct &&
-          node->as.if_check.elseAct->type == AST_BLOCK)
-        FPRINTF_SAFE(" else");
-      else
-        FPRINTF_SAFE(" else ");
+          node->as.if_check.elseAct->type == AST_BLOCK) {
+        if (!fmt_printf(data, " else"))
+          goto err_cleanup;
+      } else {
+        if (!fmt_printf(data, " else "))
+          goto err_cleanup;
+      }
     }
     break;
   case AST_FUNC_CALL:
-    if (count == 0)
-      FPRINTF_SAFE("(");
-    else
-      FPRINTF_SAFE(", ");
+    if (count == 0) {
+      if (!fmt_printf(data, "("))
+        goto err_cleanup;
+    } else {
+      if (!fmt_printf(data, ", "))
+        goto err_cleanup;
+    }
     break;
   case AST_ARRAY_LIT:
-    FPRINTF_SAFE(", ");
+    if (!fmt_printf(data, ", "))
+      goto err_cleanup;
     break;
   case AST_INDEX:
-    if (count == 0)
-      FPRINTF_SAFE("[");
+    if (count == 0) {
+      if (!fmt_printf(data, "["))
+        goto err_cleanup;
+    }
     break;
   default:
     break;
   }
   return;
+
 err_cleanup:
   data->oom = true;
 }
@@ -636,28 +757,41 @@ void fmt_exit_node(AstVisitor *visitor, AstNode *node) {
   switch (node->type) {
   case AST_BLOCK:
     data->depth--;
-    for (unsigned int i = 0; i < data->depth; i++)
-      FPRINTF_SAFE("%c", '\t');
-    FPRINTF_SAFE("}");
-    if (parent && parent->type == AST_EXTERN)
-      FPRINTF_SAFE("\n\n");
-    else if (parent && parent->type == AST_SWITCH && 
-             node == parent->as.switch_stmt.default_case)
-        FPRINTF_SAFE("\n");
+    for (unsigned int i = 0; i < data->depth; i++) {
+      if (!fmt_putc(data, '\t'))
+        goto err_cleanup;
+    }
+    if (!fmt_printf(data, "}"))
+      goto err_cleanup;
+    if (parent && parent->type == AST_EXTERN) {
+      if (!fmt_printf(data, "\n\n"))
+        goto err_cleanup;
+    } else if (parent && parent->type == AST_SWITCH &&
+               node == parent->as.switch_stmt.default_case) {
+      if (!fmt_printf(data, "\n"))
+        goto err_cleanup;
+    }
     break;
   case AST_EXTERN:
     data->depth--;
-    for (unsigned int i = 0; i < data->depth; i++)
-      FPRINTF_SAFE("%c", '\t');
-    FPRINTF_SAFE("}\n\n");
+    for (unsigned int i = 0; i < data->depth; i++) {
+      if (!fmt_putc(data, '\t'))
+        goto err_cleanup;
+    }
+    if (!fmt_printf(data, "}\n\n"))
+      goto err_cleanup;
     break;
   case AST_FUNC:
-    if (!node->as.func_def.block)
-      FPRINTF_SAFE(");\n");
-    else {
-      FPRINTF_SAFE("\n");
-      if (node->next)
-        FPRINTF_SAFE("\n");
+    if (!node->as.func_def.block) {
+      if (!fmt_printf(data, ");\n"))
+        goto err_cleanup;
+    } else {
+      if (!fmt_printf(data, "\n"))
+        goto err_cleanup;
+      if (node->next) {
+        if (!fmt_printf(data, "\n"))
+          goto err_cleanup;
+      }
     }
     break;
   case AST_STRUCT:
@@ -669,53 +803,69 @@ void fmt_exit_node(AstVisitor *visitor, AstNode *node) {
       is_decl_only = true;
     if (!is_decl_only) {
       data->depth--;
-      for (unsigned int i = 0; i < data->depth; i++)
-        FPRINTF_SAFE("%c", '\t');
-      FPRINTF_SAFE("}\n\n");
+      for (unsigned int i = 0; i < data->depth; i++) {
+        if (!fmt_putc(data, '\t'))
+          goto err_cleanup;
+      }
+      if (!fmt_printf(data, "}\n\n"))
+        goto err_cleanup;
     }
     break;
   }
   case AST_FUNC_CALL:
-    FPRINTF_SAFE(")");
+    if (!fmt_printf(data, ")"))
+      goto err_cleanup;
     break;
   case AST_ARRAY_LIT:
-    FPRINTF_SAFE("]");
+    if (!fmt_printf(data, "]"))
+      goto err_cleanup;
     break;
   case AST_ENUM_MEMBER:
-    FPRINTF_SAFE(",\n");
+    if (!fmt_printf(data, ",\n"))
+      goto err_cleanup;
     break;
   case AST_INDEX:
-    FPRINTF_SAFE("]");
+    if (!fmt_printf(data, "]"))
+      goto err_cleanup;
     break;
   case AST_MEMBER:
-    FPRINTF_SAFE(".%.*s", (int)node->as.member.name.len,
-                 node->as.member.name.start);
+    if (!fmt_printf(data, ".%.*s", (int)node->as.member.name.len,
+                    node->as.member.name.start))
+      goto err_cleanup;
     break;
   case AST_UOP:
   case AST_ADDR_OF:
   case AST_DEREF:
-    if (node->as.unop.is_postfix)
-      FPRINTF_SAFE("%.*s", node->as.unop.op.len, node->as.unop.op.start);
+    if (node->as.unop.is_postfix) {
+      if (!fmt_printf(data, "%.*s", node->as.unop.op.len,
+                      node->as.unop.op.start))
+        goto err_cleanup;
+    }
     break;
   case AST_SIZEOF:
     if (!(!node->as.sizeof_expr.is_type && node->as.sizeof_expr.target_expr &&
           node->as.sizeof_expr.target_expr->type == AST_CAST)) {
-      if (!node->as.sizeof_expr.is_type)
-        FPRINTF_SAFE(")");
+      if (!node->as.sizeof_expr.is_type) {
+        if (!fmt_printf(data, ")"))
+          goto err_cleanup;
+      }
     }
     break;
   case AST_VAR_DECL: {
     bool is_for_init =
         parent && parent->type == AST_FOR && node == parent->as.for_loop.init;
-    if (is_for_init)
-      FPRINTF_SAFE("; ");
-    else {
-      FPRINTF_SAFE(";\n");
+    if (is_for_init) {
+      if (!fmt_printf(data, "; "))
+        goto err_cleanup;
+    } else {
+      if (!fmt_printf(data, ";\n"))
+        goto err_cleanup;
       bool is_global = !parent || parent->type == AST_PROGRAM ||
                        parent->type == AST_STRUCT ||
                        parent->type == AST_UNION || parent->type == AST_EXTERN;
       if (is_global && node->next && node->next->type != AST_VAR_DECL) {
-        FPRINTF_SAFE("\n");
+        if (!fmt_printf(data, "\n"))
+          goto err_cleanup;
       } else if (!is_global && node->next && node->src_end &&
                  node->next->src_start) {
         int nl_count = 0;
@@ -723,8 +873,10 @@ void fmt_exit_node(AstVisitor *visitor, AstNode *node) {
           if (*p == '\n')
             nl_count++;
         }
-        if (nl_count >= 2)
-          FPRINTF_SAFE("\n");
+        if (nl_count >= 2) {
+          if (!fmt_printf(data, "\n"))
+            goto err_cleanup;
+        }
       }
     }
     break;
@@ -732,94 +884,129 @@ void fmt_exit_node(AstVisitor *visitor, AstNode *node) {
   case AST_RET:
   case AST_DEFER:
     if (node->type == AST_DEFER && node->as.defer_stmt.contents &&
-        node->as.defer_stmt.contents->type == AST_BLOCK)
-      FPRINTF_SAFE("\n");
-    else
-      FPRINTF_SAFE(";\n");
+        node->as.defer_stmt.contents->type == AST_BLOCK) {
+      if (!fmt_printf(data, "\n"))
+        goto err_cleanup;
+    } else {
+      if (!fmt_printf(data, ";\n"))
+        goto err_cleanup;
+    }
     break;
   case AST_SWITCH:
     data->depth--;
-    for (unsigned int i = 0; i < data->depth; i++)
-      FPRINTF_SAFE("%c", '\t');
-    FPRINTF_SAFE("}\n");
+    for (unsigned int i = 0; i < data->depth; i++) {
+      if (!fmt_putc(data, '\t'))
+        goto err_cleanup;
+    }
+    if (!fmt_printf(data, "}\n"))
+      goto err_cleanup;
     break;
   case AST_CASE:
     if (node->as.case_stmt.action &&
-        node->as.case_stmt.action->type == AST_BLOCK)
-      FPRINTF_SAFE("\n");
-    else
-      FPRINTF_SAFE(";\n");
+        node->as.case_stmt.action->type == AST_BLOCK) {
+      if (!fmt_printf(data, "\n"))
+        goto err_cleanup;
+    } else {
+      if (!fmt_printf(data, ";\n"))
+        goto err_cleanup;
+    }
     break;
   case AST_IF:
     if (node->as.if_check.elseAct) {
-      if (node->as.if_check.elseAct->type == AST_BLOCK)
-        FPRINTF_SAFE("\n");
-    } else if (node->as.if_check.action->type == AST_BLOCK)
-      FPRINTF_SAFE("\n");
+      if (node->as.if_check.elseAct->type == AST_BLOCK) {
+        if (!fmt_printf(data, "\n"))
+          goto err_cleanup;
+      }
+    } else if (node->as.if_check.action->type == AST_BLOCK) {
+      if (!fmt_printf(data, "\n"))
+        goto err_cleanup;
+    }
     break;
   case AST_WHILE:
     if (node == parent->as.while_loop.check) {
       if (parent->as.while_loop.action &&
-          parent->as.while_loop.action->type == AST_BLOCK)
-        FPRINTF_SAFE(")");
-      else
-        FPRINTF_SAFE(") ");
+          parent->as.while_loop.action->type == AST_BLOCK) {
+        if (!fmt_printf(data, ")"))
+          goto err_cleanup;
+      } else {
+        if (!fmt_printf(data, ") "))
+          goto err_cleanup;
+      }
     }
     break;
   case AST_FOR:
     if (!node->as.for_loop.action) {
       if (!node->as.for_loop.init && !node->as.for_loop.check &&
-          !node->as.for_loop.inc)
-        FPRINTF_SAFE("; ; ) ;\n");
-      else if (!node->as.for_loop.check && !node->as.for_loop.inc)
-        FPRINTF_SAFE("; ) ;\n");
-      else if (!node->as.for_loop.inc)
-        FPRINTF_SAFE(") ;\n");
-      else
-        FPRINTF_SAFE(";\n");
-    } else if (node->as.for_loop.action->type == AST_BLOCK)
-      FPRINTF_SAFE("\n");
+          !node->as.for_loop.inc) {
+        if (!fmt_printf(data, "; ; ) ;\n"))
+          goto err_cleanup;
+      } else if (!node->as.for_loop.check && !node->as.for_loop.inc) {
+        if (!fmt_printf(data, "; ) ;\n"))
+          goto err_cleanup;
+      } else if (!node->as.for_loop.inc) {
+        if (!fmt_printf(data, ") ;\n"))
+          goto err_cleanup;
+      } else {
+        if (!fmt_printf(data, ";\n"))
+          goto err_cleanup;
+      }
+    } else if (node->as.for_loop.action->type == AST_BLOCK) {
+      if (!fmt_printf(data, "\n"))
+        goto err_cleanup;
+    }
     break;
   default:
     break;
   }
 
-  // Append context based gaps safely
   if (parent) {
     if (parent->type == AST_WHILE && node == parent->as.while_loop.check) {
-      FPRINTF_SAFE(") ");
+      if (!fmt_printf(data, ") "))
+        goto err_cleanup;
     } else if (parent->type == AST_FOR) {
       if (node == parent->as.for_loop.init) {
-        if (node->type != AST_VAR_DECL)
-          FPRINTF_SAFE("; ");
+        if (node->type != AST_VAR_DECL) {
+          if (!fmt_printf(data, "; "))
+            goto err_cleanup;
+        }
       } else if (node == parent->as.for_loop.check) {
-        FPRINTF_SAFE("; ");
+        if (!fmt_printf(data, "; "))
+          goto err_cleanup;
       } else if (node == parent->as.for_loop.inc) {
         if (parent->as.for_loop.action &&
-            parent->as.for_loop.action->type == AST_BLOCK)
-          FPRINTF_SAFE(")");
-        else
-          FPRINTF_SAFE(") ");
+            parent->as.for_loop.action->type == AST_BLOCK) {
+          if (!fmt_printf(data, ")"))
+            goto err_cleanup;
+        } else {
+          if (!fmt_printf(data, ") "))
+            goto err_cleanup;
+        }
       }
     } else if (parent->type == AST_CASE && node == parent->as.case_stmt.val) {
       if (parent->as.case_stmt.action &&
-          parent->as.case_stmt.action->type == AST_BLOCK)
-        FPRINTF_SAFE(")");
-      else
-        FPRINTF_SAFE(") ");
+          parent->as.case_stmt.action->type == AST_BLOCK) {
+        if (!fmt_printf(data, ")"))
+          goto err_cleanup;
+      } else {
+        if (!fmt_printf(data, ") "))
+          goto err_cleanup;
+      }
     } else if (parent->type == AST_SWITCH &&
                node == parent->as.switch_stmt.check) {
-      FPRINTF_SAFE(") {\n");
+      if (!fmt_printf(data, ") {\n"))
+        goto err_cleanup;
       data->depth++;
     }
   }
 
   if (is_statement_context(node, parent) && needs_semi(node)) {
-    FPRINTF_SAFE(";\n");
+    if (!fmt_printf(data, ";\n"))
+      goto err_cleanup;
   } else if (node->type == AST_BLOCK && parent &&
              (parent->type == AST_BLOCK || parent->type == AST_PROGRAM ||
               parent->type == AST_EXTERN)) {
-    FPRINTF_SAFE("\n");
+    if (!fmt_printf(data, "\n"))
+      goto err_cleanup;
   }
 
   if (node->src_end && data->last_pos < node->src_end) {
@@ -881,7 +1068,6 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
     success = false;
   }
 
-  // Flush trailing comments
   if (success && data.last_pos) {
     size_t remain = strlen(data.last_pos);
     print_comments_between(data.last_pos, data.last_pos + remain, out_fp, 0);
@@ -892,6 +1078,9 @@ bool fmt_ast(AstNode *root, FILE *out_fp, HashMap *type_set,
 
   return success;
 }
+
+/* The rest of the file (threading, fmt_project) remains unchanged except for
+   the removal of the macro definitions. The #undef lines are removed. */
 
 #undef FPRINTF_SAFE
 #undef FMT_TYPE_SAFE
