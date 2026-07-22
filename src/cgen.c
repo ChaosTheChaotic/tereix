@@ -81,19 +81,6 @@ HashMap *build_func_map(Arena *arena, AstNode *root) {
   return map;
 }
 
-bool is_c_expr(AstNode *n) {
-  if (!n)
-    return false;
-  return n->type == AST_BINOP || n->type == AST_UOP || n->type == AST_NUM_LIT ||
-         n->type == AST_STR_LIT || n->type == AST_IDENTIF ||
-         n->type == AST_FUNC_CALL || n->type == AST_MEMBER ||
-         n->type == AST_INDEX || n->type == AST_CAST ||
-         n->type == AST_BOOL_LIT || n->type == AST_CHAR_LIT ||
-         n->type == AST_NULL_LIT || n->type == AST_ARRAY_LIT ||
-         n->type == AST_ADDR_OF || n->type == AST_DEREF ||
-         n->type == AST_SIZEOF;
-}
-
 typedef struct {
   const char *var_name;
   Arena *arena;
@@ -226,42 +213,6 @@ typedef struct {
   size_t parent_top;
 } GenCtx;
 
-// Check if node evaluated as expr
-bool is_expr_context(AstNode *parent, AstNode *child) {
-  if (!parent)
-    return false;
-  switch (parent->type) {
-  case AST_BINOP:
-  case AST_UOP:
-  case AST_ADDR_OF:
-  case AST_DEREF:
-  case AST_FUNC_CALL:
-  case AST_ARRAY_LIT:
-  case AST_RET:
-  case AST_CAST:
-  case AST_MEMBER:
-  case AST_INDEX:
-  case AST_ENUM_MEMBER:
-  case AST_SIZEOF:
-    return true;
-  case AST_CASE:
-    return parent->as.case_stmt.val == child;
-  case AST_SWITCH:
-    return parent->as.switch_stmt.check == child;
-  case AST_VAR_DECL:
-    return parent->as.var_decl.init == child;
-  case AST_IF:
-    return parent->as.if_check.check == child;
-  case AST_WHILE:
-    return parent->as.while_loop.check == child;
-  case AST_FOR:
-    return parent->as.for_loop.check == child ||
-           parent->as.for_loop.inc == child;
-  default:
-    return false;
-  }
-}
-
 // Checks if an expression block can be unwrapped safely
 static bool is_auto_unwrap(AstNode *n) {
   if (n->type != AST_BLOCK)
@@ -271,7 +222,7 @@ static bool is_auto_unwrap(AstNode *n) {
          unwrapped->as.block.first_stmt &&
          !unwrapped->as.block.first_stmt->next) {
     AstNode *stmt = unwrapped->as.block.first_stmt;
-    if (is_c_expr(stmt))
+    if (ast_is_expr_node(stmt))
       unwrapped = stmt;
     else
       break;
@@ -288,13 +239,13 @@ VisitResult gen_enter(AstVisitor *v, AstNode *n) {
   ctx->parent_stack[ctx->parent_top++] = n;
 
   // Block auto unwrap handling (skip standard block structure)
-  if (n->type == AST_BLOCK && is_expr_context(parent, n) && is_auto_unwrap(n)) {
+  if (n->type == AST_BLOCK && ast_is_expr_ctx(parent, n) && is_auto_unwrap(n)) {
     AstNode *unwrapped = n;
     while (unwrapped && unwrapped->type == AST_BLOCK &&
            unwrapped->as.block.first_stmt &&
            !unwrapped->as.block.first_stmt->next) {
       AstNode *stmt = unwrapped->as.block.first_stmt;
-      if (is_c_expr(stmt))
+      if (ast_is_expr_node(stmt))
         unwrapped = stmt;
       else
         break;
@@ -641,7 +592,7 @@ VisitResult gen_enter(AstVisitor *v, AstNode *n) {
              unwrapped->as.block.first_stmt &&
              !unwrapped->as.block.first_stmt->next) {
         AstNode *stmt = unwrapped->as.block.first_stmt;
-        if (is_c_expr(stmt))
+        if (ast_is_expr_node(stmt))
           unwrapped = stmt;
         else
           break;
@@ -853,7 +804,7 @@ void gen_exit(AstVisitor *v, AstNode *n) {
 
   switch (n->type) {
   case AST_BLOCK:
-    if (!(is_expr_context(parent, n) && is_auto_unwrap(n))) {
+    if (!(ast_is_expr_ctx(parent, n) && is_auto_unwrap(n))) {
       sb_append(sb, "}\n");
     }
     break;

@@ -299,4 +299,8 @@ void print_ast(AstNode *root);
 
 AstNode *clone_ast(AstNode *root, Arena *arena);
 
+bool ast_is_expr_node(const AstNode *node);
+
+bool ast_is_expr_ctx(const AstNode *parent, const AstNode *child);
+
 #endif // !AST_TYPES_H

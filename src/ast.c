@@ -674,3 +674,69 @@ AstNode *clone_ast(AstNode *root, Arena *arena) {
   free(stack);
   return new_root;
 }
+
+bool ast_is_expr_node(const AstNode *node) {
+  if (!node)
+    return false;
+
+  switch (node->type) {
+  case AST_BINOP:
+  case AST_UOP:
+  case AST_NUM_LIT:
+  case AST_STR_LIT:
+  case AST_IDENTIF:
+  case AST_FUNC_CALL:
+  case AST_MEMBER:
+  case AST_INDEX:
+  case AST_CAST:
+  case AST_BOOL_LIT:
+  case AST_CHAR_LIT:
+  case AST_NULL_LIT:
+  case AST_ARRAY_LIT:
+  case AST_ADDR_OF:
+  case AST_DEREF:
+  case AST_SIZEOF:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool ast_is_expr_context(const AstNode *parent, const AstNode *child) {
+  if (!parent)
+    return false;
+
+  switch (parent->type) {
+    // Any child is an expr
+  case AST_BINOP:
+  case AST_UOP:
+  case AST_ADDR_OF:
+  case AST_DEREF:
+  case AST_FUNC_CALL:
+  case AST_ARRAY_LIT:
+  case AST_RET:
+  case AST_CAST:
+  case AST_MEMBER:
+  case AST_INDEX:
+  case AST_ENUM_MEMBER:
+  case AST_SIZEOF:
+    return true;
+
+  // Contexts where only specific children are expressions
+  case AST_CASE:
+    return parent->as.case_stmt.val == child;
+  case AST_SWITCH:
+    return parent->as.switch_stmt.check == child;
+  case AST_VAR_DECL:
+    return parent->as.var_decl.init == child;
+  case AST_IF:
+    return parent->as.if_check.check == child;
+  case AST_WHILE:
+    return parent->as.while_loop.check == child;
+  case AST_FOR:
+    return (parent->as.for_loop.check == child) ||
+           (parent->as.for_loop.inc == child);
+  default:
+    return false;
+  }
+}
