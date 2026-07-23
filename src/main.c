@@ -5,6 +5,7 @@
 #include "fmt.h"
 #include "hashutils.h"
 #include "lsp.h"
+#include "sem_types.h"
 #include "tereix_version.h"
 #include "util.h"
 #include "worklist.h"
@@ -738,6 +739,15 @@ void compile_project(const CompileOptions *restrict opts) {
       Module *mod = (Module *)entry->value;
       sem_current_mod = mod;
       type_check_ast(&arena, mod->ast_root, &sem);
+      entry = entry->next;
+    }
+  }
+  for (size_t i = 0; i < sem.mod_cache.capacity; i++) {
+    HashEntry *entry = sem.mod_cache.buckets[i];
+    while (entry) {
+      Module *mod = (Module *)entry->value;
+      sem_current_mod = mod;
+      run_storage_duration_pass(mod->ast_root, sem.diags, mod->abs_path);
       entry = entry->next;
     }
   }

@@ -987,11 +987,18 @@ bool parse_step(ParseCtx *ctx) {
         break;
       } else {
         if (type.is_async || type.is_inline) {
-          fprintf(
-              stderr,
-              "Error: Invalid modifier on variable '%.*s' at line %u, col %u\n",
+          report_error(
+              ctx, ctx->curr,
+              "Error: Invalid modifier on variable '%.*s' at line %u, col %u",
               name.len, name.start, ctx->lex->line, ctx->lex->col);
-          return false;
+
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+
+          adv(ctx);
+          sync(ctx);
+          recover_state(ctx, current_state);
+          break;
         }
         AstNode *vnode = new_node(ctx->arena, AST_VAR_DECL);
         vnode->as.var_decl.type = type;

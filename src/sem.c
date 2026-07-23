@@ -1,4 +1,5 @@
 #include "ast_visitor.h"
+#include "ptrmap.h"
 #include "sem_types.h"
 #include "util.h"
 #include <ctype.h>
@@ -813,7 +814,8 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
 
   switch (n->type) {
   case AST_VAR_DECL:
-    set_expected(&data->exp_map, n->as.var_decl.init, &n->as.var_decl.type, data->arena);
+    set_expected(&data->exp_map, n->as.var_decl.init, &n->as.var_decl.type,
+                 data->arena);
     break;
   case AST_BINOP: {
     DataType *exp = expected;
@@ -838,15 +840,18 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
     break;
   }
   case AST_IF:
-    set_expected(&data->exp_map, n->as.if_check.check, &EXPECT_BOOL, data->arena);
+    set_expected(&data->exp_map, n->as.if_check.check, &EXPECT_BOOL,
+                 data->arena);
     set_expected(&data->exp_map, n->as.if_check.action, expected, data->arena);
     set_expected(&data->exp_map, n->as.if_check.elseAct, expected, data->arena);
     break;
   case AST_WHILE:
-    set_expected(&data->exp_map, n->as.while_loop.check, &EXPECT_BOOL, data->arena);
+    set_expected(&data->exp_map, n->as.while_loop.check, &EXPECT_BOOL,
+                 data->arena);
     break;
   case AST_FOR:
-    set_expected(&data->exp_map, n->as.for_loop.check, &EXPECT_BOOL, data->arena);
+    set_expected(&data->exp_map, n->as.for_loop.check, &EXPECT_BOOL,
+                 data->arena);
     break;
   case AST_FUNC_CALL: {
     AstNode *fn_decl = NULL;
@@ -862,7 +867,8 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
     }
     while (curr_arg) {
       if (curr_param) {
-        set_expected(&data->exp_map, curr_arg, &curr_param->as.fn_param.type, data->arena);
+        set_expected(&data->exp_map, curr_arg, &curr_param->as.fn_param.type,
+                     data->arena);
         curr_param = curr_param->next;
       }
       curr_arg = curr_arg->next;
@@ -870,7 +876,8 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
     break;
   }
   case AST_CAST:
-    set_expected(&data->exp_map, n->as.cast.op, &n->as.cast.target, data->arena);
+    set_expected(&data->exp_map, n->as.cast.op, &n->as.cast.target,
+                 data->arena);
     break;
   case AST_RET: {
     AstNode *curr_func =
@@ -1382,4 +1389,324 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
   }
 
   map_free_buckets(&data.exp_map);
+}
+
+typedef enum {
+  STORAGE_UNKNOWN = 0,
+  STORAGE_TEMPORARY, // r-values (e.g results of binary ops and function calls)
+  STORAGE_LOCAL,     // Automatic stack variables
+  STORAGE_STATIC,    // Global/static variables, string literals
+  STORAGE_DYNAMIC,   // Heap allocated memory
+} StorageDuration;
+
+typedef struct {
+  PtrMap sd_map;
+  PtrMap global_set;
+  DiagList *diags;
+  const char *fpath;
+} StorageCheckCtx;
+
+VisitResult sd_pass_enter(AstVisitor *visitor, AstNode *n) {
+  (void)visitor; // Unused
+  (void)n;       // Unused
+                 // Only bottom up needed
+  return VISIT_CONTINUE;
+}
+
+static inline bool push_node(AstNode ***stack_ptr, size_t *cap_ptr,
+                             size_t *top_ptr, AstNode *node) {
+  if (*top_ptr >= *cap_ptr) {
+    size_t new_cap = (*cap_ptr) * 2;
+    AstNode **new_stack = realloc(*stack_ptr, new_cap * sizeof(AstNode *));
+    if (!new_stack) {
+      free(*stack_ptr);
+      *stack_ptr = NULL;
+      return false;
+    }
+    *stack_ptr = new_stack;
+    *cap_ptr = new_cap;
+  }
+  (*stack_ptr)[(*top_ptr)++] = node;
+  return true;
+}
+
+typedef struct {
+  AstNode **stack;
+  size_t cap;
+  size_t top;
+} LocalStack;
+
+THREAD_LOCAL LocalStack local_stack = {NULL, 0, 0};
+
+bool is_local_address(AstNode *expr, PtrMap *sd_map) {
+  if (!expr)
+    return false;
+
+  local_stack.top = 0;
+
+  if (local_stack.cap == 0) {
+    local_stack.cap = 64;
+    local_stack.stack = malloc(local_stack.cap * sizeof(AstNode *));
+    if (!local_stack.stack) {
+      local_stack.cap = 0;
+      return false;
+    }
+  }
+
+  if (!push_node(&local_stack.stack, &local_stack.cap, &local_stack.top,
+                 expr)) {
+    // push_node already handled memory error
+    local_stack.top = 0;
+    return false;
+  }
+
+  bool found = false;
+  while (local_stack.top > 0 && !found) {
+    AstNode *curr = local_stack.stack[--local_stack.top];
+    if (!curr)
+      continue;
+
+    if (curr->eval_type.array_dimens > 0) {
+      uint32_t sd = ptrmap_get(sd_map, curr);
+      if (sd == STORAGE_LOCAL) {
+        found = true;
+        break;
+      }
+    }
+
+    switch (curr->type) {
+    case AST_ADDR_OF: {
+      AstNode *op = curr->as.unop.operand;
+      if (op) {
+        uint32_t sd = ptrmap_get(sd_map, op);
+        if (sd == STORAGE_LOCAL) {
+          found = true;
+          break;
+        }
+      }
+      break;
+    }
+    case AST_CAST:
+      if (curr->as.cast.op) {
+        if (!push_node(&local_stack.stack, &local_stack.cap, &local_stack.top,
+                       curr->as.cast.op)) {
+          local_stack.top = 0;
+          return false;
+        }
+      }
+      break;
+    case AST_BINOP: {
+      AstNode *left = curr->as.binop.left;
+      AstNode *right = curr->as.binop.right;
+
+      bool left_is_ptr = left && (left->eval_type.ptr_depth > 0 ||
+                                  left->eval_type.array_dimens > 0);
+      bool right_is_ptr = right && (right->eval_type.ptr_depth > 0 ||
+                                    right->eval_type.array_dimens > 0);
+
+      if (right_is_ptr) {
+        if (!push_node(&local_stack.stack, &local_stack.cap, &local_stack.top,
+                       right)) {
+          local_stack.top = 0;
+          return false;
+        }
+      }
+      if (left_is_ptr) {
+        if (!push_node(&local_stack.stack, &local_stack.cap, &local_stack.top,
+                       left)) {
+          local_stack.top = 0;
+          return false;
+        }
+      }
+      break;
+    }
+    case AST_IF: {
+      if (curr->as.if_check.elseAct) {
+        if (!push_node(&local_stack.stack, &local_stack.cap, &local_stack.top,
+                       curr->as.if_check.elseAct)) {
+          local_stack.top = 0;
+          return false;
+        }
+      }
+      if (curr->as.if_check.action) {
+        if (!push_node(&local_stack.stack, &local_stack.cap, &local_stack.top,
+                       curr->as.if_check.action)) {
+          local_stack.top = 0;
+          return false;
+        }
+      }
+      break;
+    }
+    default:
+      break;
+    }
+  }
+
+  local_stack.top = 0;
+  return found;
+}
+
+void sd_pass_exit(AstVisitor *visitor, AstNode *n) {
+  StorageCheckCtx *ctx = (StorageCheckCtx *)visitor->user_data;
+  StorageDuration sd = STORAGE_TEMPORARY; // Default to temporary
+
+  switch (n->type) {
+  case AST_STR_LIT:
+    sd = STORAGE_STATIC;
+    break;
+
+  case AST_IDENTIF: {
+    Sym *sym = n->as.identif.res_sm;
+    if (sym) {
+      if (sym->is_imported_mod) {
+        sd = STORAGE_STATIC;
+      } else if (n->eval_type.is_static || n->eval_type.is_extern) {
+        sd = STORAGE_STATIC;
+      } else if (sym->decl_node &&
+                 ptrmap_get(&ctx->global_set, sym->decl_node) != UINT32_MAX) {
+        sd = STORAGE_STATIC;
+      } else if (sym->fpath && ctx->fpath &&
+                 strcmp(sym->fpath, ctx->fpath) != 0) {
+        sd = STORAGE_STATIC;
+      } else if (sym->kind == SYM_VAR) {
+        sd = STORAGE_LOCAL;
+      } else {
+        sd = STORAGE_TEMPORARY;
+      }
+    }
+    break;
+  }
+
+  case AST_MEMBER: {
+    if (n->as.member.base->eval_type.ptr_depth > 0) {
+      sd = STORAGE_UNKNOWN;
+    } else {
+      uint32_t base_sd = ptrmap_get(&ctx->sd_map, n->as.member.base);
+      sd = (base_sd != UINT32_MAX) ? (StorageDuration)base_sd : STORAGE_UNKNOWN;
+    }
+    break;
+  }
+
+  case AST_INDEX: {
+    AstNode *base = n->as.index.base;
+    if (base->eval_type.ptr_depth > 0 && base->eval_type.array_dimens == 0) {
+      sd = STORAGE_UNKNOWN;
+    } else {
+      uint32_t base_sd = ptrmap_get(&ctx->sd_map, base);
+      sd = (base_sd != UINT32_MAX) ? (StorageDuration)base_sd : STORAGE_UNKNOWN;
+    }
+    break;
+  }
+
+  case AST_RET: {
+    if (n->as.ret_stmt.expr &&
+        is_local_address(n->as.ret_stmt.expr, &ctx->sd_map)) {
+      Token tok = get_expr_token(n->as.ret_stmt.expr);
+      diaglist_add(ctx->diags, DIAG_ERROR,
+                   "Cannot return address of local variable, the memory will "
+                   "be invalidated",
+                   ctx->fpath, tok.line, tok.col, tok.line, tok.col + tok.len);
+    }
+    break;
+  }
+
+  case AST_BINOP: {
+    // Cannot assign local var addr to global/static ptr (warn)
+    if (n->as.binop.op.len == 1 && n->as.binop.op.start[0] == '=') {
+      AstNode *left = n->as.binop.left;
+      AstNode *right = n->as.binop.right;
+      uint32_t left_sd = ptrmap_get(&ctx->sd_map, left);
+      if (left_sd == STORAGE_STATIC && is_local_address(right, &ctx->sd_map)) {
+        Token tok = get_expr_token(right);
+        diaglist_add(
+            ctx->diags, DIAG_WARNING,
+            "Assigning address of local to static/global may have dangling ptr",
+            ctx->fpath, tok.line, tok.col, tok.line, tok.col + tok.len);
+      }
+    }
+    sd = STORAGE_TEMPORARY;
+    break;
+  }
+
+  case AST_DEREF: {
+    if (n->as.unop.operand) {
+      sd = STORAGE_UNKNOWN;
+    } else {
+      sd = STORAGE_TEMPORARY;
+    }
+    break;
+  }
+
+  case AST_UOP:
+  case AST_CAST:
+  case AST_FUNC_CALL:
+  case AST_SIZEOF:
+  case AST_NUM_LIT:
+  case AST_CHAR_LIT:
+  case AST_BOOL_LIT:
+  case AST_NULL_LIT:
+  default:
+    sd = STORAGE_TEMPORARY;
+    break;
+  }
+
+  ptrmap_put(&ctx->sd_map, n, (uint32_t)sd);
+}
+
+void run_storage_duration_pass(AstNode *root, DiagList *diags,
+                               const char *fpath) {
+  if (!root)
+    return;
+
+  StorageCheckCtx ctx = {0};
+  ctx.diags = diags;
+  ctx.fpath = fpath;
+
+  ptrmap_init(&ctx.sd_map, 2048);
+  ptrmap_init(&ctx.global_set, 1024);
+
+  // Get global statements
+  AstNode *stmt = root->as.block.first_stmt;
+  while (stmt) {
+    // Only add declarations that can be referenced by name
+    if (stmt->type == AST_FUNC || stmt->type == AST_VAR_DECL ||
+        stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
+        stmt->type == AST_ENUM) {
+      ptrmap_put(&ctx.global_set, stmt, 1);
+    }
+    // Also handle EXTERN blocks as their contents are global
+    if (stmt->type == AST_EXTERN && stmt->as.extern_block.contents) {
+      AstNode *inner = stmt->as.extern_block.contents;
+      while (inner) {
+        ptrmap_put(&ctx.global_set, inner, 1);
+        inner = inner->next;
+      }
+    }
+    stmt = stmt->next;
+  }
+
+  AstVisitor visitor = {0};
+  visitor.user_data = &ctx;
+  visitor.enter_node = sd_pass_enter;
+  visitor.interleave_node = NULL;
+  visitor.exit_node = sd_pass_exit;
+
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
+
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, root);
+  } else {
+    fprintf(stderr, "Compiler panicked during storage duration pass.\n");
+  }
+
+  if (ctx.sd_map.entries)
+    free(ctx.sd_map.entries);
+  if (ctx.global_set.entries)
+    free(ctx.global_set.entries);
+  if (local_stack.stack) {
+    free(local_stack.stack);
+    local_stack.stack = NULL;
+    local_stack.cap = 0;
+  }
 }

@@ -97,6 +97,8 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx);
 void scope_stack_init(ScopeStack *ss, Arena *arena);
 void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx);
 void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx);
+void run_storage_duration_pass(AstNode *root, DiagList *diags,
+                               const char *fpath);
 
 void propagate_dirty_state(SemCtx *ctx);
 

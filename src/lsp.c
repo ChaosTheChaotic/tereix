@@ -2188,6 +2188,7 @@ void compile_doc(Doc *doc) {
           sem_current_mod = mod;
           resolve_scopes(sem->arena, mod, &ss, sem);
           type_check_ast(sem->arena, mod->ast_root, sem);
+          run_storage_duration_pass(mod->ast_root, sem->diags, mod->abs_path);
         }
         entry = entry->next;
       }
