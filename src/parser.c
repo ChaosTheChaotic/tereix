@@ -575,7 +575,7 @@ bool is_type(ParseCtx *ctx) {
   tmp_parse.lex = &tmp_lex;
   Token t = ctx->curr;
 
-  // Skip over any pointers or references
+  // Skip over any pointers or references at the start
   while (t.type == TOKEN_OP && t.len == 1 &&
          (*t.start == '*' || *t.start == '&')) {
     t = next_token(&tmp_parse);
@@ -607,16 +607,25 @@ bool is_type(ParseCtx *ctx) {
   // Might be a custom type
   if (t.type == TOKEN_IDENTIF && !is_kw(ctx->lex, t.start, t.len)) {
     Token nxt = next_token(&tmp_parse);
-    if (nxt.type == TOKEN_IDENTIF)
-      return true;
 
+    // Check for module path
     if (nxt.len == 1 && *nxt.start == '.') {
       Token nxt2 = next_token(&tmp_parse);
       if (nxt2.type == TOKEN_IDENTIF) {
-        Token nxt3 = next_token(&tmp_parse);
-        if (nxt3.type == TOKEN_IDENTIF)
-          return true;
+        nxt = next_token(&tmp_parse);
+      } else {
+        return false;
       }
+    }
+
+    // Check for pointers or references after the base type
+    while (nxt.type == TOKEN_OP && nxt.len == 1 &&
+           (*nxt.start == '*' || *nxt.start == '&')) {
+      nxt = next_token(&tmp_parse);
+    }
+
+    if (nxt.type == TOKEN_IDENTIF) {
+      return true;
     }
   }
 
@@ -3218,7 +3227,7 @@ DataType parse_type(ParseCtx *ctx) {
     }
     type.is_self = true;
 
-    // Find the parent sue type to inherit its actual name
+    // Get parent sue for its actual name
     for (int i = ctx->node_count - 1; i >= 0; i--) {
       AstNode *parent = ctx->node_stack[i];
       if (parent->type == AST_STRUCT) {
@@ -3235,12 +3244,17 @@ DataType parse_type(ParseCtx *ctx) {
 
     adv(ctx);
   } else if (ctx->curr.type == TOKEN_IDENTIF ||
-             is_builtin_type_kw(ctx, ctx->curr)) {
+             (ctx->curr.type == TOKEN_KW &&
+              is_builtin_type_kw(ctx, ctx->curr))) {
     type.name = ctx->curr;
-    if (ctx->curr.type == TOKEN_IDENTIF && is_builtin_type_kw(ctx, ctx->curr))
+
+    if (ctx->curr.type == TOKEN_IDENTIF) {
       type.is_custom = true;
+    }
+
     adv(ctx);
 
+    // Module types
     if (type.is_custom && ctx->curr.len == 1 && *ctx->curr.start == '.') {
       adv(ctx);
 
@@ -3249,9 +3263,7 @@ DataType parse_type(ParseCtx *ctx) {
         adv(ctx);
       } else {
         report_error(ctx, ctx->curr, "Expected identifier after '.' in type");
-
-        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-        push_node(ctx, err_node);
+        // Return a partial type to avoid crashing
       }
     }
   } else {
