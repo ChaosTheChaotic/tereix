@@ -1397,6 +1397,14 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
         while (param && arg) {
           DataType expected_t = param->as.fn_param.type;
           DataType actual_t = arg->eval_type;
+          // Allow numeric literals if they fit in expected type
+          if (arg->type == AST_NUM_LIT && is_numeric_type(expected_t)) {
+            long long val = parse_num_lit(arg);
+            if (fits_in_type(val, expected_t)) {
+              arg->eval_type = expected_t;
+              actual_t = expected_t;
+            }
+          }
           if (!is_type_compatible(expected_t, actual_t, false)) {
             Token err_tok = get_expr_token(arg);
             if (err_tok.len == 0)
