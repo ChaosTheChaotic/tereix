@@ -383,55 +383,74 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
 
   AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
-    Token name = {0};
-    SymKind kind;
-    bool is_valid = true;
+    AstNode *curr = stmt;
+    bool in_extern = false;
 
-    switch (stmt->type) {
-    case AST_FUNC:
-      name = stmt->as.func_def.fn_name;
-      kind = SYM_FUNC;
-      break;
-    case AST_VAR_DECL:
-      name = stmt->as.var_decl.id;
-      kind = SYM_VAR;
-      break;
-    case AST_STRUCT:
-      name = stmt->as.struct_def.structn;
-      kind = SYM_STRUCT;
-      break;
-    case AST_UNION:
-      name = stmt->as.union_def.unionn;
-      kind = SYM_UNION;
-      break;
-    case AST_ENUM:
-      name = stmt->as.enum_def.enumn;
-      kind = SYM_ENUM;
-      break;
-    default:
-      is_valid = false;
-      break;
+    // Look into extern blocks too
+    if (stmt->type == AST_EXTERN && stmt->as.extern_block.contents) {
+      curr = stmt->as.extern_block.contents;
+      in_extern = true;
     }
 
-    if (is_valid) {
-      if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
-        Sym *existing = map_get(&mod->local_symbols, name.start, name.len);
+    while (curr) {
+      Token name = {0};
+      SymKind kind;
+      bool is_valid = true;
 
-        bool is_existing_opaque =
-            (existing->decl_node->type == AST_STRUCT &&
-             !existing->decl_node->as.struct_def.contents) ||
-            (existing->decl_node->type == AST_UNION &&
-             !existing->decl_node->as.union_def.contents);
-
-        if (!is_existing_opaque) {
-          sem_report(ctx, DIAG_ERROR, name,
-                     "Error: Symbol '%.*s' already defined in module %s",
-                     name.len, name.start, mod->mod_name);
-          return false;
-        }
+      switch (curr->type) {
+      case AST_FUNC:
+        name = curr->as.func_def.fn_name;
+        kind = SYM_FUNC;
+        break;
+      case AST_VAR_DECL:
+        name = curr->as.var_decl.id;
+        kind = SYM_VAR;
+        break;
+      case AST_STRUCT:
+        name = curr->as.struct_def.structn;
+        kind = SYM_STRUCT;
+        break;
+      case AST_UNION:
+        name = curr->as.union_def.unionn;
+        kind = SYM_UNION;
+        break;
+      case AST_ENUM:
+        name = curr->as.enum_def.enumn;
+        kind = SYM_ENUM;
+        break;
+      default:
+        is_valid = false;
+        break;
       }
-      Sym *sym = new_sym(alloc_arena, kind, name, stmt, mod->abs_path);
-      map_set(&mod->local_symbols, name.start, name.len, sym);
+
+      if (is_valid) {
+        if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
+          Sym *existing = map_get(&mod->local_symbols, name.start, name.len);
+          bool is_existing_opaque =
+              (existing->decl_node->type == AST_STRUCT &&
+               !existing->decl_node->as.struct_def.contents) ||
+              (existing->decl_node->type == AST_UNION &&
+               !existing->decl_node->as.union_def.contents);
+
+          if (!is_existing_opaque) {
+            sem_report(ctx, DIAG_ERROR, name,
+                       "Error: Symbol '%.*s' already defined in module %s",
+                       name.len, name.start, mod->mod_name);
+            return false;
+          }
+        }
+
+        Sym *sym = new_sym(alloc_arena, kind, name, curr, mod->abs_path);
+        map_set(&mod->local_symbols, name.start, name.len, sym);
+      }
+
+      // If looking in extern block, move to next inner declaration
+      // If not go to next top level stmt
+      if (in_extern) {
+        curr = curr->next;
+      } else {
+        break;
+      }
     }
     stmt = stmt->next;
   }
@@ -1040,7 +1059,11 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
   case AST_IDENTIF:
     if (n->as.identif.res_sm) {
       Sym *sym = n->as.identif.res_sm;
-      if (sym->kind == SYM_VAR && sym->decl_node) {
+
+      if (sym->is_imported_mod) {
+        n->eval_type = create_basic_type("module");
+        n->eval_type.name = sym->name;
+      } else if (sym->kind == SYM_VAR && sym->decl_node) {
         if (sym->decl_node->type == AST_PARAM)
           n->eval_type = sym->decl_node->as.fn_param.type;
         else
