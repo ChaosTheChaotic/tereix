@@ -1070,6 +1070,14 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
+    } else {
+      report_error(ctx, ctx->curr, "Expected ';' after expression");
+      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+      push_node(ctx, err_node);
+
+      adv(ctx);
+      sync(ctx);
+      recover_state(ctx, current_state);
     }
     break;
   }
