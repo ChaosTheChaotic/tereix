@@ -1293,7 +1293,7 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     bool is_type_init = false;
     DataType type_init_type = {0};
 
-    // Check if member access
+    // Check if method access
     if (caller) {
       if (caller->type == AST_IDENTIF && caller->as.identif.res_sm &&
           caller->as.identif.res_sm->decl_node) {
@@ -1318,14 +1318,14 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       if (caller->type == AST_MEMBER && first_param &&
           first_param->as.fn_param.type.is_self) {
         is_method = true;
-        receiver = caller->as.member.base; // Implicit self
+        receiver = caller->as.member.base;
       }
     }
 
     if (func_decl && func_decl->type == AST_FUNC) {
       n->eval_type = func_decl->as.func_def.ret_type;
 
-      // Count parms and explicit args
+      // Count params and explicit args
       int explicit_arg_count = 0;
       for (AstNode *a = n->as.func_call.args; a; a = a->next)
         explicit_arg_count++;
@@ -1336,7 +1336,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       int total_arg_count = explicit_arg_count + (is_method ? 1 : 0);
 
       if (total_arg_count != param_count) {
-        // Use method name for error message if method call
         Token err_tok;
         if (is_method)
           err_tok = caller->as.member.name;
@@ -1344,30 +1343,56 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
           err_tok = get_expr_token(caller);
         if (err_tok.len == 0)
           err_tok = get_expr_token(caller);
-
         sem_report(ctx, DIAG_ERROR, err_tok,
                    "Function '%.*s' expects %d argument(s), got %d",
                    err_tok.len, err_tok.start, param_count, total_arg_count);
       } else {
-        // Type check arguments against parameters
         AstNode *param = func_decl->as.func_def.params;
 
-        // First argument is the self
+        // Handle self
         if (is_method) {
           DataType expected_t = param->as.fn_param.type;
           DataType actual_t = receiver->eval_type;
-          if (!is_type_compatible(expected_t, actual_t, false)) {
+
+          bool name_match = (expected_t.name.len == actual_t.name.len &&
+                             strncmp(expected_t.name.start, actual_t.name.start,
+                                     expected_t.name.len) == 0);
+          if (!name_match) {
             Token err_tok = get_expr_token(receiver);
             sem_report(
                 ctx, DIAG_ERROR, err_tok,
                 "Self argument type mismatch: expected '%.*s', got '%.*s'",
                 (int)expected_t.name.len, expected_t.name.start,
                 (int)actual_t.name.len, actual_t.name.start);
+          } else {
+            if (expected_t.is_mut && !actual_t.is_mut) {
+              Token err_tok = get_expr_token(receiver);
+              sem_report(
+                  ctx, DIAG_ERROR, err_tok,
+                  "Cannot borrow immutable value as mutable for method '%.*s'",
+                  (int)caller->as.member.name.len,
+                  caller->as.member.name.start);
+            }
+
+            if (!(actual_t.ptr_depth == expected_t.ptr_depth ||
+                  (expected_t.ptr_depth > 0 &&
+                   actual_t.ptr_depth == expected_t.ptr_depth - 1))) {
+              Token err_tok = get_expr_token(receiver);
+              sem_report(
+                  ctx, DIAG_ERROR, err_tok,
+                  "Self argument pointer depth mismatch: expected %d, got %d",
+                  expected_t.ptr_depth, actual_t.ptr_depth);
+            }
+
+            if (expected_t.array_dimens != 0 || actual_t.array_dimens != 0) {
+              sem_report(ctx, DIAG_ERROR, get_expr_token(receiver),
+                         "Self argument cannot have array dimensions");
+            }
           }
-          param = param->next;
+          param = param->next; // skip self parameter
         }
 
-        // Check explicit arguments against remaining params
+        // Check args against other params
         AstNode *arg = n->as.func_call.args;
         while (param && arg) {
           DataType expected_t = param->as.fn_param.type;
@@ -1388,7 +1413,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     } else if (is_type_init) {
       n->eval_type = type_init_type;
     } else {
-      // Fallback to any
       n->eval_type = create_basic_type("any");
     }
     break;
