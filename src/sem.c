@@ -1297,68 +1297,98 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     if (caller) {
       if (caller->type == AST_IDENTIF && caller->as.identif.res_sm &&
           caller->as.identif.res_sm->decl_node) {
-
         Sym *sym = caller->as.identif.res_sm;
-        if (sym->kind == SYM_FUNC) {
+        if (sym->kind == SYM_FUNC)
           func_decl = sym->decl_node;
-        } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION) {
+        else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION) {
           is_type_init = true;
           type_init_type.name = sym->name;
           type_init_type.is_custom = true;
         }
-
       } else if (caller->type == AST_MEMBER) {
         func_decl = resolve_member_decl(ctx, caller);
       }
     }
 
-    // Validate func args
+    // Method call check
+    bool is_method = false;
+    AstNode *receiver = NULL;
+    if (func_decl && func_decl->type == AST_FUNC) {
+      AstNode *first_param = func_decl->as.func_def.params;
+      if (caller->type == AST_MEMBER && first_param &&
+          first_param->as.fn_param.type.is_self) {
+        is_method = true;
+        receiver = caller->as.member.base; // Implicit self
+      }
+    }
+
     if (func_decl && func_decl->type == AST_FUNC) {
       n->eval_type = func_decl->as.func_def.ret_type;
 
-      AstNode *param = func_decl->as.func_def.params;
-      AstNode *arg = n->as.func_call.args;
-
-      int arg_count = 0, param_count = 0;
-      for (AstNode *a = arg; a; a = a->next)
-        arg_count++;
-      for (AstNode *p = param; p; p = p->next)
+      // Count parms and explicit args
+      int explicit_arg_count = 0;
+      for (AstNode *a = n->as.func_call.args; a; a = a->next)
+        explicit_arg_count++;
+      int param_count = 0;
+      for (AstNode *p = func_decl->as.func_def.params; p; p = p->next)
         param_count++;
 
-      if (arg_count != param_count) {
-        Token err_tok = get_expr_token(caller);
-        if (err_tok.len == 0 && caller->type == AST_MEMBER)
+      int total_arg_count = explicit_arg_count + (is_method ? 1 : 0);
+
+      if (total_arg_count != param_count) {
+        // Use method name for error message if method call
+        Token err_tok;
+        if (is_method)
           err_tok = caller->as.member.name;
+        else
+          err_tok = get_expr_token(caller);
+        if (err_tok.len == 0)
+          err_tok = get_expr_token(caller);
 
         sem_report(ctx, DIAG_ERROR, err_tok,
                    "Function '%.*s' expects %d argument(s), got %d",
-                   err_tok.len, err_tok.start, param_count, arg_count);
+                   err_tok.len, err_tok.start, param_count, total_arg_count);
       } else {
-        param = func_decl->as.func_def.params;
-        arg = n->as.func_call.args;
+        // Type check arguments against parameters
+        AstNode *param = func_decl->as.func_def.params;
 
-        while (arg && param) {
+        // First argument is the self
+        if (is_method) {
+          DataType expected_t = param->as.fn_param.type;
+          DataType actual_t = receiver->eval_type;
+          if (!is_type_compatible(expected_t, actual_t, false)) {
+            Token err_tok = get_expr_token(receiver);
+            sem_report(
+                ctx, DIAG_ERROR, err_tok,
+                "Self argument type mismatch: expected '%.*s', got '%.*s'",
+                (int)expected_t.name.len, expected_t.name.start,
+                (int)actual_t.name.len, actual_t.name.start);
+          }
+          param = param->next;
+        }
+
+        // Check explicit arguments against remaining params
+        AstNode *arg = n->as.func_call.args;
+        while (param && arg) {
           DataType expected_t = param->as.fn_param.type;
           DataType actual_t = arg->eval_type;
-
           if (!is_type_compatible(expected_t, actual_t, false)) {
             Token err_tok = get_expr_token(arg);
             if (err_tok.len == 0)
               err_tok = get_expr_token(caller);
-
             sem_report(ctx, DIAG_ERROR, err_tok,
                        "Argument type mismatch: expected '%.*s', got '%.*s'",
-                       expected_t.name.len, expected_t.name.start,
-                       actual_t.name.len, actual_t.name.start);
+                       (int)expected_t.name.len, expected_t.name.start,
+                       (int)actual_t.name.len, actual_t.name.start);
           }
-          arg = arg->next;
           param = param->next;
+          arg = arg->next;
         }
       }
     } else if (is_type_init) {
       n->eval_type = type_init_type;
     } else {
-      // Fallback with any
+      // Fallback to any
       n->eval_type = create_basic_type("any");
     }
     break;
