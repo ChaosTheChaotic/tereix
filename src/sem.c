@@ -903,6 +903,84 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
   return VISIT_CONTINUE;
 }
 
+AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
+  AstNode *base = member_node->as.member.base;
+  Token name = member_node->as.member.name;
+
+  if (!base)
+    return NULL;
+
+  // Check for module access
+  if (base->type == AST_IDENTIF && base->as.identif.res_sm &&
+      base->as.identif.res_sm->is_imported_mod) {
+    const char *mod_path = base->as.identif.res_sm->fpath;
+    if (mod_path) {
+      Module *imp_mod = map_get(&ctx->mod_cache, mod_path, strlen(mod_path));
+      if (imp_mod) {
+        Sym *sym = map_get(&imp_mod->local_symbols, name.start, name.len);
+        if (sym)
+          return sym->decl_node;
+      }
+    }
+  }
+
+  // Check if su access
+  DataType base_t = base->eval_type;
+  if (base_t.is_custom && base_t.name.len > 0) {
+    Sym *type_sym = NULL;
+
+    // Check the current modules symbols
+    if (sem_current_mod) {
+      type_sym = map_get(&sem_current_mod->local_symbols, base_t.name.start,
+                         base_t.name.len);
+
+      // Check imported modules
+      if (!type_sym) {
+        for (size_t i = 0; i < sem_current_mod->imported_mods.capacity; i++) {
+          HashEntry *entry = sem_current_mod->imported_mods.buckets[i];
+          while (entry) {
+            Module *imp = (Module *)entry->value;
+            type_sym = map_get(&imp->local_symbols, base_t.name.start,
+                               base_t.name.len);
+            if (type_sym)
+              break;
+            entry = entry->next;
+          }
+          if (type_sym)
+            break;
+        }
+      }
+    }
+
+    // Iter contents if su is found
+    if (type_sym && type_sym->decl_node) {
+      AstNode *contents = NULL;
+      if (type_sym->decl_node->type == AST_STRUCT) {
+        contents = type_sym->decl_node->as.struct_def.contents;
+      } else if (type_sym->decl_node->type == AST_UNION) {
+        contents = type_sym->decl_node->as.union_def.contents;
+      }
+
+      AstNode *curr = contents;
+      while (curr) {
+        Token decl_name = {0};
+        if (curr->type == AST_VAR_DECL)
+          decl_name = curr->as.var_decl.id;
+        else if (curr->type == AST_FUNC)
+          decl_name = curr->as.func_def.fn_name;
+
+        if (decl_name.len == name.len &&
+            strncmp(decl_name.start, name.start, name.len) == 0) {
+          return curr;
+        }
+        curr = curr->next;
+      }
+    }
+  }
+
+  return NULL;
+}
+
 void tc_exit(AstVisitor *visitor, AstNode *n) {
   TCData *data = visitor->user_data;
   DataType *expected = get_expected(&data->exp_map, n);
@@ -1186,63 +1264,82 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       }
     }
     break;
-  case AST_FUNC_CALL:
-    if (n->as.func_call.caller && n->as.func_call.caller->type == AST_IDENTIF &&
-        n->as.func_call.caller->as.identif.res_sm &&
-        n->as.func_call.caller->as.identif.res_sm->decl_node) {
+  case AST_FUNC_CALL: {
+    AstNode *caller = n->as.func_call.caller;
+    AstNode *func_decl = NULL;
+    bool is_type_init = false;
+    DataType type_init_type = {0};
 
-      Sym *sym = n->as.func_call.caller->as.identif.res_sm;
+    // Check if member access
+    if (caller) {
+      if (caller->type == AST_IDENTIF && caller->as.identif.res_sm &&
+          caller->as.identif.res_sm->decl_node) {
 
-      if (sym->kind == SYM_FUNC) {
-        n->eval_type = sym->decl_node->as.func_def.ret_type;
-      } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION) {
-        n->eval_type.name = sym->name;
-        n->eval_type.is_custom = true;
-      } else {
-        n->eval_type = create_basic_type("any");
+        Sym *sym = caller->as.identif.res_sm;
+        if (sym->kind == SYM_FUNC) {
+          func_decl = sym->decl_node;
+        } else if (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION) {
+          is_type_init = true;
+          type_init_type.name = sym->name;
+          type_init_type.is_custom = true;
+        }
+
+      } else if (caller->type == AST_MEMBER) {
+        func_decl = resolve_member_decl(ctx, caller);
       }
+    }
 
-      if (sym->kind == SYM_FUNC) {
-        AstNode *func_decl = sym->decl_node;
-        AstNode *param = func_decl->as.func_def.params;
-        AstNode *arg = n->as.func_call.args;
+    // Validate func args
+    if (func_decl && func_decl->type == AST_FUNC) {
+      n->eval_type = func_decl->as.func_def.ret_type;
 
-        int arg_count = 0, param_count = 0;
-        for (AstNode *a = arg; a; a = a->next)
-          arg_count++;
-        for (AstNode *p = param; p; p = p->next)
-          param_count++;
+      AstNode *param = func_decl->as.func_def.params;
+      AstNode *arg = n->as.func_call.args;
 
-        if (arg_count != param_count) {
-          sem_report(ctx, DIAG_ERROR, n->as.func_call.caller->as.identif.val,
-                     "Function '%.*s' expects %d argument(s), got %d",
-                     n->as.func_call.caller->as.identif.val.len,
-                     n->as.func_call.caller->as.identif.val.start, param_count,
-                     arg_count);
-        } else {
-          param = func_decl->as.func_def.params;
-          arg = n->as.func_call.args;
-          while (arg && param) {
-            DataType expected_t = param->as.fn_param.type;
-            DataType actual_t = arg->eval_type;
-            if (!is_type_compatible(expected_t, actual_t, false)) {
-              Token err_tok = get_expr_token(arg);
-              if (err_tok.len == 0)
-                err_tok = n->as.func_call.caller->as.identif.val;
-              sem_report(ctx, DIAG_ERROR, err_tok,
-                         "Argument type mismatch: expected '%.*s', got '%.*s'",
-                         expected_t.name.len, expected_t.name.start,
-                         actual_t.name.len, actual_t.name.start);
-            }
-            arg = arg->next;
-            param = param->next;
+      int arg_count = 0, param_count = 0;
+      for (AstNode *a = arg; a; a = a->next)
+        arg_count++;
+      for (AstNode *p = param; p; p = p->next)
+        param_count++;
+
+      if (arg_count != param_count) {
+        Token err_tok = get_expr_token(caller);
+        if (err_tok.len == 0 && caller->type == AST_MEMBER)
+          err_tok = caller->as.member.name;
+
+        sem_report(ctx, DIAG_ERROR, err_tok,
+                   "Function '%.*s' expects %d argument(s), got %d",
+                   err_tok.len, err_tok.start, param_count, arg_count);
+      } else {
+        param = func_decl->as.func_def.params;
+        arg = n->as.func_call.args;
+
+        while (arg && param) {
+          DataType expected_t = param->as.fn_param.type;
+          DataType actual_t = arg->eval_type;
+
+          if (!is_type_compatible(expected_t, actual_t, false)) {
+            Token err_tok = get_expr_token(arg);
+            if (err_tok.len == 0)
+              err_tok = get_expr_token(caller);
+
+            sem_report(ctx, DIAG_ERROR, err_tok,
+                       "Argument type mismatch: expected '%.*s', got '%.*s'",
+                       expected_t.name.len, expected_t.name.start,
+                       actual_t.name.len, actual_t.name.start);
           }
+          arg = arg->next;
+          param = param->next;
         }
       }
-    } else if (n->as.func_call.caller->type == AST_MEMBER) {
+    } else if (is_type_init) {
+      n->eval_type = type_init_type;
+    } else {
+      // Fallback with any
       n->eval_type = create_basic_type("any");
     }
     break;
+  }
   case AST_ARRAY_LIT:
     if (expected) {
       n->eval_type = *expected;
@@ -1345,7 +1442,25 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       if (base_t.name.len > 0) {
         n->as.member.type = base_t.name;
       }
+
+      // Default eval type fallback
       n->eval_type = create_basic_type("any");
+
+      AstNode *decl = resolve_member_decl(ctx, n);
+
+      if (decl) {
+        if (decl->type == AST_VAR_DECL) {
+          n->eval_type = decl->as.var_decl.type;
+        } else if (decl->type == AST_FUNC) {
+          n->eval_type = decl->as.func_def.ret_type;
+        }
+      } else {
+        sem_report(ctx, DIAG_ERROR, n->as.member.name,
+                   "Member '%.*s' not found in type '%.*s'",
+                   n->as.member.name.len, n->as.member.name.start,
+                   base_t.name.len, base_t.name.start);
+      }
+
       n->eval_type.is_mut = base_t.is_mut;
     }
     break;
