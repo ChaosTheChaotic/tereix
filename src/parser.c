@@ -1070,6 +1070,8 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
+    } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
+			// Block expr with no semicolon, treat as val, do nothing
     } else {
       report_error(ctx, ctx->curr, "Expected ';' after expression");
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
