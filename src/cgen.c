@@ -963,6 +963,7 @@ void flatten_exit(AstVisitor *visitor, AstNode *n) {
 
     while (*prev_ptr) {
       AstNode *child = *prev_ptr;
+
       if (child->type == AST_FUNC) {
         Token old_name = child->as.func_def.fn_name;
         if (sue.len > 0 && old_name.len > 0) {
@@ -993,10 +994,6 @@ void flatten_exit(AstVisitor *visitor, AstNode *n) {
         n->next = child;
         child->next = after_sue;
       } else {
-        if (child->type == AST_STRUCT || child->type == AST_UNION ||
-            child->type == AST_ENUM) {
-          child->is_nested_sue = true;
-        }
         prev_ptr = &child->next;
       }
     }
