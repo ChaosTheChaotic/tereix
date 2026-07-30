@@ -201,9 +201,10 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
       PUSH_NODE(n->as.unop.operand);
       break;
     case AST_IF:
-      PUSH_NODE(n->as.if_check.elseAct);
-      if (n->as.if_check.elseAct)
+      if (n->as.if_check.elseAct) {
+        PUSH_NODE(n->as.if_check.elseAct);
         PUSH_INTERLEAVE(1);
+      }
       PUSH_NODE(n->as.if_check.action);
       PUSH_INTERLEAVE(0);
       PUSH_NODE(n->as.if_check.check);

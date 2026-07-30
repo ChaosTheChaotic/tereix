@@ -701,7 +701,7 @@ void fmt_interleave_node(AstVisitor *visitor, AstNode *node, int step) {
       goto err_cleanup;
     break;
   case AST_IF:
-    if (count == 0) {
+    if (step == 0) {
       if (node->as.if_check.action &&
           node->as.if_check.action->type == AST_BLOCK) {
         if (!fmt_printf(data, ")"))
@@ -710,7 +710,7 @@ void fmt_interleave_node(AstVisitor *visitor, AstNode *node, int step) {
         if (!fmt_printf(data, ") "))
           goto err_cleanup;
       }
-    } else if (count == 1) {
+    } else if (step == 1) {
       if (node->as.if_check.elseAct &&
           node->as.if_check.elseAct->type == AST_BLOCK) {
         if (!fmt_printf(data, " else"))
