@@ -1310,8 +1310,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
               stack[top++] = node->next;
             }
 
-            // Replaced verbose push boilerplate with identical simplified
-            // structure seen earlier in code snippet...
             if (node->type == AST_BLOCK && node->as.block.first_stmt) {
               if (top >= cap - 1) {
                 cap *= 2;
@@ -1333,18 +1331,79 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                 }
                 stack[top++] = node->as.if_check.action;
               }
-            } else if (node->type == AST_WHILE && node->as.while_loop.action) {
-              if (top >= cap - 1) {
-                cap *= 2;
-                stack = realloc(stack, cap * sizeof(AstNode *));
+              if (node->as.if_check.check) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.if_check.check;
               }
-              stack[top++] = node->as.while_loop.action;
-            } else if (node->type == AST_FOR && node->as.for_loop.action) {
-              if (top >= cap - 1) {
-                cap *= 2;
-                stack = realloc(stack, cap * sizeof(AstNode *));
+            } else if (node->type == AST_WHILE) {
+              if (node->as.while_loop.action) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.while_loop.action;
               }
-              stack[top++] = node->as.for_loop.action;
+              if (node->as.while_loop.check) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.while_loop.check;
+              }
+            } else if (node->type == AST_FOR) {
+              if (node->as.for_loop.action) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.for_loop.action;
+              }
+              if (node->as.for_loop.inc) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.for_loop.inc;
+              }
+              if (node->as.for_loop.check) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.for_loop.check;
+              }
+              if (node->as.for_loop.init) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.for_loop.init;
+              }
+            } else if (node->type == AST_SWITCH) {
+              if (node->as.switch_stmt.default_case) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.switch_stmt.default_case;
+              }
+              if (node->as.switch_stmt.cases) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.switch_stmt.cases;
+              }
+              if (node->as.switch_stmt.check) {
+                if (top >= cap - 1) {
+                  cap *= 2;
+                  stack = realloc(stack, cap * sizeof(AstNode *));
+                }
+                stack[top++] = node->as.switch_stmt.check;
+              }
             }
           }
           free(stack);
