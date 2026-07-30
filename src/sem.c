@@ -636,6 +636,23 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     }
   }
 
+  for (size_t i = 0; i < mod->local_symbols.capacity; i++) {
+    HashEntry *entry = mod->local_symbols.buckets[i];
+    while (entry) {
+      Sym *sym = (Sym *)entry->value;
+      Token name = sym->name;
+			// Dupe check
+      if (map_get(&ss->scopes[ss->count - 1].symbols, name.start, name.len) ==
+          NULL) {
+        Sym *global_sym =
+            new_sym(arena, sym->kind, name, sym->decl_node, sym->fpath);
+        global_sym->is_imported_mod = sym->is_imported_mod;
+        scope_declare(ss, name, global_sym);
+      }
+      entry = entry->next;
+    }
+  }
+
   ScopeVisitorData vdata = {.ctx = ctx, .ss = ss, .mod = mod, .arena = arena};
 
   AstVisitor visitor = {.user_data = &vdata,
