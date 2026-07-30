@@ -192,15 +192,15 @@ endif()
 file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS  "src/*.c")
 
 if(yyjson_FOUND)
-	message(STATUS "Using system yyjson. Excluding internal src/yyjson.c from compilation.")
-	list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/yyjson.c")
+	message(STATUS "Using system yyjson. Excluding internal src/c/yyjson.c from compilation.")
+	list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/c/yyjson.c")
 else()
 	message(STATUS "System yyjson not found. Compiling fallback internal src/yyjson.c.")
 endif()
 
 if (NOT HAS_WORKING_ATOMICS)
 	message(STATUS "Removing thread types from compilation.")
-	list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/data_structures/thread_pool/thread_pool.c")
+	list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/c/data_structures/thread_pool/thread_pool.c")
 endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -214,7 +214,7 @@ endif()
 add_executable(tereix_bin ${SOURCES})
 
 target_include_directories(settings INTERFACE 
-	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/private>
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c/private>
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
 )
 
