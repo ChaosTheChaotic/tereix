@@ -13,6 +13,17 @@ add_library(settings INTERFACE)
 add_library(deps_public INTERFACE)
 add_library(deps_private INTERFACE)
 
+file(GLOB_RECURSE C_SOURCES CONFIGURE_DEPENDS  "src/c/*.c")
+file(GLOB_RECURSE TX_SOURCES CONFIGURE_DEPENDS  "src/tx/*.tx")
+
+set(REWRITTEN_C_SRCS
+
+)
+
+if(SUPERSEDED_C_SOURCES)
+    list(REMOVE_ITEM C_SOURCES ${SUPERSEDED_C_SOURCES})
+endif()
+
 if(ALLOW_PARALLEL STREQUAL "ON" OR ALLOW_PARALLEL STREQUAL "AUTO")
     set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
     set(THREADS_PREFER_PTHREAD_FLAG TRUE)
@@ -189,18 +200,16 @@ if(USE_LTO)
 	endif()
 endif()
 
-file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS  "src/*.c")
-
 if(yyjson_FOUND)
 	message(STATUS "Using system yyjson. Excluding internal src/c/yyjson.c from compilation.")
-	list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/c/yyjson.c")
+	list(REMOVE_ITEM C_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/c/yyjson.c")
 else()
 	message(STATUS "System yyjson not found. Compiling fallback internal src/yyjson.c.")
 endif()
 
 if (NOT HAS_WORKING_ATOMICS)
 	message(STATUS "Removing thread types from compilation.")
-	list(REMOVE_ITEM SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/c/data_structures/thread_pool/thread_pool.c")
+	list(REMOVE_ITEM C_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/c/data_structures/thread_pool/thread_pool.c")
 endif()
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -210,13 +219,6 @@ if(DO_INSTALL)
 		TX_STDLIB_DIR=\"${CMAKE_INSTALL_PREFIX}/lib/tereix/std\"
 	)
 endif()
-
-add_executable(tereix_bin ${SOURCES})
-
-target_include_directories(settings INTERFACE 
-	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c/private>
-	$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-)
 
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/compute_hash.cmake" "
 # Glob all sources and sort them to guarantee a deterministic hash order
@@ -264,6 +266,43 @@ target_link_libraries(tereix_bin
 if(yyjson_FOUND)
 	target_link_libraries(tereix_bin PRIVATE yyjson::yyjson)
 endif()
+
+if(TX_SOURCES)
+    message(STATUS "Tereix sources detected. Using the bootstrap pipeline")
+
+    add_executable(tereix0 ${C_SOURCES})
+    target_link_libraries(tereix0 PUBLIC deps_public PRIVATE settings deps_private)
+    if(yyjson_FOUND)
+        target_link_libraries(tereix0 PRIVATE yyjson::yyjson)
+    endif()
+
+    set(TX_GEN_DIR "${CMAKE_CURRENT_BINARY_DIR}/gen_c")
+    file(MAKE_DIRECTORY "${TX_GEN_DIR}")
+
+    set(TX_MAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/src/tx/main.tx")
+    set(GEN_C_FILE "${TX_GEN_DIR}/tereix_monolithic.c")
+
+    add_custom_command(
+        OUTPUT "${GEN_C_FILE}"
+        COMMAND tereix0 -k -o "${TX_GEN_DIR}/tereix_stage1_bin" "${TX_MAIN_FILE}"
+        COMMAND ${CMAKE_COMMAND} -E copy ".tx_cache/output_gen.c" "${GEN_C_FILE}"
+        DEPENDS tereix0 ${TX_SOURCES}
+        COMMENT "Transpiling whole program from ${TX_MAIN_FILE} -> ${GEN_C_FILE}"
+        VERBATIM
+    )
+
+    set(FINAL_SOURCES ${C_SOURCES} "${GEN_C_FILE}")
+else()
+    set(FINAL_SOURCES ${C_SOURCES})
+endif()
+
+target_include_directories(settings INTERFACE 
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/c/private>
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/gen_c>
+)
+
+add_executable(tereix_bin ${FINAL_SOURCES})
 
 if(ENABLE_LTO_ON_TARGETS)
 	set_target_properties(tereix_bin PROPERTIES INTERPROCEDURAL_OPTIMIZATION TRUE)

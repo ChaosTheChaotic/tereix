@@ -14,15 +14,21 @@ if(NOT cmocka_FOUND)
     FetchContent_MakeAvailable(cmocka)
 endif()
 
-file(GLOB_RECURSE TEREIX_CORE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../src/*.c")
+file(GLOB_RECURSE TEREIX_CORE_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/../src/c/*.c")
 list(REMOVE_ITEM TEREIX_CORE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../src/c/main.c")
 
 if(yyjson_FOUND)
     list(REMOVE_ITEM TEREIX_CORE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/../src/c/yyjson.c")
 endif()
 
+file(GLOB GENERATED_TX_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/../gen_c/*.c")
+if(GENERATED_TX_SOURCES)
+    list(APPEND TEREIX_CORE_SOURCES ${GENERATED_TX_SOURCES})
+endif()
+
 add_library(tereix_core_for_tests OBJECT ${TEREIX_CORE_SOURCES})
 target_link_libraries(tereix_core_for_tests PUBLIC deps_public PRIVATE settings deps_private)
+
 if(yyjson_FOUND)
     target_link_libraries(tereix_core_for_tests PRIVATE yyjson::yyjson)
 endif()
@@ -30,6 +36,7 @@ endif()
 target_include_directories(tereix_core_for_tests PRIVATE 
     "${CMAKE_CURRENT_SOURCE_DIR}/../src/c/private"
     "${CMAKE_CURRENT_BINARY_DIR}/.."
+    "${CMAKE_CURRENT_BINARY_DIR}/../gen_c"
 )
 
 function(add_tereix_test TEST_NAME)
@@ -51,6 +58,7 @@ function(add_tereix_test TEST_NAME)
         "${CMAKE_CURRENT_SOURCE_DIR}/../src/c/private"
         "${CMAKE_CURRENT_SOURCE_DIR}/../src"
         "${CMAKE_CURRENT_BINARY_DIR}/.."
+        "${CMAKE_CURRENT_BINARY_DIR}/../gen_c"
     )
     
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
