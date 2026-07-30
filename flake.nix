@@ -7,10 +7,11 @@
       url = "github:ChaosTheChaotic/tereix-stdlib";
       flake = false;
     };
+		tereix-legacy.url = "github:ChaosTheChaotic/tereix/legacy";
   };
 
   outputs =
-    { self, nixpkgs, tereix-stdlib }:
+    { self, nixpkgs, tereix-stdlib, tereix-legacy }:
     let
       systems = [
         "x86_64-linux"
@@ -34,6 +35,7 @@
             valgrind
 						zstd
 						cmocka
+						tereix-legacy.packages.${system}.default
           ];
         };
       });
