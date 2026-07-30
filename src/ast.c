@@ -79,7 +79,6 @@ AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath,
   pctx.state_cap = 64;
   pctx.state_stack = malloc(sizeof(ParseState) * pctx.state_cap);
   pctx.diags = diag_list;
-  pctx.curr = next_token(&pctx);
 
   int panic_status = setjmp(pctx.panic_env);
   if (panic_status != ERR_NONE) {
@@ -96,6 +95,7 @@ AstNode *str_to_ast(Arena *arena, const char *file, const char *fpath,
 
     return NULL;
   }
+  pctx.curr = next_token(&pctx);
 
   AstNode *root = new_node(arena, AST_PROGRAM);
   push_node(&pctx, root);
