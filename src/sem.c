@@ -1324,32 +1324,23 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
         }
       } else if (caller->type == AST_MEMBER) {
         func_decl = resolve_member_decl(ctx, caller);
-
-				// Properly check su init from modules
-        if (func_decl &&
-            (func_decl->type == AST_STRUCT || func_decl->type == AST_UNION)) {
-          is_type_init = true;
-          type_init_type.name = (func_decl->type == AST_STRUCT)
-                                    ? func_decl->as.struct_def.structn
-                                    : func_decl->as.union_def.unionn;
-          type_init_type.is_custom = true;
-        }
       }
     }
 
-    // Method call check
-    bool is_method = false;
-    AstNode *receiver = NULL;
-    if (func_decl && func_decl->type == AST_FUNC) {
+		// Check for a valid func or type init
+    bool is_function = func_decl && func_decl->type == AST_FUNC;
+
+    if (is_function) {
+      // Method call check
+      bool is_method = false;
+      AstNode *receiver = NULL;
       AstNode *first_param = func_decl->as.func_def.params;
       if (caller->type == AST_MEMBER && first_param &&
           first_param->as.fn_param.type.is_self) {
         is_method = true;
         receiver = caller->as.member.base;
       }
-    }
 
-    if (func_decl && func_decl->type == AST_FUNC) {
       n->eval_type = func_decl->as.func_def.ret_type;
 
       // Count params and explicit args
@@ -1448,21 +1439,26 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     } else if (is_type_init) {
       n->eval_type = type_init_type;
     } else {
-      n->eval_type = create_basic_type("any");
-
-      bool already_reported = false;
-      if (caller->type == AST_IDENTIF && !caller->as.identif.res_sm) {
-        already_reported = true; // Scope lookup error handles this
-      } else if (caller->type == AST_MEMBER && !func_decl) {
-        already_reported = true; // Member lookup error handles this
+      Token err_tok;
+      if (caller->type == AST_MEMBER) {
+        err_tok = caller->as.member.name;
+      } else if (caller->type == AST_IDENTIF) {
+        err_tok = caller->as.identif.val;
+      } else {
+        err_tok = get_expr_token(caller);
       }
+      if (err_tok.len == 0)
+        err_tok = get_expr_token(caller);
 
-      if (!already_reported) {
-        Token err_tok = get_expr_token(caller);
-        sem_report(ctx, DIAG_ERROR, err_tok,
-                   "Called object '%.*s' is not a function or type initializer",
+      if (func_decl) {
+        // It exists but is not a function
+        sem_report(ctx, DIAG_ERROR, err_tok, "Cannot call non-function '%.*s'",
+                   err_tok.len, err_tok.start);
+      } else {
+        sem_report(ctx, DIAG_ERROR, err_tok, "Undefined function '%.*s'",
                    err_tok.len, err_tok.start);
       }
+      n->eval_type = create_basic_type("any");
     }
     break;
   }
