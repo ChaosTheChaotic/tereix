@@ -641,7 +641,7 @@ void resolve_scopes(Arena *arena, Module *mod, ScopeStack *ss, SemCtx *ctx) {
     while (entry) {
       Sym *sym = (Sym *)entry->value;
       Token name = sym->name;
-			// Dupe check
+      // Dupe check
       if (map_get(&ss->scopes[ss->count - 1].symbols, name.start, name.len) ==
           NULL) {
         Sym *global_sym =
@@ -1017,6 +1017,40 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
   return NULL;
 }
 
+bool check_custom_type(DataType t, Token err_tok, SemCtx *ctx) {
+  if (!t.is_custom)
+    return true;
+
+  Module *mod = sem_current_mod;
+  if (!mod)
+    return true; // fallback
+
+  // Check in current module
+  Sym *sym = map_get(&mod->local_symbols, t.name.start, t.name.len);
+  if (sym && (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
+              sym->kind == SYM_ENUM)) {
+    return true;
+  }
+
+  // Check in all imported modules
+  for (size_t i = 0; i < mod->imported_mods.capacity; i++) {
+    HashEntry *entry = mod->imported_mods.buckets[i];
+    while (entry) {
+      Module *imp = (Module *)entry->value;
+      sym = map_get(&imp->local_symbols, t.name.start, t.name.len);
+      if (sym && (sym->kind == SYM_STRUCT || sym->kind == SYM_UNION ||
+                  sym->kind == SYM_ENUM)) {
+        return true;
+      }
+      entry = entry->next;
+    }
+  }
+
+  sem_report(ctx, DIAG_ERROR, err_tok, "Unknown type '%.*s'", (int)t.name.len,
+             t.name.start);
+  return false;
+}
+
 void tc_exit(AstVisitor *visitor, AstNode *n) {
   TCData *data = visitor->user_data;
   DataType *expected = get_expected(&data->exp_map, n);
@@ -1096,6 +1130,7 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     }
     break;
   case AST_VAR_DECL:
+    check_custom_type(n->as.var_decl.type, n->as.var_decl.type.name, ctx);
     if (n->as.var_decl.init) {
       if (!is_type_compatible(n->as.var_decl.type,
                               n->as.var_decl.init->eval_type, false)) {
@@ -1104,6 +1139,9 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
                    n->as.var_decl.id.len, n->as.var_decl.id.start);
       }
     }
+    break;
+  case AST_PARAM:
+    check_custom_type(n->as.fn_param.type, n->as.fn_param.type.name, ctx);
     break;
   case AST_BINOP: {
     if (!n->as.binop.left || !n->as.binop.right)
@@ -1304,6 +1342,10 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       }
     }
     break;
+  case AST_FUNC:
+    check_custom_type(n->as.func_def.ret_type, n->as.func_def.ret_type.name,
+                      ctx);
+    break;
   case AST_FUNC_CALL: {
     AstNode *caller = n->as.func_call.caller;
     AstNode *func_decl = NULL;
@@ -1327,19 +1369,20 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       }
     }
 
-    // Method call check
-    bool is_method = false;
-    AstNode *receiver = NULL;
-    if (func_decl && func_decl->type == AST_FUNC) {
+    // Check for a valid func or type init
+    bool is_function = func_decl && func_decl->type == AST_FUNC;
+
+    if (is_function) {
+      // Method call check
+      bool is_method = false;
+      AstNode *receiver = NULL;
       AstNode *first_param = func_decl->as.func_def.params;
       if (caller->type == AST_MEMBER && first_param &&
           first_param->as.fn_param.type.is_self) {
         is_method = true;
         receiver = caller->as.member.base;
       }
-    }
 
-    if (func_decl && func_decl->type == AST_FUNC) {
       n->eval_type = func_decl->as.func_def.ret_type;
 
       // Count params and explicit args
@@ -1438,6 +1481,25 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     } else if (is_type_init) {
       n->eval_type = type_init_type;
     } else {
+      Token err_tok;
+      if (caller->type == AST_MEMBER) {
+        err_tok = caller->as.member.name;
+      } else if (caller->type == AST_IDENTIF) {
+        err_tok = caller->as.identif.val;
+      } else {
+        err_tok = get_expr_token(caller);
+      }
+      if (err_tok.len == 0)
+        err_tok = get_expr_token(caller);
+
+      if (func_decl) {
+        // It exists but is not a function
+        sem_report(ctx, DIAG_ERROR, err_tok, "Cannot call non-function '%.*s'",
+                   err_tok.len, err_tok.start);
+      } else {
+        sem_report(ctx, DIAG_ERROR, err_tok, "Undefined function '%.*s'",
+                   err_tok.len, err_tok.start);
+      }
       n->eval_type = create_basic_type("any");
     }
     break;
@@ -1555,6 +1617,16 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
           n->eval_type = decl->as.var_decl.type;
         } else if (decl->type == AST_FUNC) {
           n->eval_type = decl->as.func_def.ret_type;
+        }
+        // Assign types when acessing symbols
+        else if (decl->type == AST_STRUCT || decl->type == AST_UNION ||
+                 decl->type == AST_ENUM) {
+          n->eval_type = create_basic_type("");
+          n->eval_type.name =
+              (decl->type == AST_STRUCT)  ? decl->as.struct_def.structn
+              : (decl->type == AST_UNION) ? decl->as.union_def.unionn
+                                          : decl->as.enum_def.enumn;
+          n->eval_type.is_custom = true;
         }
       } else {
         sem_report(ctx, DIAG_ERROR, n->as.member.name,
