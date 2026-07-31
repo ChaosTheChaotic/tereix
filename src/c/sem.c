@@ -381,78 +381,94 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
 bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
   Arena *alloc_arena = mod->mod_arena ? mod->mod_arena : arena;
 
+  AstNode *stack[1024];
+  int top = 0;
+
   AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
-    AstNode *curr = stmt;
-    bool in_extern = false;
-
-    // Look into extern blocks too
-    if (stmt->type == AST_EXTERN && stmt->as.extern_block.contents) {
-      curr = stmt->as.extern_block.contents;
-      in_extern = true;
-    }
-
-    while (curr) {
-      Token name = {0};
-      SymKind kind;
-      bool is_valid = true;
-
-      switch (curr->type) {
-      case AST_FUNC:
-        name = curr->as.func_def.fn_name;
-        kind = SYM_FUNC;
-        break;
-      case AST_VAR_DECL:
-        name = curr->as.var_decl.id;
-        kind = SYM_VAR;
-        break;
-      case AST_STRUCT:
-        name = curr->as.struct_def.structn;
-        kind = SYM_STRUCT;
-        break;
-      case AST_UNION:
-        name = curr->as.union_def.unionn;
-        kind = SYM_UNION;
-        break;
-      case AST_ENUM:
-        name = curr->as.enum_def.enumn;
-        kind = SYM_ENUM;
-        break;
-      default:
-        is_valid = false;
-        break;
-      }
-
-      if (is_valid) {
-        if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
-          Sym *existing = map_get(&mod->local_symbols, name.start, name.len);
-          bool is_existing_opaque =
-              (existing->decl_node->type == AST_STRUCT &&
-               !existing->decl_node->as.struct_def.contents) ||
-              (existing->decl_node->type == AST_UNION &&
-               !existing->decl_node->as.union_def.contents);
-
-          if (!is_existing_opaque) {
-            sem_report(ctx, DIAG_ERROR, name,
-                       "Error: Symbol '%.*s' already defined in module %s",
-                       name.len, name.start, mod->mod_name);
-            return false;
-          }
-        }
-
-        Sym *sym = new_sym(alloc_arena, kind, name, curr, mod->abs_path);
-        map_set(&mod->local_symbols, name.start, name.len, sym);
-      }
-
-      // If looking in extern block, move to next inner declaration
-      // If not go to next top level stmt
-      if (in_extern) {
-        curr = curr->next;
-      } else {
-        break;
-      }
-    }
+    if (top < 1024)
+      stack[top++] = stmt;
     stmt = stmt->next;
+  }
+
+  while (top > 0) {
+    AstNode *curr = stack[--top];
+
+    if (curr->type == AST_EXTERN && curr->as.extern_block.contents) {
+      AstNode *inner = curr->as.extern_block.contents;
+      while (inner) {
+        if (top < 1024)
+          stack[top++] = inner;
+        inner = inner->next;
+      }
+      continue;
+    }
+
+    Token name = {0};
+    SymKind kind;
+    bool is_valid = true;
+    bool is_container = false;
+    AstNode *contents = NULL;
+
+    switch (curr->type) {
+    case AST_FUNC:
+      name = curr->as.func_def.fn_name;
+      kind = SYM_FUNC;
+      break;
+    case AST_VAR_DECL:
+      name = curr->as.var_decl.id;
+      kind = SYM_VAR;
+      break;
+    case AST_STRUCT:
+      name = curr->as.struct_def.structn;
+      kind = SYM_STRUCT;
+      is_container = true;
+      contents = curr->as.struct_def.contents;
+      break;
+    case AST_UNION:
+      name = curr->as.union_def.unionn;
+      kind = SYM_UNION;
+      is_container = true;
+      contents = curr->as.union_def.contents;
+      break;
+    case AST_ENUM:
+      name = curr->as.enum_def.enumn;
+      kind = SYM_ENUM;
+      break;
+    default:
+      is_valid = false;
+      break;
+    }
+
+    if (is_valid) {
+      if (map_get(&mod->local_symbols, name.start, name.len) != NULL) {
+        Sym *existing = map_get(&mod->local_symbols, name.start, name.len);
+        bool is_existing_opaque =
+            (existing->decl_node->type == AST_STRUCT &&
+             !existing->decl_node->as.struct_def.contents) ||
+            (existing->decl_node->type == AST_UNION &&
+             !existing->decl_node->as.union_def.contents);
+
+        if (!is_existing_opaque) {
+          sem_report(ctx, DIAG_ERROR, name,
+                     "Error: Symbol '%.*s' already defined in module %s",
+                     name.len, name.start, mod->mod_name);
+          return false;
+        }
+      }
+
+      Sym *sym = new_sym(alloc_arena, kind, name, curr, mod->abs_path);
+      map_set(&mod->local_symbols, name.start, name.len, sym);
+    }
+
+    if (is_container && contents) {
+      AstNode *inner = contents;
+      while (inner) {
+        if (top < 1024)
+          stack[top++] = inner;
+        inner = inner->next;
+      }
+    }
   }
   return true;
 }
@@ -1004,6 +1020,12 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
           decl_name = curr->as.var_decl.id;
         else if (curr->type == AST_FUNC)
           decl_name = curr->as.func_def.fn_name;
+        else if (curr->type == AST_ENUM)
+          decl_name = curr->as.enum_def.enumn;
+        else if (curr->type == AST_STRUCT)
+          decl_name = curr->as.struct_def.structn;
+        else if (curr->type == AST_UNION)
+          decl_name = curr->as.union_def.unionn;
 
         if (decl_name.len == name.len &&
             strncmp(decl_name.start, name.start, name.len) == 0) {
