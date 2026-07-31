@@ -1020,6 +1020,12 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
           decl_name = curr->as.var_decl.id;
         else if (curr->type == AST_FUNC)
           decl_name = curr->as.func_def.fn_name;
+        else if (curr->type == AST_ENUM)
+          decl_name = curr->as.enum_def.enumn;
+        else if (curr->type == AST_STRUCT)
+          decl_name = curr->as.struct_def.structn;
+        else if (curr->type == AST_UNION)
+          decl_name = curr->as.union_def.unionn;
 
         if (decl_name.len == name.len &&
             strncmp(decl_name.start, name.start, name.len) == 0) {
