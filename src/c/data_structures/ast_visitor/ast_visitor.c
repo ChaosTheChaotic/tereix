@@ -80,7 +80,7 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 
 #define PUSH_NODE(child)                                                       \
   do {                                                                         \
-    if ((child)) {                                                             \
+    if ((child) && (child) != n) {                                             \
       if (top >= cap) {                                                        \
         size_t new_cap = cap * 2;                                              \
         VisitorFrame *new_stack =                                              \
@@ -122,12 +122,23 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 #define PUSH_LIST(head)                                                        \
   do {                                                                         \
     AstNode *_curr = (head);                                                   \
+    AstNode *_fast = (head);                                                   \
     size_t _cnt = 0;                                                           \
     while (_curr) {                                                            \
       _cnt++;                                                                  \
       _curr = _curr->next;                                                     \
+      if (_fast && _fast->next) {                                              \
+        _fast = _fast->next->next;                                             \
+      } else {                                                                 \
+        _fast = NULL;                                                          \
+      }                                                                        \
+      if (_curr && _curr == _fast) {                                           \
+        break; /* Cycle found, limit hit */                                    \
+      }                                                                        \
     }                                                                          \
-    if (_cnt > 0) {                                                            \
+    if (_cnt == 1) {                                                           \
+      PUSH_NODE(head);                                                         \
+    } else if (_cnt > 1) {                                                     \
       AstNode **_arr = malloc(sizeof(AstNode *) * _cnt);                       \
       if (!_arr) {                                                             \
         free(stack);                                                           \
@@ -150,12 +161,23 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 #define PUSH_LIST_INTERLEAVED(head, base_step)                                 \
   do {                                                                         \
     AstNode *_curr = (head);                                                   \
+    AstNode *_fast = (head);                                                   \
     size_t _cnt = 0;                                                           \
     while (_curr) {                                                            \
       _cnt++;                                                                  \
       _curr = _curr->next;                                                     \
+      if (_fast && _fast->next) {                                              \
+        _fast = _fast->next->next;                                             \
+      } else {                                                                 \
+        _fast = NULL;                                                          \
+      }                                                                        \
+      if (_curr && _curr == _fast) {                                           \
+        break; /* Cycle found, limit hit */                                    \
+      }                                                                        \
     }                                                                          \
-    if (_cnt > 0) {                                                            \
+    if (_cnt == 1) {                                                           \
+      PUSH_NODE(head);                                                         \
+    } else if (_cnt > 1) {                                                     \
       AstNode **_arr = malloc(sizeof(AstNode *) * _cnt);                       \
       if (!_arr) {                                                             \
         free(stack);                                                           \
@@ -188,7 +210,7 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
       PUSH_LIST_INTERLEAVED(n->as.func_def.params, 0);
       break;
     case AST_VAR_DECL:
-      PUSH_NODE(n->as.var_decl.init);
+      PUSH_LIST(n->as.var_decl.init);
       break;
     case AST_BINOP:
       PUSH_NODE(n->as.binop.right);
@@ -200,25 +222,28 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
     case AST_DEREF:
       PUSH_NODE(n->as.unop.operand);
       break;
+
     case AST_IF:
       if (n->as.if_check.elseAct) {
-        PUSH_NODE(n->as.if_check.elseAct);
+        PUSH_LIST(n->as.if_check.elseAct);
         PUSH_INTERLEAVE(1);
       }
-      PUSH_NODE(n->as.if_check.action);
+      PUSH_LIST(n->as.if_check.action);
       PUSH_INTERLEAVE(0);
-      PUSH_NODE(n->as.if_check.check);
+      PUSH_LIST(n->as.if_check.check);
       break;
+
     case AST_WHILE:
-      PUSH_NODE(n->as.while_loop.action);
-      PUSH_NODE(n->as.while_loop.check);
+      PUSH_LIST(n->as.while_loop.action);
+      PUSH_LIST(n->as.while_loop.check);
       break;
     case AST_FOR:
-      PUSH_NODE(n->as.for_loop.action);
-      PUSH_NODE(n->as.for_loop.inc);
-      PUSH_NODE(n->as.for_loop.check);
-      PUSH_NODE(n->as.for_loop.init);
+      PUSH_LIST(n->as.for_loop.action);
+      PUSH_LIST(n->as.for_loop.inc);
+      PUSH_LIST(n->as.for_loop.check);
+      PUSH_LIST(n->as.for_loop.init);
       break;
+
     case AST_FUNC_CALL:
       PUSH_LIST_INTERLEAVED(n->as.func_call.args, 0);
       PUSH_INTERLEAVE(0);
@@ -278,6 +303,7 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 
 #undef PUSH_NODE
 #undef PUSH_LIST
+#undef PUSH_LIST_INTERLEAVED
   }
 
   free(stack);
