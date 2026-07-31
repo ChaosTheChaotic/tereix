@@ -1324,6 +1324,16 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
         }
       } else if (caller->type == AST_MEMBER) {
         func_decl = resolve_member_decl(ctx, caller);
+
+				// Properly check su init from modules
+        if (func_decl &&
+            (func_decl->type == AST_STRUCT || func_decl->type == AST_UNION)) {
+          is_type_init = true;
+          type_init_type.name = (func_decl->type == AST_STRUCT)
+                                    ? func_decl->as.struct_def.structn
+                                    : func_decl->as.union_def.unionn;
+          type_init_type.is_custom = true;
+        }
       }
     }
 
@@ -1439,6 +1449,20 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       n->eval_type = type_init_type;
     } else {
       n->eval_type = create_basic_type("any");
+
+      bool already_reported = false;
+      if (caller->type == AST_IDENTIF && !caller->as.identif.res_sm) {
+        already_reported = true; // Scope lookup error handles this
+      } else if (caller->type == AST_MEMBER && !func_decl) {
+        already_reported = true; // Member lookup error handles this
+      }
+
+      if (!already_reported) {
+        Token err_tok = get_expr_token(caller);
+        sem_report(ctx, DIAG_ERROR, err_tok,
+                   "Called object '%.*s' is not a function or type initializer",
+                   err_tok.len, err_tok.start);
+      }
     }
     break;
   }
@@ -1555,6 +1579,16 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
           n->eval_type = decl->as.var_decl.type;
         } else if (decl->type == AST_FUNC) {
           n->eval_type = decl->as.func_def.ret_type;
+        }
+				// Assign types when acessing symbols
+        else if (decl->type == AST_STRUCT || decl->type == AST_UNION ||
+                 decl->type == AST_ENUM) {
+          n->eval_type = create_basic_type("");
+          n->eval_type.name =
+              (decl->type == AST_STRUCT)  ? decl->as.struct_def.structn
+              : (decl->type == AST_UNION) ? decl->as.union_def.unionn
+                                          : decl->as.enum_def.enumn;
+          n->eval_type.is_custom = true;
         }
       } else {
         sem_report(ctx, DIAG_ERROR, n->as.member.name,
