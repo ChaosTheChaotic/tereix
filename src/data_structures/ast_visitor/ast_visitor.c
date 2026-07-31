@@ -122,10 +122,19 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 #define PUSH_LIST(head)                                                        \
   do {                                                                         \
     AstNode *_curr = (head);                                                   \
+    AstNode *_fast = (head);                                                   \
     size_t _cnt = 0;                                                           \
     while (_curr) {                                                            \
       _cnt++;                                                                  \
       _curr = _curr->next;                                                     \
+      if (_fast && _fast->next) {                                              \
+        _fast = _fast->next->next;                                             \
+      } else {                                                                 \
+        _fast = NULL;                                                          \
+      }                                                                        \
+      if (_curr && _curr == _fast) {                                           \
+        break; /* Cycle found, limit hit */                                    \
+      }                                                                        \
     }                                                                          \
     if (_cnt > 0) {                                                            \
       AstNode **_arr = malloc(sizeof(AstNode *) * _cnt);                       \
@@ -150,10 +159,19 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 #define PUSH_LIST_INTERLEAVED(head, base_step)                                 \
   do {                                                                         \
     AstNode *_curr = (head);                                                   \
+    AstNode *_fast = (head);                                                   \
     size_t _cnt = 0;                                                           \
     while (_curr) {                                                            \
       _cnt++;                                                                  \
       _curr = _curr->next;                                                     \
+      if (_fast && _fast->next) {                                              \
+        _fast = _fast->next->next;                                             \
+      } else {                                                                 \
+        _fast = NULL;                                                          \
+      }                                                                        \
+      if (_curr && _curr == _fast) {                                           \
+        break; /* Cycle found, limit hit */                                    \
+      }                                                                        \
     }                                                                          \
     if (_cnt > 0) {                                                            \
       AstNode **_arr = malloc(sizeof(AstNode *) * _cnt);                       \
@@ -278,6 +296,7 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 
 #undef PUSH_NODE
 #undef PUSH_LIST
+#undef PUSH_LIST_INTERLEAVED
   }
 
   free(stack);
