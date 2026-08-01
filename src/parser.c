@@ -1715,8 +1715,11 @@ bool parse_step(ParseCtx *ctx) {
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after if\n");
 
-          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-          push_node(ctx, err_node);
+          if_node->as.if_check.elseAct = NULL;
+          pop_node(ctx);
+          pop_node(ctx);
+          sync(ctx);
+          recover_state(ctx, current_state);
 
           return false;
         }
@@ -2274,8 +2277,10 @@ bool parse_step(ParseCtx *ctx) {
         } else {
           report_error(ctx, ctx->curr, "Expected '{' after else\n");
 
-          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-          push_node(ctx, err_node);
+          pop_state(ctx);
+          pop_node(ctx);
+          sync(ctx);
+          recover_state(ctx, current_state);
 
           return false;
         }
