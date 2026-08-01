@@ -1541,12 +1541,16 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     }
     if (last) {
       n->eval_type = last->eval_type;
+    } else {
+      n->eval_type = create_basic_type("void");
     }
     break;
   }
   case AST_IF:
     if (n->as.if_check.action) {
       n->eval_type = n->as.if_check.action->eval_type;
+    } else {
+      n->eval_type = create_basic_type("void");
     }
     break;
   case AST_INDEX:
