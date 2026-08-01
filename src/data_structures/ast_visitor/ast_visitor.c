@@ -230,18 +230,19 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
       }
       PUSH_LIST(n->as.if_check.action);
       PUSH_INTERLEAVE(0);
-      PUSH_LIST(n->as.if_check.check);
+      PUSH_NODE(n->as.if_check.check);
       break;
 
     case AST_WHILE:
       PUSH_LIST(n->as.while_loop.action);
-      PUSH_LIST(n->as.while_loop.check);
+      PUSH_NODE(n->as.while_loop.check);
       break;
+
     case AST_FOR:
       PUSH_LIST(n->as.for_loop.action);
-      PUSH_LIST(n->as.for_loop.inc);
-      PUSH_LIST(n->as.for_loop.check);
-      PUSH_LIST(n->as.for_loop.init);
+      PUSH_NODE(n->as.for_loop.inc);
+      PUSH_NODE(n->as.for_loop.check);
+      PUSH_NODE(n->as.for_loop.init);
       break;
 
     case AST_FUNC_CALL:
