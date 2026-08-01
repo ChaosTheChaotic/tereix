@@ -118,46 +118,6 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
     }                                                                          \
   } while (0)
 
-// Reverses linked lists so they execute left to right top to bottom
-#define PUSH_LIST(head)                                                        \
-  do {                                                                         \
-    AstNode *_curr = (head);                                                   \
-    AstNode *_fast = (head);                                                   \
-    size_t _cnt = 0;                                                           \
-    while (_curr) {                                                            \
-      _cnt++;                                                                  \
-      _curr = _curr->next;                                                     \
-      if (_fast && _fast->next) {                                              \
-        _fast = _fast->next->next;                                             \
-      } else {                                                                 \
-        _fast = NULL;                                                          \
-      }                                                                        \
-      if (_curr && _curr == _fast) {                                           \
-        break; /* Cycle found, limit hit */                                    \
-      }                                                                        \
-    }                                                                          \
-    if (_cnt == 1) {                                                           \
-      PUSH_NODE(head);                                                         \
-    } else if (_cnt > 1) {                                                     \
-      AstNode **_arr = malloc(sizeof(AstNode *) * _cnt);                       \
-      if (!_arr) {                                                             \
-        free(stack);                                                           \
-        if (visitor->panic_env)                                                \
-          longjmp(*visitor->panic_env, ERR_OOM);                               \
-        return false;                                                          \
-      }                                                                        \
-      _curr = (head);                                                          \
-      for (size_t _i = 0; _i < _cnt; _i++) {                                   \
-        _arr[_i] = _curr;                                                      \
-        _curr = _curr->next;                                                   \
-      }                                                                        \
-      for (int _i = (int)_cnt - 1; _i >= 0; _i--) {                            \
-        PUSH_NODE(_arr[_i]);                                                   \
-      }                                                                        \
-      free(_arr);                                                              \
-    }                                                                          \
-  } while (0)
-
 #define PUSH_LIST_INTERLEAVED(head, base_step)                                 \
   do {                                                                         \
     AstNode *_curr = (head);                                                   \
@@ -210,7 +170,7 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
       PUSH_LIST_INTERLEAVED(n->as.func_def.params, 0);
       break;
     case AST_VAR_DECL:
-      PUSH_LIST(n->as.var_decl.init);
+      PUSH_NODE(n->as.var_decl.init);
       break;
     case AST_BINOP:
       PUSH_NODE(n->as.binop.right);
@@ -225,21 +185,21 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 
     case AST_IF:
       if (n->as.if_check.elseAct) {
-        PUSH_LIST(n->as.if_check.elseAct);
+        PUSH_NODE(n->as.if_check.elseAct);
         PUSH_INTERLEAVE(1);
       }
-      PUSH_LIST(n->as.if_check.action);
+      PUSH_NODE(n->as.if_check.action);
       PUSH_INTERLEAVE(0);
       PUSH_NODE(n->as.if_check.check);
       break;
 
     case AST_WHILE:
-      PUSH_LIST(n->as.while_loop.action);
+      PUSH_NODE(n->as.while_loop.action);
       PUSH_NODE(n->as.while_loop.check);
       break;
 
     case AST_FOR:
-      PUSH_LIST(n->as.for_loop.action);
+      PUSH_NODE(n->as.for_loop.action);
       PUSH_NODE(n->as.for_loop.inc);
       PUSH_NODE(n->as.for_loop.check);
       PUSH_NODE(n->as.for_loop.init);
