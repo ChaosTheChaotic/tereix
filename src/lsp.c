@@ -266,7 +266,7 @@ size_t format_type_to_buf(DataType type, char *buf, size_t size) {
                 type.name.start);
   }
 
-  for (unsigned int i = 0; i < type.array_dimens; i++) {
+  for (unsigned int i = 0; i < type.array_dimens && offset < size - 1; i++) {
     if (type.dim_sizes && type.dim_sizes[i]) {
       AstNode *dim = type.dim_sizes[i];
       if (dim->type == AST_NUM_LIT) {
