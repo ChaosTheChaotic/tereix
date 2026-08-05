@@ -554,6 +554,9 @@ void handle_definition(yyjson_val *params, yyjson_val *id) {
 
       char *current_abs = absolute_from_uri(uri);
       if (current_abs) {
+        char *last_slash = strrchr(current_abs, '/');
+        if (last_slash)
+          *last_slash = '\0';
         const char *resolved =
             resolve_module_path(&tmp_arena, current_abs, rel_path);
         if (resolved) {
@@ -1118,9 +1121,13 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
   AstNode *containing_func = NULL;
   AstNode *stmt = doc->ast_root->as.block.first_stmt;
   while (stmt) {
-    if (stmt->type == AST_FUNC &&
-        stmt->as.func_def.fn_name.line <= (unsigned int)(line + 1)) {
-      containing_func = stmt;
+    Token t = get_decl_token(stmt);
+    if (t.line > 0 && t.line <= (unsigned int)(line + 1)) {
+      if (stmt->type == AST_FUNC) {
+        containing_func = stmt;
+      } else {
+        containing_func = NULL;
+      }
     }
     stmt = stmt->next;
   }
@@ -1174,6 +1181,9 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
 
               char *current_abs = absolute_from_uri(uri);
               if (current_abs) {
+                char *last_slash = strrchr(current_abs, '/');
+                if (last_slash)
+                  *last_slash = '\0';
                 const char *resolved =
                     resolve_module_path(&tmp_arena, current_abs, rel_path);
                 if (resolved) {
@@ -2542,6 +2552,9 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
 
                 char *current_abs = absolute_from_uri(uri);
                 if (current_abs) {
+                  char *last_slash = strrchr(current_abs, '/');
+                  if (last_slash)
+                    *last_slash = '\0';
                   const char *resolved =
                       resolve_module_path(&tmp_arena, current_abs, rel_path);
                   if (resolved) {
