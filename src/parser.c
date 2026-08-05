@@ -402,6 +402,12 @@ void sync(ParseCtx *ctx) {
 }
 
 void recover_state(ParseCtx *ctx, ParseState current_state) {
+  if (ctx->curr.type == TOKEN_EOF) {
+    ctx->state_count = 0;
+    ctx->panic_mode = false;
+    return;
+  }
+
   push_state(ctx, current_state);
 
   // Pop states until we are at a safe area
@@ -653,6 +659,14 @@ bool parse_step(ParseCtx *ctx) {
   switch (current_state) {
   case STATE_IN_EXTERN_BLOCK:
   case STATE_GLOBAL: {
+    if (ctx->curr.type == TOKEN_EOF) {
+      if (current_state == STATE_IN_EXTERN_BLOCK) {
+        report_error(ctx, ctx->curr, "Expected '}' at end of extern block");
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+      }
+      break;
+    }
     bool is_extern = (current_state == STATE_IN_EXTERN_BLOCK);
     AstNode *container = ctx->node_stack[ctx->node_count - 1];
     AstNode **target_list = (container->type == AST_EXTERN)
