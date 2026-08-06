@@ -1102,6 +1102,36 @@ bool split_qualified_type(Token qualified, Token *mod_alias,
   return true;
 }
 
+typedef struct {
+  const char *base_name;
+  size_t ident_len;
+  unsigned int target_line;
+  Token type_name;
+  bool found;
+} FindTypeData;
+
+VisitResult find_type_enter(AstVisitor *visitor, AstNode *node) {
+  FindTypeData *data = (FindTypeData *)visitor->user_data;
+
+	// Prevent vars which arent in scope
+  if (node->type == AST_FUNC) {
+    return VISIT_SKIP_CHILDREN;
+  }
+
+  if (node->type == AST_VAR_DECL) {
+    Token vid = node->as.var_decl.id;
+    if (vid.line <= data->target_line && vid.len == data->ident_len &&
+        strncmp(vid.start, data->base_name, data->ident_len) == 0) {
+
+      data->type_name = node->as.var_decl.type.name;
+      data->found = true;
+      return VISIT_ABORT;
+    }
+  }
+
+  return VISIT_CONTINUE;
+}
+
 void handle_completion(yyjson_val *params, yyjson_val *id) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
@@ -1285,138 +1315,29 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
 
         if (!found_type && containing_func->as.func_def.block) {
-          size_t cap = 256;
-          AstNode **stack = malloc(sizeof(AstNode *) * cap);
-          size_t top = 0;
-          stack[top++] = containing_func->as.func_def.block;
+          FindTypeData data = {.base_name = base_name,
+                               .ident_len = ident_len,
+                               .target_line = (unsigned int)(line + 1),
+                               .type_name = {0},
+                               .found = false};
 
-          while (top > 0) {
-            AstNode *node = stack[--top];
-            if (!node)
-              continue;
+          AstVisitor visitor = {0};
+          visitor.user_data = &data;
+          visitor.enter_node = find_type_enter;
 
-            if (node->type == AST_VAR_DECL) {
-              Token vid = node->as.var_decl.id;
-              if (vid.line <= (unsigned int)(line + 1) &&
-                  vid.len == ident_len &&
-                  strncmp(vid.start, base_name, ident_len) == 0) {
-                type_name = node->as.var_decl.type.name;
-                found_type = true;
-                break;
-              }
-            }
-            if (node->next) {
-              if (top >= cap - 1) {
-                size_t new_cap = cap * 2;
-                AstNode **new_stack =
-                    realloc(stack, new_cap * sizeof(AstNode *));
-                if (!new_stack) {
-                  free(stack);
-                  return;
-                }
-                cap = new_cap;
-                stack = new_stack;
-              }
-              stack[top++] = node->next;
-            }
+          jmp_buf panic_env;
+          visitor.panic_env = &panic_env;
 
-            if (node->type == AST_BLOCK && node->as.block.first_stmt) {
-              if (top >= cap - 1) {
-                cap *= 2;
-                stack = realloc(stack, cap * sizeof(AstNode *));
-              }
-              stack[top++] = node->as.block.first_stmt;
-            } else if (node->type == AST_IF) {
-              if (node->as.if_check.elseAct) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.if_check.elseAct;
-              }
-              if (node->as.if_check.action) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.if_check.action;
-              }
-              if (node->as.if_check.check) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.if_check.check;
-              }
-            } else if (node->type == AST_WHILE) {
-              if (node->as.while_loop.action) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.while_loop.action;
-              }
-              if (node->as.while_loop.check) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.while_loop.check;
-              }
-            } else if (node->type == AST_FOR) {
-              if (node->as.for_loop.action) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.for_loop.action;
-              }
-              if (node->as.for_loop.inc) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.for_loop.inc;
-              }
-              if (node->as.for_loop.check) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.for_loop.check;
-              }
-              if (node->as.for_loop.init) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.for_loop.init;
-              }
-            } else if (node->type == AST_SWITCH) {
-              if (node->as.switch_stmt.default_case) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.switch_stmt.default_case;
-              }
-              if (node->as.switch_stmt.cases) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.switch_stmt.cases;
-              }
-              if (node->as.switch_stmt.check) {
-                if (top >= cap - 1) {
-                  cap *= 2;
-                  stack = realloc(stack, cap * sizeof(AstNode *));
-                }
-                stack[top++] = node->as.switch_stmt.check;
-              }
-            }
+          if (setjmp(panic_env) == 0) {
+            ast_traverse(&visitor, containing_func->as.func_def.block);
+          } else {
+            fprintf(stderr, "OOM encountered during type lookup.\n");
           }
-          free(stack);
+
+          if (data.found) {
+            type_name = data.type_name;
+            found_type = true;
+          }
         }
       }
 
