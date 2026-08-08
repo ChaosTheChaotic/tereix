@@ -292,9 +292,13 @@ void format_func_signature(AstNode *func_node, char *buf, size_t size) {
   if (offset >= size)
     offset = size - 1;
 
-  safe_append(buf, size, &offset, " %.*s(",
-              (int)func_node->as.func_def.fn_name.len,
-              func_node->as.func_def.fn_name.start);
+  if (func_node->as.func_def.fn_name.start) {
+    safe_append(buf, size, &offset, " %.*s(",
+                (int)func_node->as.func_def.fn_name.len,
+                func_node->as.func_def.fn_name.start);
+  } else {
+    safe_append(buf, size, &offset, " (");
+  }
 
   AstNode *param = func_node->as.func_def.params;
   while (param && offset < size - 1) {
@@ -303,8 +307,10 @@ void format_func_signature(AstNode *func_node, char *buf, size_t size) {
     if (offset >= size)
       offset = size - 1;
 
-    safe_append(buf, size, &offset, " %.*s", (int)param->as.fn_param.id.len,
-                param->as.fn_param.id.start);
+    if (param->as.fn_param.id.start) {
+      safe_append(buf, size, &offset, " %.*s", (int)param->as.fn_param.id.len,
+                  param->as.fn_param.id.start);
+    }
 
     if (param->next) {
       safe_append(buf, size, &offset, ", ");
@@ -1132,6 +1138,37 @@ VisitResult find_type_enter(AstVisitor *visitor, AstNode *node) {
   return VISIT_CONTINUE;
 }
 
+bool perform_ast_type_lookup(AstNode *containing_func, unsigned int line,
+                             const char *base_name, unsigned int ident_len,
+                             Token *out_type_name) {
+  FindTypeData data = {.base_name = base_name,
+                       .ident_len = ident_len,
+                       .target_line = line + 1,
+                       .type_name = {0},
+                       .found = false};
+
+  AstVisitor visitor = {0};
+  visitor.user_data = &data;
+  visitor.enter_node = find_type_enter;
+
+  jmp_buf panic_env;
+  visitor.panic_env = &panic_env;
+
+  if (setjmp(panic_env) == 0) {
+    ast_traverse(&visitor, containing_func->as.func_def.block);
+  } else {
+    fprintf(stderr, "OOM encountered during type lookup.\n");
+    return false;
+  }
+
+  if (data.found) {
+    *out_type_name = data.type_name;
+    return true;
+  }
+
+  return false;
+}
+
 void handle_completion(yyjson_val *params, yyjson_val *id) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
@@ -1155,8 +1192,6 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
     if (t.line > 0 && t.line <= (unsigned int)(line + 1)) {
       if (stmt->type == AST_FUNC) {
         containing_func = stmt;
-      } else {
-        containing_func = NULL;
       }
     }
     stmt = stmt->next;
@@ -1315,27 +1350,8 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         }
 
         if (!found_type && containing_func->as.func_def.block) {
-          FindTypeData data = {.base_name = base_name,
-                               .ident_len = ident_len,
-                               .target_line = (unsigned int)(line + 1),
-                               .type_name = {0},
-                               .found = false};
-
-          AstVisitor visitor = {0};
-          visitor.user_data = &data;
-          visitor.enter_node = find_type_enter;
-
-          jmp_buf panic_env;
-          visitor.panic_env = &panic_env;
-
-          if (setjmp(panic_env) == 0) {
-            ast_traverse(&visitor, containing_func->as.func_def.block);
-          } else {
-            fprintf(stderr, "OOM encountered during type lookup.\n");
-          }
-
-          if (data.found) {
-            type_name = data.type_name;
+          if (perform_ast_type_lookup(containing_func, line, base_name,
+                                      ident_len, &type_name)) {
             found_type = true;
           }
         }
