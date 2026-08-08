@@ -828,8 +828,9 @@ DataType common_numeric_type(DataType a, DataType b) {
 typedef struct {
   SemCtx *ctx;
   Arena *arena;
-  AstNode *func_stack[64];
-  int func_top;
+  AstNode **func_stack;
+  unsigned int func_top;
+  unsigned int func_cap;
   HashMap exp_map;
 } TCData;
 
@@ -849,6 +850,11 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
   TCData *data = visitor->user_data;
 
   if (n->type == AST_FUNC) {
+    if (data->func_top >= data->func_cap) {
+      data->func_cap = data->func_cap == 0 ? 64 : data->func_cap * 2;
+      data->func_stack =
+          realloc(data->func_stack, data->func_cap * sizeof(AstNode *));
+    }
     data->func_stack[data->func_top++] = n;
   }
 
@@ -1693,6 +1699,8 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
   TCData data = {0};
   data.ctx = ctx;
   data.arena = arena;
+  data.func_cap = 64;
+  data.func_stack = malloc(data.func_cap * sizeof(AstNode *));
   map_init(&data.exp_map, arena, 2048);
 
   AstVisitor visitor = {0};
