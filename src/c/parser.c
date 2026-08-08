@@ -402,7 +402,21 @@ void sync(ParseCtx *ctx) {
 }
 
 void recover_state(ParseCtx *ctx, ParseState current_state) {
-  push_state(ctx, current_state);
+  if (ctx->curr.type == TOKEN_EOF) {
+    ctx->state_count = 0;
+    ctx->panic_mode = false;
+    return;
+  }
+
+  bool is_safe =
+      (current_state == STATE_GLOBAL || current_state == STATE_PARSE_BLOCK ||
+       current_state == STATE_IN_STRUCT_DEF ||
+       current_state == STATE_IN_UNION_DEF ||
+       current_state == STATE_IN_ENUM_DEF ||
+       current_state == STATE_IN_EXTERN_BLOCK);
+  if (!is_safe) {
+    push_state(ctx, current_state);
+  }
 
   // Pop states until we are at a safe area
   while (ctx->state_count > 0) {
@@ -575,10 +589,16 @@ bool is_type(ParseCtx *ctx) {
   tmp_parse.lex = &tmp_lex;
   Token t = ctx->curr;
 
+  if (t.type == TOKEN_EOF) {
+    return false;
+  }
+
   // Skip over any pointers or references at the start
   while (t.type == TOKEN_OP && t.len == 1 &&
          (*t.start == '*' || *t.start == '&')) {
     t = next_token(&tmp_parse);
+    if (t.type == TOKEN_EOF)
+      return false;
   }
 
   if (t.type == TOKEN_KW) {
@@ -596,7 +616,8 @@ bool is_type(ParseCtx *ctx) {
   if (t.type == TOKEN_IDENTIF && t.len == 4 &&
       strncmp(t.start, "self", 4) == 0 && ctx->ag_depth > 0) {
     Token next = peek_token(&tmp_parse);
-    // If next is a dot this is a member access not a type
+    if (next.type == TOKEN_EOF)
+      return false;
     if ((next.type == TOKEN_PUNC || (next.type == TOKEN_OP && next.len == 1)) &&
         *next.start == '.') {
       return false;
@@ -604,13 +625,16 @@ bool is_type(ParseCtx *ctx) {
     return true;
   }
 
-  // Might be a custom type
   if (t.type == TOKEN_IDENTIF && !is_kw(ctx->lex, t.start, t.len)) {
     Token nxt = next_token(&tmp_parse);
+    if (nxt.type == TOKEN_EOF)
+      return false;
 
     // Check for module path
     if (nxt.len == 1 && *nxt.start == '.') {
       Token nxt2 = next_token(&tmp_parse);
+      if (nxt2.type == TOKEN_EOF)
+        return false;
       if (nxt2.type == TOKEN_IDENTIF) {
         nxt = next_token(&tmp_parse);
       } else {
@@ -618,10 +642,11 @@ bool is_type(ParseCtx *ctx) {
       }
     }
 
-    // Check for pointers or references after the base type
     while (nxt.type == TOKEN_OP && nxt.len == 1 &&
            (*nxt.start == '*' || *nxt.start == '&')) {
       nxt = next_token(&tmp_parse);
+      if (nxt.type == TOKEN_EOF)
+        return false;
     }
 
     if (nxt.type == TOKEN_IDENTIF) {
@@ -653,6 +678,14 @@ bool parse_step(ParseCtx *ctx) {
   switch (current_state) {
   case STATE_IN_EXTERN_BLOCK:
   case STATE_GLOBAL: {
+    if (ctx->curr.type == TOKEN_EOF) {
+      if (current_state == STATE_IN_EXTERN_BLOCK) {
+        report_error(ctx, ctx->curr, "Expected '}' at end of extern block");
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+      }
+      break;
+    }
     bool is_extern = (current_state == STATE_IN_EXTERN_BLOCK);
     AstNode *container = ctx->node_stack[ctx->node_count - 1];
     AstNode **target_list = (container->type == AST_EXTERN)
@@ -1071,7 +1104,7 @@ bool parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
     } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
-			// Block expr with no semicolon, treat as val, do nothing
+      // Block expr with no semicolon, treat as val, do nothing
     } else {
       report_error(ctx, ctx->curr, "Expected ';' after expression");
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
@@ -1714,14 +1747,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after if\n");
-
           if_node->as.if_check.elseAct = NULL;
-          pop_node(ctx);
-          pop_node(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
-
-          return false;
+          break;
         }
         break;
       } else if (strncmp(ctx->curr.start, "while", 5) == 0) {
@@ -1739,11 +1768,9 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after while\n");
-
-          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-          push_node(ctx, err_node);
-
-          return false;
+          sync(ctx);
+          recover_state(ctx, current_state);
+          break;
         }
         break;
       } else if (strncmp(ctx->curr.start, "defer", 5) == 0) {
@@ -1814,11 +1841,9 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after for\n");
-
-          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-          push_node(ctx, err_node);
-
-          return false;
+          sync(ctx);
+          recover_state(ctx, current_state);
+          break;
         }
         break;
       } else if (strncmp(ctx->curr.start, "switch", 6) == 0) {
@@ -1836,11 +1861,6 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after switch");
-
-          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-          push_node(ctx, err_node);
-
-          adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
           break;
@@ -1895,6 +1915,11 @@ bool parse_step(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_ASSIGN) {
         adv(ctx);
+        if (ctx->curr.type == TOKEN_EOF ||
+            (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}')) {
+          vnode->as.var_decl.init = NULL;
+          break;
+        }
         push_node(ctx, vnode);
         push_state(ctx, STATE_VAR_INIT_DONE);
         ctx->expect_operand = true;
@@ -1902,6 +1927,9 @@ bool parse_step(ParseCtx *ctx) {
       } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
         adv(ctx);
       } else {
+        if (ctx->curr.type == TOKEN_EOF) {
+          break;
+        }
         report_error(ctx, ctx->curr, "Expected ';' or '=' after variable name");
 
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);

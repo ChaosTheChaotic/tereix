@@ -23,10 +23,6 @@ typedef struct {
   AstNode *use_stmt;
 } ImportRelation;
 
-#define MAX_IMPORT_RELATIONS 1024
-static ImportRelation import_relations[MAX_IMPORT_RELATIONS];
-static int import_relations_count = 0;
-
 void propagate_dirty_state(SemCtx *ctx) {
   bool changed = true;
   while (changed) {
@@ -64,16 +60,31 @@ void propagate_dirty_state(SemCtx *ctx) {
   }
 }
 
-void record_import(Module *mod, Module *parent_mod, AstNode *use_stmt) {
+static ImportRelation *import_relations = NULL;
+static int import_relations_count = 0;
+static int import_relations_cap = 0;
+
+bool record_import(Module *mod, Module *parent_mod, AstNode *use_stmt) {
   for (int i = 0; i < import_relations_count; i++) {
     if (import_relations[i].mod == mod) {
-      return;
+      return true;
     }
   }
-  if (import_relations_count < MAX_IMPORT_RELATIONS) {
-    import_relations[import_relations_count++] =
-        (ImportRelation){mod, parent_mod, use_stmt};
+
+  if (import_relations_count >= import_relations_cap) {
+    int new_cap = import_relations_cap == 0 ? 64 : import_relations_cap * 2;
+    ImportRelation *new_arr =
+        realloc(import_relations, new_cap * sizeof(ImportRelation));
+    if (!new_arr) {
+      return false;
+    }
+    import_relations = new_arr;
+    import_relations_cap = new_cap;
   }
+
+  import_relations[import_relations_count++] =
+      (ImportRelation){mod, parent_mod, use_stmt};
+  return true;
 }
 
 ImportRelation *get_import_relation(Module *mod) {
@@ -366,7 +377,11 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
 
               map_set(&current_mod->imported_mods, import_key, key_len,
                       imported_mod);
-              record_import(imported_mod, current_mod, stmt);
+              if (!record_import(imported_mod, current_mod, stmt)) {
+                sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
+                           "OOM while recording import");
+                return false;
+              }
             }
           }
         }
@@ -381,13 +396,23 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
 bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
   Arena *alloc_arena = mod->mod_arena ? mod->mod_arena : arena;
 
-  AstNode *stack[1024];
-  int top = 0;
+  size_t stack_cap = 1024;
+  AstNode **stack = malloc(stack_cap * sizeof(AstNode *));
+  unsigned int top = 0;
 
   AstNode *stmt = mod->ast_root->as.block.first_stmt;
   while (stmt) {
-    if (top < 1024)
-      stack[top++] = stmt;
+    if (top >= stack_cap) {
+      size_t new_cap = stack_cap * 2;
+      AstNode **new_stack = realloc(stack, new_cap * sizeof(AstNode *));
+      if (!new_stack) {
+        free(stack);
+        return false;
+      }
+      stack = new_stack;
+      stack_cap = new_cap;
+    }
+    stack[top++] = stmt;
     stmt = stmt->next;
   }
 
@@ -397,8 +422,17 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
     if (curr->type == AST_EXTERN && curr->as.extern_block.contents) {
       AstNode *inner = curr->as.extern_block.contents;
       while (inner) {
-        if (top < 1024)
-          stack[top++] = inner;
+        if (top >= stack_cap) {
+          size_t new_cap = stack_cap * 2;
+          AstNode **new_stack = realloc(stack, new_cap * sizeof(AstNode *));
+          if (!new_stack) {
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_cap;
+        }
+        stack[top++] = inner;
         inner = inner->next;
       }
       continue;
@@ -464,12 +498,23 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
     if (is_container && contents) {
       AstNode *inner = contents;
       while (inner) {
-        if (top < 1024)
-          stack[top++] = inner;
+        if (top >= stack_cap) {
+          size_t new_cap = stack_cap * 2;
+          AstNode **new_stack = realloc(stack, new_cap * sizeof(AstNode *));
+          if (!new_stack) {
+            free(stack);
+            return false;
+          }
+          stack = new_stack;
+          stack_cap = new_cap;
+        }
+        stack[top++] = inner;
         inner = inner->next;
       }
     }
   }
+
+  free(stack);
   return true;
 }
 
@@ -767,12 +812,17 @@ bool is_numeric_type(DataType t) {
 long long parse_num_lit(AstNode *node) {
   if (node->type != AST_NUM_LIT)
     return 0;
+
   const char *start = node->as.num_lit.val.start;
   size_t len = node->as.num_lit.val.len;
-  char buf[64] = {0};
-  size_t copy = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
-  memcpy(buf, start, copy);
-  return strtoll(buf, NULL, 0);
+
+  char *buf = malloc(len + 1);
+  memcpy(buf, start, len);
+  buf[len] = '\0';
+
+  long long val = strtoll(buf, NULL, 0);
+  free(buf);
+  return val;
 }
 
 bool fits_in_type(long long val, DataType t) {
@@ -822,8 +872,9 @@ DataType common_numeric_type(DataType a, DataType b) {
 typedef struct {
   SemCtx *ctx;
   Arena *arena;
-  AstNode *func_stack[64];
-  int func_top;
+  AstNode **func_stack;
+  unsigned int func_top;
+  unsigned int func_cap;
   HashMap exp_map;
 } TCData;
 
@@ -843,6 +894,20 @@ VisitResult tc_enter(AstVisitor *visitor, AstNode *n) {
   TCData *data = visitor->user_data;
 
   if (n->type == AST_FUNC) {
+    if (data->func_top >= data->func_cap) {
+      size_t new_cap = data->func_cap == 0 ? 64 : data->func_cap * 2;
+      AstNode **new_stack =
+          realloc(data->func_stack, new_cap * sizeof(AstNode *));
+      if (!new_stack) {
+        if (visitor->panic_env) {
+          longjmp(*visitor->panic_env, 1);
+        } else {
+          abort();
+        }
+      }
+      data->func_stack = new_stack;
+      data->func_cap = new_cap;
+    }
     data->func_stack[data->func_top++] = n;
   }
 
@@ -1099,11 +1164,11 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       if (is_float) {
         n->eval_type = create_basic_type("f32");
       } else {
-        char buf[64] = {0};
-        int copy_len = len < 63 ? len : 63;
-        strncpy(buf, val_str, copy_len);
-
+        char *buf = malloc(len + 1);
+        strncpy(buf, val_str, len);
+        buf[len] = '\0';
         long long val = strtoll(buf, NULL, 0);
+        free(buf);
 
         if (val >= -128 && val <= 127)
           n->eval_type = create_basic_type("i8");
@@ -1687,6 +1752,8 @@ void type_check_ast(Arena *arena, AstNode *root, SemCtx *ctx) {
   TCData data = {0};
   data.ctx = ctx;
   data.arena = arena;
+  data.func_cap = 64;
+  data.func_stack = malloc(data.func_cap * sizeof(AstNode *));
   map_init(&data.exp_map, arena, 2048);
 
   AstVisitor visitor = {0};
