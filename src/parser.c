@@ -1096,7 +1096,7 @@ bool parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
     } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
-			// Block expr with no semicolon, treat as val, do nothing
+      // Block expr with no semicolon, treat as val, do nothing
     } else {
       report_error(ctx, ctx->curr, "Expected ';' after expression");
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
@@ -1739,14 +1739,10 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after if\n");
-
           if_node->as.if_check.elseAct = NULL;
-          pop_node(ctx);
-          pop_node(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
-
-          return false;
+          break;
         }
         break;
       } else if (strncmp(ctx->curr.start, "while", 5) == 0) {
@@ -1764,11 +1760,9 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after while\n");
-
-          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-          push_node(ctx, err_node);
-
-          return false;
+          sync(ctx);
+          recover_state(ctx, current_state);
+          break;
         }
         break;
       } else if (strncmp(ctx->curr.start, "defer", 5) == 0) {
@@ -1839,11 +1833,9 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after for\n");
-
-          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-          push_node(ctx, err_node);
-
-          return false;
+          sync(ctx);
+          recover_state(ctx, current_state);
+          break;
         }
         break;
       } else if (strncmp(ctx->curr.start, "switch", 6) == 0) {
@@ -1861,11 +1853,6 @@ bool parse_step(ParseCtx *ctx) {
           adv(ctx);
         } else {
           report_error(ctx, ctx->curr, "Expected '(' after switch");
-
-          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-          push_node(ctx, err_node);
-
-          adv(ctx);
           sync(ctx);
           recover_state(ctx, current_state);
           break;
