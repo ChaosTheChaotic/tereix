@@ -581,10 +581,16 @@ bool is_type(ParseCtx *ctx) {
   tmp_parse.lex = &tmp_lex;
   Token t = ctx->curr;
 
+  if (t.type == TOKEN_EOF) {
+    return false;
+  }
+
   // Skip over any pointers or references at the start
   while (t.type == TOKEN_OP && t.len == 1 &&
          (*t.start == '*' || *t.start == '&')) {
     t = next_token(&tmp_parse);
+    if (t.type == TOKEN_EOF)
+      return false;
   }
 
   if (t.type == TOKEN_KW) {
@@ -602,7 +608,8 @@ bool is_type(ParseCtx *ctx) {
   if (t.type == TOKEN_IDENTIF && t.len == 4 &&
       strncmp(t.start, "self", 4) == 0 && ctx->ag_depth > 0) {
     Token next = peek_token(&tmp_parse);
-    // If next is a dot this is a member access not a type
+    if (next.type == TOKEN_EOF)
+      return false;
     if ((next.type == TOKEN_PUNC || (next.type == TOKEN_OP && next.len == 1)) &&
         *next.start == '.') {
       return false;
@@ -610,13 +617,16 @@ bool is_type(ParseCtx *ctx) {
     return true;
   }
 
-  // Might be a custom type
   if (t.type == TOKEN_IDENTIF && !is_kw(ctx->lex, t.start, t.len)) {
     Token nxt = next_token(&tmp_parse);
+    if (nxt.type == TOKEN_EOF)
+      return false;
 
     // Check for module path
     if (nxt.len == 1 && *nxt.start == '.') {
       Token nxt2 = next_token(&tmp_parse);
+      if (nxt2.type == TOKEN_EOF)
+        return false;
       if (nxt2.type == TOKEN_IDENTIF) {
         nxt = next_token(&tmp_parse);
       } else {
@@ -624,10 +634,11 @@ bool is_type(ParseCtx *ctx) {
       }
     }
 
-    // Check for pointers or references after the base type
     while (nxt.type == TOKEN_OP && nxt.len == 1 &&
            (*nxt.start == '*' || *nxt.start == '&')) {
       nxt = next_token(&tmp_parse);
+      if (nxt.type == TOKEN_EOF)
+        return false;
     }
 
     if (nxt.type == TOKEN_IDENTIF) {
@@ -1909,6 +1920,11 @@ bool parse_step(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_ASSIGN) {
         adv(ctx);
+        if (ctx->curr.type == TOKEN_EOF ||
+            (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}')) {
+          vnode->as.var_decl.init = NULL;
+          break;
+        }
         push_node(ctx, vnode);
         push_state(ctx, STATE_VAR_INIT_DONE);
         ctx->expect_operand = true;
@@ -1916,6 +1932,9 @@ bool parse_step(ParseCtx *ctx) {
       } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
         adv(ctx);
       } else {
+        if (ctx->curr.type == TOKEN_EOF) {
+          break;
+        }
         report_error(ctx, ctx->curr, "Expected ';' or '=' after variable name");
 
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
