@@ -23,10 +23,6 @@ typedef struct {
   AstNode *use_stmt;
 } ImportRelation;
 
-#define MAX_IMPORT_RELATIONS 1024
-static ImportRelation import_relations[MAX_IMPORT_RELATIONS];
-static int import_relations_count = 0;
-
 void propagate_dirty_state(SemCtx *ctx) {
   bool changed = true;
   while (changed) {
@@ -64,16 +60,26 @@ void propagate_dirty_state(SemCtx *ctx) {
   }
 }
 
+static ImportRelation *import_relations = NULL;
+static int import_relations_count = 0;
+static int import_relations_cap = 0;
+
 void record_import(Module *mod, Module *parent_mod, AstNode *use_stmt) {
   for (int i = 0; i < import_relations_count; i++) {
     if (import_relations[i].mod == mod) {
       return;
     }
   }
-  if (import_relations_count < MAX_IMPORT_RELATIONS) {
-    import_relations[import_relations_count++] =
-        (ImportRelation){mod, parent_mod, use_stmt};
+
+  if (import_relations_count >= import_relations_cap) {
+    import_relations_cap =
+        import_relations_cap == 0 ? 64 : import_relations_cap * 2;
+    import_relations = realloc(import_relations,
+                               import_relations_cap * sizeof(ImportRelation));
   }
+
+  import_relations[import_relations_count++] =
+      (ImportRelation){mod, parent_mod, use_stmt};
 }
 
 ImportRelation *get_import_relation(Module *mod) {
