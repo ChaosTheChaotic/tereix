@@ -1145,6 +1145,8 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
   AstNode *curr_func =
       (data->func_top > 0) ? data->func_stack[data->func_top - 1] : NULL;
 
+  DataType default_type = create_basic_type("any");
+
   switch (n->type) {
   case AST_NUM_LIT: {
     if (expected) {
@@ -1152,7 +1154,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     } else {
       const char *val_str = n->as.num_lit.val.start;
       int len = n->as.num_lit.val.len;
-
       bool is_float = false;
       for (int i = 0; i < len; i++) {
         if (val_str[i] == '.') {
@@ -1160,7 +1161,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
           break;
         }
       }
-
       if (is_float) {
         n->eval_type = create_basic_type("f32");
       } else {
@@ -1169,7 +1169,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
         buf[len] = '\0';
         long long val = strtoll(buf, NULL, 0);
         free(buf);
-
         if (val >= -128 && val <= 127)
           n->eval_type = create_basic_type("i8");
         else if (val >= -32768 && val <= 32767)
@@ -1197,7 +1196,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
   case AST_IDENTIF:
     if (n->as.identif.res_sm) {
       Sym *sym = n->as.identif.res_sm;
-
       if (sym->is_imported_mod) {
         n->eval_type = create_basic_type("module");
         n->eval_type.name = sym->name;
@@ -1213,7 +1211,11 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
         n->eval_type = create_basic_type("");
         n->eval_type.name = sym->name;
         n->eval_type.is_custom = true;
+      } else {
+        n->eval_type = default_type;
       }
+    } else {
+      n->eval_type = default_type;
     }
     break;
   case AST_VAR_DECL:
@@ -1226,20 +1228,21 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
                    n->as.var_decl.id.len, n->as.var_decl.id.start);
       }
     }
+    n->eval_type = n->as.var_decl.type;
     break;
   case AST_PARAM:
     check_custom_type(n->as.fn_param.type, n->as.fn_param.type.name, ctx);
+    n->eval_type = n->as.fn_param.type;
     break;
   case AST_BINOP: {
-    if (!n->as.binop.left || !n->as.binop.right)
+    if (!n->as.binop.left || !n->as.binop.right) {
+      n->eval_type = default_type;
       break;
-
+    }
     AstNode *left = n->as.binop.left;
     AstNode *right = n->as.binop.right;
-
     DataType left_t = left->eval_type;
     DataType right_t = right->eval_type;
-
     bool left_lit = (left->type == AST_NUM_LIT);
     bool right_lit = (right->type == AST_NUM_LIT);
 
@@ -1337,7 +1340,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
                          strncmp(right_t.name.start, "null", 4) == 0);
       bool left_ptr = (left_t.ptr_depth > 0 || left_t.array_dimens > 0);
       bool right_ptr = (right_t.ptr_depth > 0 || right_t.array_dimens > 0);
-
       bool valid_compare = false;
       if (left_null && right_null) {
         valid_compare = true;
@@ -1356,7 +1358,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
           valid_compare = true;
         }
       }
-
       if (!valid_compare) {
         sem_report(ctx, DIAG_ERROR, op,
                    "Cannot compare non‑numeric types '%.*s' and '%.*s'",
@@ -1373,7 +1374,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
                           (right_t.name.len == 3 &&
                            strncmp(right_t.name.start, "str", 3) == 0 &&
                            right_t.ptr_depth == 0);
-
       bool is_ptr_arithmetic = false;
       if ((op.len == 1 && (op.start[0] == '+' || op.start[0] == '-')) ||
           (op.len == 2 && ((op.start[0] == '+' && op.start[1] == '=') ||
@@ -1383,7 +1383,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
           is_ptr_arithmetic = true;
         }
       }
-
       if (!is_ptr_arithmetic && !is_type_compatible(left_t, right_t, false) &&
           !is_type_compatible(right_t, left_t, false)) {
         sem_report(ctx, DIAG_WARNING, op,
@@ -1391,7 +1390,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
                    left_t.name.len, left_t.name.start, right_t.name.len,
                    right_t.name.start, op.len, op.start);
       }
-
       if (expected) {
         n->eval_type = *expected;
       } else {
@@ -1411,6 +1409,10 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     break;
   }
   case AST_CAST:
+    if (!n->as.cast.op) {
+      n->eval_type = default_type;
+      break;
+    }
     if (!is_type_compatible(n->as.cast.target, n->as.cast.op->eval_type,
                             true)) {
       sem_report(ctx, DIAG_ERROR, n->as.cast.target.name,
@@ -1439,7 +1441,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     bool is_type_init = false;
     DataType type_init_type = {0};
 
-    // Check if method access
     if (caller) {
       if (caller->type == AST_IDENTIF && caller->as.identif.res_sm &&
           caller->as.identif.res_sm->decl_node) {
@@ -1456,15 +1457,13 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       }
     }
 
-    // Check for a valid func or type init
     bool is_function = func_decl && func_decl->type == AST_FUNC;
 
     if (is_function) {
-      // Method call check
       bool is_method = false;
       AstNode *receiver = NULL;
       AstNode *first_param = func_decl->as.func_def.params;
-      if (caller->type == AST_MEMBER && first_param &&
+      if (caller && caller->type == AST_MEMBER && first_param &&
           first_param->as.fn_param.type.is_self) {
         is_method = true;
         receiver = caller->as.member.base;
@@ -1472,7 +1471,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
 
       n->eval_type = func_decl->as.func_def.ret_type;
 
-      // Count params and explicit args
       int explicit_arg_count = 0;
       for (AstNode *a = n->as.func_call.args; a; a = a->next)
         explicit_arg_count++;
@@ -1483,68 +1481,79 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       int total_arg_count = explicit_arg_count + (is_method ? 1 : 0);
 
       if (total_arg_count != param_count) {
-        Token err_tok;
-        if (is_method)
-          err_tok = caller->as.member.name;
-        else
+        Token err_tok = {0};
+        if (caller) {
+          if (caller->type == AST_MEMBER)
+            err_tok = caller->as.member.name;
+          else if (caller->type == AST_IDENTIF)
+            err_tok = caller->as.identif.val;
+          else
+            err_tok = get_expr_token(caller);
+        }
+        if (err_tok.len == 0 && caller)
           err_tok = get_expr_token(caller);
-        if (err_tok.len == 0)
-          err_tok = get_expr_token(caller);
+        if (err_tok.len == 0) {
+          err_tok.start = "function";
+          err_tok.len = 8;
+          err_tok.type = TOKEN_IDENTIF;
+        }
         sem_report(ctx, DIAG_ERROR, err_tok,
                    "Function '%.*s' expects %d argument(s), got %d",
                    err_tok.len, err_tok.start, param_count, total_arg_count);
       } else {
         AstNode *param = func_decl->as.func_def.params;
 
-        // Handle self
         if (is_method) {
-          DataType expected_t = param->as.fn_param.type;
-          DataType actual_t = receiver->eval_type;
+          if (receiver) {
+            DataType expected_t = param->as.fn_param.type;
+            DataType actual_t = receiver->eval_type;
 
-          bool name_match = (expected_t.name.len == actual_t.name.len &&
-                             strncmp(expected_t.name.start, actual_t.name.start,
-                                     expected_t.name.len) == 0);
-          if (!name_match) {
-            Token err_tok = get_expr_token(receiver);
-            sem_report(
-                ctx, DIAG_ERROR, err_tok,
-                "Self argument type mismatch: expected '%.*s', got '%.*s'",
-                (int)expected_t.name.len, expected_t.name.start,
-                (int)actual_t.name.len, actual_t.name.start);
+            bool name_match =
+                (expected_t.name.len == actual_t.name.len &&
+                 strncmp(expected_t.name.start, actual_t.name.start,
+                         expected_t.name.len) == 0);
+            if (!name_match) {
+              Token err_tok = get_expr_token(receiver);
+              sem_report(
+                  ctx, DIAG_ERROR, err_tok,
+                  "Self argument type mismatch: expected '%.*s', got '%.*s'",
+                  (int)expected_t.name.len, expected_t.name.start,
+                  (int)actual_t.name.len, actual_t.name.start);
+            } else {
+              if (expected_t.is_mut && !actual_t.is_mut) {
+                Token err_tok = get_expr_token(receiver);
+                sem_report(ctx, DIAG_ERROR, err_tok,
+                           "Cannot borrow immutable value as mutable for "
+                           "method '%.*s'",
+                           (int)caller->as.member.name.len,
+                           caller->as.member.name.start);
+              }
+
+              if (!(actual_t.ptr_depth == expected_t.ptr_depth ||
+                    (expected_t.ptr_depth > 0 &&
+                     actual_t.ptr_depth == expected_t.ptr_depth - 1))) {
+                Token err_tok = get_expr_token(receiver);
+                sem_report(
+                    ctx, DIAG_ERROR, err_tok,
+                    "Self argument pointer depth mismatch: expected %d, got %d",
+                    expected_t.ptr_depth, actual_t.ptr_depth);
+              }
+
+              if (expected_t.array_dimens != 0 || actual_t.array_dimens != 0) {
+                sem_report(ctx, DIAG_ERROR, get_expr_token(receiver),
+                           "Self argument cannot have array dimensions");
+              }
+            }
+            param = param->next;
           } else {
-            if (expected_t.is_mut && !actual_t.is_mut) {
-              Token err_tok = get_expr_token(receiver);
-              sem_report(
-                  ctx, DIAG_ERROR, err_tok,
-                  "Cannot borrow immutable value as mutable for method '%.*s'",
-                  (int)caller->as.member.name.len,
-                  caller->as.member.name.start);
-            }
-
-            if (!(actual_t.ptr_depth == expected_t.ptr_depth ||
-                  (expected_t.ptr_depth > 0 &&
-                   actual_t.ptr_depth == expected_t.ptr_depth - 1))) {
-              Token err_tok = get_expr_token(receiver);
-              sem_report(
-                  ctx, DIAG_ERROR, err_tok,
-                  "Self argument pointer depth mismatch: expected %d, got %d",
-                  expected_t.ptr_depth, actual_t.ptr_depth);
-            }
-
-            if (expected_t.array_dimens != 0 || actual_t.array_dimens != 0) {
-              sem_report(ctx, DIAG_ERROR, get_expr_token(receiver),
-                         "Self argument cannot have array dimensions");
-            }
+            // Recv missing
           }
-          param = param->next; // skip self parameter
         }
 
-        // Check args against other params
         AstNode *arg = n->as.func_call.args;
         while (param && arg) {
           DataType expected_t = param->as.fn_param.type;
           DataType actual_t = arg->eval_type;
-          // Allow numeric literals if they fit in expected type
           if (arg->type == AST_NUM_LIT && is_numeric_type(expected_t)) {
             long long val = parse_num_lit(arg);
             if (fits_in_type(val, expected_t)) {
@@ -1568,26 +1577,32 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     } else if (is_type_init) {
       n->eval_type = type_init_type;
     } else {
-      Token err_tok;
-      if (caller->type == AST_MEMBER) {
-        err_tok = caller->as.member.name;
-      } else if (caller->type == AST_IDENTIF) {
-        err_tok = caller->as.identif.val;
-      } else {
-        err_tok = get_expr_token(caller);
+      // Not a function and not a type
+      Token err_tok = {0};
+      if (caller) {
+        if (caller->type == AST_MEMBER)
+          err_tok = caller->as.member.name;
+        else if (caller->type == AST_IDENTIF)
+          err_tok = caller->as.identif.val;
+        else
+          err_tok = get_expr_token(caller);
       }
-      if (err_tok.len == 0)
+      if (err_tok.len == 0 && caller)
         err_tok = get_expr_token(caller);
+      if (err_tok.len == 0) {
+        err_tok.start = "call";
+        err_tok.len = 4;
+        err_tok.type = TOKEN_IDENTIF;
+      }
 
       if (func_decl) {
-        // It exists but is not a function
         sem_report(ctx, DIAG_ERROR, err_tok, "Cannot call non-function '%.*s'",
                    err_tok.len, err_tok.start);
       } else {
         sem_report(ctx, DIAG_ERROR, err_tok, "Undefined function '%.*s'",
                    err_tok.len, err_tok.start);
       }
-      n->eval_type = create_basic_type("any");
+      n->eval_type = default_type;
     }
     break;
   }
@@ -1597,6 +1612,8 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     } else if (n->as.array_lit.elements) {
       n->eval_type = n->as.array_lit.elements->eval_type;
       n->eval_type.array_dimens++;
+    } else {
+      n->eval_type = default_type;
     }
     break;
   case AST_BLOCK: {
@@ -1622,7 +1639,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     if (n->as.index.base) {
       DataType base_type = n->as.index.base->eval_type;
       n->eval_type = base_type;
-
       if (base_type.array_dimens > 0) {
         n->eval_type.array_dimens--;
       } else if (base_type.ptr_depth > 0) {
@@ -1636,7 +1652,6 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
         char_type.is_threadlocal = base_type.is_threadlocal;
         n->eval_type = char_type;
       }
-
       if (n->as.index.index) {
         DataType idx_type = n->as.index.index->eval_type;
         if (!is_numeric_type(idx_type)) {
@@ -1645,38 +1660,43 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
                      idx_type.name.len, idx_type.name.start);
         }
       }
+    } else {
+      n->eval_type = default_type;
     }
     break;
   case AST_ADDR_OF:
     if (n->as.unop.operand) {
       n->eval_type = n->as.unop.operand->eval_type;
       n->eval_type.ptr_depth++;
+    } else {
+      n->eval_type = default_type;
     }
     break;
   case AST_DEREF:
     if (n->as.unop.operand) {
       DataType base_type = n->as.unop.operand->eval_type;
-
       if (base_type.ptr_depth == 0 && base_type.array_dimens == 0 &&
           base_type.name.len == 3 &&
           strncmp(base_type.name.start, "str", 3) == 0) {
-
         DataType char_type = create_basic_type("char");
         char_type.is_mut = base_type.is_mut;
         char_type.is_static = base_type.is_static;
         char_type.is_extern = base_type.is_extern;
         char_type.is_threadlocal = base_type.is_threadlocal;
         n->eval_type = char_type;
-
       } else {
         n->eval_type = base_type;
         n->eval_type.ptr_depth--;
       }
+    } else {
+      n->eval_type = default_type;
     }
     break;
   case AST_UOP:
     if (n->as.unop.operand) {
       n->eval_type = n->as.unop.operand->eval_type;
+    } else {
+      n->eval_type = default_type;
     }
     Token op_tok = n->as.unop.op;
     if (op_tok.len == 2 && (strncmp(op_tok.start, "++", 2) == 0 ||
@@ -1698,8 +1718,7 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
         n->as.member.type = base_t.name;
       }
 
-      // Default eval type fallback
-      n->eval_type = create_basic_type("any");
+      n->eval_type = default_type;
 
       AstNode *decl = resolve_member_decl(ctx, n);
 
@@ -1708,10 +1727,8 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
           n->eval_type = decl->as.var_decl.type;
         } else if (decl->type == AST_FUNC) {
           n->eval_type = decl->as.func_def.ret_type;
-        }
-        // Assign types when acessing symbols
-        else if (decl->type == AST_STRUCT || decl->type == AST_UNION ||
-                 decl->type == AST_ENUM) {
+        } else if (decl->type == AST_STRUCT || decl->type == AST_UNION ||
+                   decl->type == AST_ENUM) {
           n->eval_type = create_basic_type("");
           n->eval_type.name =
               (decl->type == AST_STRUCT)  ? decl->as.struct_def.structn
@@ -1727,6 +1744,8 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       }
 
       n->eval_type.is_mut = base_t.is_mut;
+    } else {
+      n->eval_type = default_type;
     }
     break;
   }
@@ -1734,9 +1753,10 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
     n->eval_type = create_basic_type("size");
     break;
   case AST_ERROR:
-    n->eval_type = create_basic_type("any");
+    n->eval_type = default_type;
     break;
   default:
+    n->eval_type = default_type;
     break;
   }
 
