@@ -408,7 +408,15 @@ void recover_state(ParseCtx *ctx, ParseState current_state) {
     return;
   }
 
-  push_state(ctx, current_state);
+  bool is_safe =
+      (current_state == STATE_GLOBAL || current_state == STATE_PARSE_BLOCK ||
+       current_state == STATE_IN_STRUCT_DEF ||
+       current_state == STATE_IN_UNION_DEF ||
+       current_state == STATE_IN_ENUM_DEF ||
+       current_state == STATE_IN_EXTERN_BLOCK);
+  if (!is_safe) {
+    push_state(ctx, current_state);
+  }
 
   // Pop states until we are at a safe area
   while (ctx->state_count > 0) {
