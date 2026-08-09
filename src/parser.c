@@ -2960,6 +2960,7 @@ bool parse_step(ParseCtx *ctx) {
 
       top->as.var_decl.init = NULL;
       pop_node(ctx);
+      pop_node(ctx);
     } else {
       AstNode *init_expr = pop_node(ctx);
       AstNode *var_node = ctx->node_stack[ctx->node_count - 1];
