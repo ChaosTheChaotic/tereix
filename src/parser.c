@@ -392,7 +392,6 @@ void sync(ParseCtx *ctx) {
     }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}') {
-      adv(ctx);
       ctx->panic_mode = false;
       return;
     }
