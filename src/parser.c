@@ -2981,29 +2981,32 @@ bool parse_step(ParseCtx *ctx) {
   }
   case STATE_VAR_INIT_DONE: {
     AstNode *top = ctx->node_stack[ctx->node_count - 1];
+    AstNode *var_node = NULL;
+
     if (top->type == AST_VAR_DECL) {
       report_error(ctx, ctx->curr,
                    "Expected expression after '=' in variable declaration");
 
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-      push_node(ctx, err_node);
+      var_node = top;
 
-      top->as.var_decl.init = NULL;
+      var_node->as.var_decl.init = err_node;
       pop_node(ctx);
-      pop_node(ctx);
+
     } else {
       AstNode *init_expr = pop_node(ctx);
-      AstNode *var_node = ctx->node_stack[ctx->node_count - 1];
-      var_node->as.var_decl.init = init_expr;
+      var_node = ctx->node_stack[ctx->node_count - 1];
+
+      if (var_node->type == AST_VAR_DECL) {
+        var_node->as.var_decl.init = init_expr;
+      }
       pop_node(ctx);
     }
+
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected ';' after variable declaration");
-
-      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-      push_node(ctx, err_node);
 
       adv(ctx);
       sync(ctx);
