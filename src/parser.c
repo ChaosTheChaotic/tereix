@@ -442,6 +442,12 @@ void recover_state(ParseCtx *ctx, ParseState current_state) {
   ctx->panic_mode = false;
 }
 
+static inline void parse_err(ParseCtx *ctx, ParseState current_state) {
+  adv(ctx);
+  sync(ctx);
+  recover_state(ctx, current_state);
+}
+
 void push_node(ParseCtx *ctx, AstNode *node) {
   if (ctx->node_count >= ctx->node_cap) {
     size_t new_cap = (ctx->node_cap == 0) ? 32 : ctx->node_cap * 2;
@@ -736,9 +742,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         push_node(ctx, snode);
@@ -769,9 +773,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         push_node(ctx, unode);
@@ -793,9 +795,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         push_node(ctx, enode);
@@ -827,9 +827,7 @@ bool parse_step(ParseCtx *ctx) {
               AstNode *err_node = new_node(ctx->arena, AST_ERROR);
               push_node(ctx, err_node);
 
-              adv(ctx);
-              sync(ctx);
-              recover_state(ctx, current_state);
+              parse_err(ctx, current_state);
               break;
             }
           }
@@ -850,9 +848,7 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            adv(ctx);
-            sync(ctx);
-            recover_state(ctx, current_state);
+            parse_err(ctx, current_state);
             break;
           }
           push_state(ctx, current_state);
@@ -864,9 +860,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
       }
@@ -882,9 +876,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
       Token name = ctx->curr;
@@ -924,9 +916,7 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            adv(ctx);
-            sync(ctx);
-            recover_state(ctx, current_state);
+            parse_err(ctx, current_state);
             break;
           }
           DataType p_type = parse_type(ctx);
@@ -968,9 +958,7 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            adv(ctx);
-            sync(ctx);
-            recover_state(ctx, current_state);
+            parse_err(ctx, current_state);
             break;
           }
 
@@ -1028,9 +1016,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         AstNode *vnode = new_node(ctx->arena, AST_VAR_DECL);
@@ -1066,9 +1052,7 @@ bool parse_step(ParseCtx *ctx) {
     AstNode *err_node = new_node(ctx->arena, AST_ERROR);
     push_node(ctx, err_node);
 
-    adv(ctx);
-    sync(ctx);
-    recover_state(ctx, current_state);
+    parse_err(ctx, current_state);
     break;
   }
   case STATE_EXPR_STMT_DONE: {
@@ -1089,9 +1073,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
 
@@ -1104,9 +1086,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
     }
     break;
   }
@@ -1189,9 +1169,7 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            adv(ctx);
-            sync(ctx);
-            recover_state(ctx, current_state);
+            parse_err(ctx, current_state);
             break;
           }
         }
@@ -1221,9 +1199,7 @@ bool parse_step(ParseCtx *ctx) {
         report_error(ctx, ctx->curr, "Unexpected block in expression");
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
       adv(ctx);
@@ -1250,9 +1226,7 @@ bool parse_step(ParseCtx *ctx) {
         report_error(ctx, ctx->curr, "Unexpected sizeof in expression");
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
 
@@ -1279,9 +1253,7 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            adv(ctx);
-            sync(ctx);
-            recover_state(ctx, current_state);
+            parse_err(ctx, current_state);
             break;
           }
         } else {
@@ -1300,9 +1272,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
     }
@@ -1316,9 +1286,7 @@ bool parse_step(ParseCtx *ctx) {
         report_error(ctx, ctx->curr, "Unexpected token in expression");
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
 
@@ -1396,9 +1364,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
       }
@@ -1474,9 +1440,7 @@ bool parse_step(ParseCtx *ctx) {
     AstNode *err_node = new_node(ctx->arena, AST_ERROR);
     push_node(ctx, err_node);
 
-    adv(ctx);
-    sync(ctx);
-    recover_state(ctx, current_state);
+    parse_err(ctx, current_state);
     break;
   }
 
@@ -1496,9 +1460,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
     }
     break;
   }
@@ -1526,9 +1488,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -1560,9 +1520,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -1583,9 +1541,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
 
@@ -1631,9 +1587,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     ctx->expect_operand = true;
@@ -1665,9 +1619,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -1748,9 +1700,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         append_stmt(&current_block->as.block.first_stmt, local_type);
@@ -1931,9 +1881,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
       Token name = ctx->curr;
@@ -1961,9 +1909,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
       break;
@@ -2000,9 +1946,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -2022,9 +1966,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -2077,9 +2019,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
       Token name = ctx->curr;
@@ -2163,9 +2103,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -2184,9 +2122,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
 
@@ -2200,9 +2136,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -2272,9 +2206,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
@@ -2373,9 +2305,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -2420,9 +2350,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         AstNode **target_list = (parent->type == AST_STRUCT)
@@ -2444,9 +2372,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
 
@@ -2484,9 +2410,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     Token name = ctx->curr;
@@ -2524,9 +2448,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         DataType p_type = parse_type(ctx);
@@ -2560,9 +2482,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
 
@@ -2624,9 +2544,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
       AstNode *field_node = new_node(ctx->arena, AST_VAR_DECL);
@@ -2680,9 +2598,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         // Append to enum contents
@@ -2729,9 +2645,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
 
@@ -2753,9 +2667,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
 
@@ -2793,9 +2705,7 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            adv(ctx);
-            sync(ctx);
-            recover_state(ctx, current_state);
+            parse_err(ctx, current_state);
             break;
           }
           DataType p_type = parse_type(ctx);
@@ -2827,9 +2737,7 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            adv(ctx);
-            sync(ctx);
-            recover_state(ctx, current_state);
+            parse_err(ctx, current_state);
             break;
           }
 
@@ -2879,9 +2787,7 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        adv(ctx);
-        sync(ctx);
-        recover_state(ctx, current_state);
+        parse_err(ctx, current_state);
         break;
       }
     }
@@ -2892,9 +2798,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
 
@@ -2972,9 +2876,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -3008,9 +2910,7 @@ bool parse_step(ParseCtx *ctx) {
     } else {
       report_error(ctx, ctx->curr, "Expected ';' after variable declaration");
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -3049,9 +2949,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
 
@@ -3089,9 +2987,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
 
@@ -3103,9 +2999,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
@@ -3131,9 +3025,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
 
@@ -3173,9 +3065,7 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          adv(ctx);
-          sync(ctx);
-          recover_state(ctx, current_state);
+          parse_err(ctx, current_state);
           break;
         }
         break;
@@ -3187,9 +3077,7 @@ bool parse_step(ParseCtx *ctx) {
     AstNode *err_node = new_node(ctx->arena, AST_ERROR);
     push_node(ctx, err_node);
 
-    adv(ctx);
-    sync(ctx);
-    recover_state(ctx, current_state);
+    parse_err(ctx, current_state);
     break;
   }
 
@@ -3206,9 +3094,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
 
@@ -3223,9 +3109,7 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      adv(ctx);
-      sync(ctx);
-      recover_state(ctx, current_state);
+      parse_err(ctx, current_state);
       break;
     }
     break;
