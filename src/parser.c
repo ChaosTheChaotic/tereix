@@ -489,10 +489,6 @@ void apply_op(ParseCtx *ctx) {
   if (info.is_unary) {
     if (ctx->node_count < 1) {
       report_error(ctx, info.op, "Missing operand for unary operator");
-
-      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-      push_node(ctx, err_node);
-
       return;
     }
     AstNode *operand = pop_node(ctx);
@@ -524,10 +520,6 @@ void apply_op(ParseCtx *ctx) {
   } else {
     if (ctx->node_count < 2) {
       report_error(ctx, info.op, "Missing operands for binary operator");
-
-      AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-      push_node(ctx, err_node);
-
       return;
     }
     AstNode *right = pop_node(ctx);
@@ -1619,6 +1611,7 @@ bool parse_step(ParseCtx *ctx) {
         ctx->op_stack[ctx->op_count - 1].op.start != NULL &&
         *ctx->op_stack[ctx->op_count - 1].op.start == '(')
       ctx->op_count--;
+    ctx->expect_operand = false;
     break;
   }
   case STATE_IN_FUNC: {
