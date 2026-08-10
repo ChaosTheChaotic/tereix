@@ -1089,7 +1089,10 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      return false;
+      adv(ctx);
+      sync(ctx);
+      recover_state(ctx, current_state);
+      break;
     }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
@@ -1214,6 +1217,15 @@ bool parse_step(ParseCtx *ctx) {
     }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
+      if (!ctx->expect_operand) {
+        report_error(ctx, ctx->curr, "Unexpected block in expression");
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+        adv(ctx);
+        sync(ctx);
+        recover_state(ctx, current_state);
+        break;
+      }
       adv(ctx);
       AstNode *block_node = new_node(ctx->arena, AST_BLOCK);
       block_node->as.block.is_async = is_async_block;
@@ -1233,6 +1245,16 @@ bool parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_KW && ctx->curr.len == 6 &&
         strncmp(ctx->curr.start, "sizeof", 6) == 0) {
+
+      if (!ctx->expect_operand) {
+        report_error(ctx, ctx->curr, "Unexpected sizeof in expression");
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+        adv(ctx);
+        sync(ctx);
+        recover_state(ctx, current_state);
+        break;
+      }
 
       adv(ctx);
 
@@ -1289,6 +1311,17 @@ bool parse_step(ParseCtx *ctx) {
         (ctx->curr.type == TOKEN_KW &&
          strncmp(ctx->curr.start, "null", 4) == 0) ||
         is_builtin_type_kw(ctx, ctx->curr)) {
+
+      if (!ctx->expect_operand) {
+        report_error(ctx, ctx->curr, "Unexpected token in expression");
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+        adv(ctx);
+        sync(ctx);
+        recover_state(ctx, current_state);
+        break;
+      }
+
       ctx->expect_operand = false;
 
       ASTN_TYPE node_type;
@@ -1603,6 +1636,7 @@ bool parse_step(ParseCtx *ctx) {
       recover_state(ctx, current_state);
       break;
     }
+    ctx->expect_operand = true;
     break;
   }
   case STATE_BLOCK_EXPR_DONE: {
@@ -1671,6 +1705,7 @@ bool parse_step(ParseCtx *ctx) {
     }
 
     push_state(ctx, STATE_PARSE_BLOCK);
+    ctx->expect_operand = true;
 
     if (ctx->curr.type == TOKEN_IDENTIF && ctx->curr.len == 4 &&
         strncmp(ctx->curr.start, "self", 4) == 0) {
@@ -1734,6 +1769,7 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, STATE_IF_BODY_DONE);
         push_state(ctx, STATE_IF_COND_DONE);
         push_state(ctx, STATE_IN_EXPR);
+        ctx->expect_operand = true;
 
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
           adv(ctx);
@@ -1755,6 +1791,7 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, STATE_PARSE_BLOCK);
         push_state(ctx, STATE_WHILE_COND_DONE);
         push_state(ctx, STATE_IN_EXPR);
+        ctx->expect_operand = true;
 
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
           adv(ctx);
@@ -1812,6 +1849,7 @@ bool parse_step(ParseCtx *ctx) {
         push_node(ctx, ret_node);
 
         push_state(ctx, STATE_RET_DONE);
+        ctx->expect_operand = true;
         push_state(ctx, STATE_IN_EXPR);
         break;
       } else if (strncmp(ctx->curr.start, "for", 3) == 0) {
@@ -1848,6 +1886,7 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, STATE_PARSE_SWITCH_BODY);
         push_state(ctx, STATE_SWITCH_COND_DONE);
         push_state(ctx, STATE_IN_EXPR);
+        ctx->expect_operand = true;
 
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
           adv(ctx);
@@ -1957,6 +1996,7 @@ bool parse_step(ParseCtx *ctx) {
     }
 
     if (is_expr_start) {
+      ctx->expect_operand = true;
       push_state(ctx, STATE_EXPR_STMT_DONE);
       push_state(ctx, STATE_IN_EXPR);
     } else {
@@ -2059,6 +2099,7 @@ bool parse_step(ParseCtx *ctx) {
       if (ctx->curr.type == TOKEN_ASSIGN) {
         adv(ctx);
         push_state(ctx, STATE_FOR_INIT_DECL_DONE);
+        ctx->expect_operand = true;
         push_state(ctx, STATE_IN_EXPR);
       } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
         AstNode *var_node = pop_node(ctx);
@@ -2083,6 +2124,7 @@ bool parse_step(ParseCtx *ctx) {
       adv(ctx);
     } else {
       push_state(ctx, STATE_FOR_INIT_DONE);
+      ctx->expect_operand = true;
       push_state(ctx, STATE_IN_EXPR);
     }
     break;
@@ -2273,6 +2315,7 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, STATE_IF_BODY_DONE);
         push_state(ctx, STATE_IF_COND_DONE);
         push_state(ctx, STATE_IN_EXPR);
+        ctx->expect_operand = true;
 
         if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '(') {
           adv(ctx);
@@ -3016,6 +3059,7 @@ bool parse_step(ParseCtx *ctx) {
 
     push_state(ctx, STATE_IN_FUNC_ARGS);
     push_state(ctx, STATE_ARG_DONE);
+    ctx->expect_operand = true;
     push_state(ctx, STATE_IN_EXPR);
     break;
   }
@@ -3110,6 +3154,7 @@ bool parse_step(ParseCtx *ctx) {
         push_state(ctx, STATE_PARSE_SWITCH_BODY);
         push_state(ctx, STATE_CASE_BODY_DONE);
         push_state(ctx, STATE_CASE_EXPR_DONE);
+        ctx->expect_operand = true;
         push_state(ctx, STATE_IN_EXPR);
         break;
       } else if (strncmp(ctx->curr.start, "default", 7) == 0) {
