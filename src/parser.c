@@ -1946,11 +1946,6 @@ bool parse_step(ParseCtx *ctx) {
 
       if (ctx->curr.type == TOKEN_ASSIGN) {
         adv(ctx);
-        if (ctx->curr.type == TOKEN_EOF ||
-            (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '}')) {
-          vnode->as.var_decl.init = NULL;
-          break;
-        }
         push_node(ctx, vnode);
         push_state(ctx, STATE_VAR_INIT_DONE);
         ctx->expect_operand = true;
