@@ -382,10 +382,18 @@ void sync(ParseCtx *ctx) {
     }
 
     if (ctx->curr.type == TOKEN_KW) {
-      if (map_get(&ctx->lex->type_kw_map, ctx->curr.start, ctx->curr.len) ||
-          (strncmp(ctx->curr.start, "struct", ctx->curr.len) == 0) ||
-          (strncmp(ctx->curr.start, "enum", ctx->curr.len) == 0) ||
-          (strncmp(ctx->curr.start, "extern", ctx->curr.len) == 0)) {
+      const char *start = ctx->curr.start;
+      size_t len = ctx->curr.len;
+      if (map_get(&ctx->lex->type_kw_map, start, len) ||
+          strncmp(start, "struct", len) == 0 ||
+          strncmp(start, "enum", len) == 0 ||
+          strncmp(start, "extern", len) == 0 ||
+          strncmp(start, "if", len) == 0 || strncmp(start, "while", len) == 0 ||
+          strncmp(start, "for", len) == 0 || strncmp(start, "ret", len) == 0 ||
+          strncmp(start, "defer", len) == 0 ||
+          strncmp(start, "switch", len) == 0 ||
+          strncmp(start, "case", len) == 0 ||
+          strncmp(start, "default", len) == 0) {
         ctx->panic_mode = false;
         return;
       }
@@ -669,7 +677,7 @@ static inline bool is_lit_type(TOKEN_TYPE t) {
           t == TOKEN_CHAR_LIT);
 }
 
-bool parse_step(ParseCtx *ctx) {
+void parse_step(ParseCtx *ctx) {
   ParseState current_state = pop_state(ctx);
 
   switch (current_state) {
@@ -893,7 +901,8 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          return false;
+          parse_err(ctx, current_state);
+          break;
         }
         AstNode *fnode = new_node(ctx->arena, AST_FUNC);
         fnode->as.func_def.fn_name = name;
@@ -932,7 +941,8 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            return false;
+            parse_err(ctx, current_state);
+            break;
           } else {
             if (ctx->curr.type != TOKEN_IDENTIF &&
                 !is_builtin_type_kw(ctx, ctx->curr)) {
@@ -945,7 +955,8 @@ bool parse_step(ParseCtx *ctx) {
               AstNode *err_node = new_node(ctx->arena, AST_ERROR);
               push_node(ctx, err_node);
 
-              return false;
+              parse_err(ctx, current_state);
+              break;
             }
             p_name = ctx->curr;
             adv(ctx);
@@ -990,7 +1001,8 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            return false;
+            parse_err(ctx, current_state);
+            break;
           }
           adv(ctx);
           fnode->as.func_def.block = NULL;
@@ -1317,7 +1329,11 @@ bool parse_step(ParseCtx *ctx) {
           node_type = AST_IDENTIF;
         break;
       default:
-        return false;
+        report_error(ctx, ctx->curr, "Unexpected token in expression");
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+        parse_err(ctx, current_state);
+        return;
       }
 
       AstNode *node = new_node(ctx->arena, node_type);
@@ -1861,7 +1877,8 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        return false;
+        parse_err(ctx, current_state);
+        break;
       }
       if (type.is_inline) {
         report_error(
@@ -1873,7 +1890,8 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        return false;
+        parse_err(ctx, current_state);
+        break;
       }
       if (ctx->curr.type != TOKEN_IDENTIF) {
         report_error(ctx, ctx->curr, "Expected identifier after type");
@@ -1999,7 +2017,8 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        return false;
+        parse_err(ctx, current_state);
+        break;
       }
       if (type.is_inline) {
         report_error(
@@ -2011,7 +2030,8 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        return false;
+        parse_err(ctx, current_state);
+        break;
       }
       if (ctx->curr.type != TOKEN_IDENTIF) {
         report_error(ctx, ctx->curr, "Expected identifier after type");
@@ -2051,7 +2071,8 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        return false;
+        parse_err(ctx, current_state);
+        break;
       }
     } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
@@ -2085,7 +2106,8 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      return false;
+      parse_err(ctx, current_state);
+      break;
     }
     break;
   }
@@ -2162,7 +2184,8 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      return false;
+      parse_err(ctx, current_state);
+      break;
     }
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
@@ -2175,7 +2198,8 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      return false;
+      parse_err(ctx, current_state);
+      break;
     }
     break;
   }
@@ -2252,7 +2276,8 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          return false;
+          parse_err(ctx, current_state);
+          break;
         }
       } else {
         // Else block
@@ -2272,7 +2297,8 @@ bool parse_step(ParseCtx *ctx) {
           sync(ctx);
           recover_state(ctx, current_state);
 
-          return false;
+          parse_err(ctx, current_state);
+          break;
         }
       }
     } else {
@@ -2388,7 +2414,8 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      return false;
+      parse_err(ctx, current_state);
+      break;
     }
     if (field_type.is_inline) {
       report_error(
@@ -2400,7 +2427,8 @@ bool parse_step(ParseCtx *ctx) {
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
 
-      return false;
+      parse_err(ctx, current_state);
+      break;
     }
 
     if (ctx->curr.type != TOKEN_IDENTIF &&
@@ -2427,7 +2455,8 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        return false;
+        parse_err(ctx, current_state);
+        break;
       }
       AstNode *fnode = new_node(ctx->arena, AST_FUNC);
       fnode->as.func_def.fn_name = name;
@@ -2466,11 +2495,16 @@ bool parse_step(ParseCtx *ctx) {
         } else {
           if (ctx->curr.type != TOKEN_IDENTIF &&
               !is_builtin_type_kw(ctx, ctx->curr)) {
-            fprintf(
-                stderr,
+            report_error(
+                ctx, ctx->curr,
                 "Expected identifier after type in params at line %u, col %u\n",
                 ctx->lex->line, ctx->lex->col);
-            return false;
+
+            AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+            push_node(ctx, err_node);
+
+            parse_err(ctx, current_state);
+            break;
           }
           p_name = ctx->curr;
           adv(ctx);
@@ -2512,7 +2546,8 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          return false;
+          parse_err(ctx, current_state);
+          break;
         }
         adv(ctx);
         fnode->as.func_def.block = NULL;
@@ -2657,7 +2692,8 @@ bool parse_step(ParseCtx *ctx) {
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
 
-        return false;
+        parse_err(ctx, current_state);
+        break;
       }
 
       if (ctx->curr.type != TOKEN_IDENTIF &&
@@ -2682,7 +2718,8 @@ bool parse_step(ParseCtx *ctx) {
           AstNode *err_node = new_node(ctx->arena, AST_ERROR);
           push_node(ctx, err_node);
 
-          return false;
+          parse_err(ctx, current_state);
+          break;
         }
 
         AstNode *fnode = new_node(ctx->arena, AST_FUNC);
@@ -2724,7 +2761,8 @@ bool parse_step(ParseCtx *ctx) {
             if (ctx->curr.type != TOKEN_IDENTIF &&
                 !is_builtin_type_kw(ctx, ctx->curr)) {
               fprintf(stderr, "Expected identifier after type in params\n");
-              return false;
+              parse_err(ctx, current_state);
+              break;
             }
             p_name = ctx->curr;
             adv(ctx);
@@ -2766,7 +2804,8 @@ bool parse_step(ParseCtx *ctx) {
             AstNode *err_node = new_node(ctx->arena, AST_ERROR);
             push_node(ctx, err_node);
 
-            return false;
+            parse_err(ctx, current_state);
+            break;
           }
           adv(ctx);
           fnode->as.func_def.block = NULL;
@@ -3127,7 +3166,6 @@ bool parse_step(ParseCtx *ctx) {
     break;
   }
   }
-  return true;
 }
 
 DataType parse_type(ParseCtx *ctx) {
@@ -3249,10 +3287,8 @@ DataType parse_type(ParseCtx *ctx) {
     push_state(ctx, STATE_IN_EXPR);
 
     size_t target_state = ctx->state_count - 1;
-    while (ctx->state_count > target_state && ctx->curr.type != TOKEN_EOF) {
-      if (!parse_step(ctx))
-        return type;
-    }
+    while (ctx->state_count > target_state && ctx->curr.type != TOKEN_EOF)
+      parse_step(ctx);
 
     AstNode *expr_node = pop_node(ctx);
 
