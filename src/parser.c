@@ -1109,6 +1109,13 @@ void parse_step(ParseCtx *ctx) {
           *ctx->curr.start == ',' || *ctx->curr.start == '}' ||
           *ctx->curr.start == ']'))) {
 
+      if (ctx->expect_operand) {
+        report_error(ctx, ctx->curr, "Expected expression");
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+        ctx->expect_operand = false;
+      }
+
       ctx->expect_operand = true;
 
       while (ctx->op_count > 0) {
