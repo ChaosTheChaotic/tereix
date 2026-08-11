@@ -1761,7 +1761,6 @@ void parse_step(ParseCtx *ctx) {
         push_node(ctx, while_node);
 
         push_state(ctx, STATE_WHILE_BODY_DONE);
-        push_state(ctx, STATE_PARSE_BLOCK);
         push_state(ctx, STATE_WHILE_COND_DONE);
         push_state(ctx, STATE_IN_EXPR);
         ctx->expect_operand = true;
@@ -1832,7 +1831,6 @@ void parse_step(ParseCtx *ctx) {
         push_node(ctx, for_node);
 
         push_state(ctx, STATE_FOR_BODY_DONE);
-        push_state(ctx, STATE_PARSE_BLOCK);
         push_state(ctx, STATE_FOR_INC_DONE);
         push_state(ctx, STATE_IN_EXPR);
         push_state(ctx, STATE_FOR_COND_DONE);
@@ -2215,6 +2213,7 @@ void parse_step(ParseCtx *ctx) {
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == '{') {
       AstNode *body_block = new_node(ctx->arena, AST_BLOCK);
       push_node(ctx, body_block);
+      push_state(ctx, STATE_PARSE_BLOCK);
       adv(ctx);
     } else {
       report_error(ctx, ctx->curr, "Expected '{' to start for-loop body");
@@ -2248,6 +2247,7 @@ void parse_step(ParseCtx *ctx) {
       adv(ctx);
       AstNode *body_block = new_node(ctx->arena, AST_BLOCK);
       push_node(ctx, body_block);
+      push_state(ctx, STATE_PARSE_BLOCK);
     } else {
       report_error(ctx, ctx->curr, "Expected '{' for while body\n");
 
