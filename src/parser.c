@@ -2098,35 +2098,36 @@ void parse_step(ParseCtx *ctx) {
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',') {
       adv(ctx);
-      if (ctx->curr.type != TOKEN_IDENTIF) {
-        report_error(
-            ctx, ctx->curr,
-            "Expected identifier after ',' in for-loop declaration at line %u, "
-            "col %u\n",
-            ctx->lex->line, ctx->lex->col);
-
-        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-        push_node(ctx, err_node);
-        parse_err(ctx, current_state);
-        break;
-      }
-      Token name = ctx->curr;
-      adv(ctx);
-
-      // Re-use the previously parsed base type
-      AstNode *next_var = new_node(ctx->arena, AST_VAR_DECL);
-      next_var->as.var_decl.type = var_node->as.var_decl.type;
-      next_var->as.var_decl.id = name;
-
-      push_node(ctx, next_var);
-      push_state(ctx, STATE_FOR_INIT_DECL_DONE);
-
-      if (ctx->curr.type == TOKEN_ASSIGN) {
-        adv(ctx);
-        ctx->expect_operand = true;
-        push_state(ctx, STATE_IN_EXPR);
+      if (is_type(ctx)) {
+        push_state(ctx, STATE_FOR_INIT_START);
       } else {
-        push_node(ctx, NULL);
+        if (ctx->curr.type != TOKEN_IDENTIF) {
+          report_error(ctx, ctx->curr,
+                       "Expected identifier after ',' in for-loop declaration "
+                       "at line %u, col %u\n",
+                       ctx->lex->line, ctx->lex->col);
+          AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+          push_node(ctx, err_node);
+          parse_err(ctx, current_state);
+          break;
+        }
+        Token name = ctx->curr;
+        adv(ctx);
+
+        AstNode *next_var = new_node(ctx->arena, AST_VAR_DECL);
+        next_var->as.var_decl.type = var_node->as.var_decl.type;
+        next_var->as.var_decl.id = name;
+
+        push_node(ctx, next_var);
+        push_state(ctx, STATE_FOR_INIT_DECL_DONE);
+
+        if (ctx->curr.type == TOKEN_ASSIGN) {
+          adv(ctx);
+          ctx->expect_operand = true;
+          push_state(ctx, STATE_IN_EXPR);
+        } else {
+          push_node(ctx, NULL);
+        }
       }
     } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
