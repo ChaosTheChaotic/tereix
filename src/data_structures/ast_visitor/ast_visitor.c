@@ -200,9 +200,9 @@ bool ast_traverse(AstVisitor *visitor, AstNode *root) {
 
     case AST_FOR:
       PUSH_NODE(n->as.for_loop.action);
-      PUSH_NODE(n->as.for_loop.inc);
+      PUSH_LIST_INTERLEAVED(n->as.for_loop.inc, 0);
       PUSH_NODE(n->as.for_loop.check);
-      PUSH_NODE(n->as.for_loop.init);
+      PUSH_LIST_INTERLEAVED(n->as.for_loop.init, 0);
       break;
 
     case AST_FUNC_CALL:

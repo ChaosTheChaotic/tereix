@@ -1977,16 +1977,22 @@ void parse_step(ParseCtx *ctx) {
     break;
   }
 
-  case STATE_FOR_INIT_DONE: {
-    AstNode *init_expr = pop_node(ctx);
+  case STATE_FOR_BODY_DONE: {
+    AstNode *body_block = pop_node(ctx);
+    AstNode *for_node = pop_node(ctx);
+    for_node->as.for_loop.action = body_block;
+    break;
+  }
+
+  case STATE_FOR_COND_DONE: {
+    AstNode *cond_expr = pop_node(ctx);
     AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
-    for_node->as.for_loop.init = init_expr;
+    for_node->as.for_loop.check = cond_expr;
 
     if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
     } else {
-      report_error(ctx, ctx->curr,
-                   "Expected ';' after for-loop initialization");
+      report_error(ctx, ctx->curr, "Expected ';' after for-loop condition");
 
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
@@ -2023,7 +2029,6 @@ void parse_step(ParseCtx *ctx) {
 
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
-
         parse_err(ctx, current_state);
         break;
       }
@@ -2036,7 +2041,6 @@ void parse_step(ParseCtx *ctx) {
 
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
-
         parse_err(ctx, current_state);
         break;
       }
@@ -2045,7 +2049,6 @@ void parse_step(ParseCtx *ctx) {
 
         AstNode *err_node = new_node(ctx->arena, AST_ERROR);
         push_node(ctx, err_node);
-
         parse_err(ctx, current_state);
         break;
       }
@@ -2057,29 +2060,14 @@ void parse_step(ParseCtx *ctx) {
       vnode->as.var_decl.id = name;
 
       push_node(ctx, vnode);
+      push_state(ctx, STATE_FOR_INIT_DECL_DONE);
 
       if (ctx->curr.type == TOKEN_ASSIGN) {
         adv(ctx);
-        push_state(ctx, STATE_FOR_INIT_DECL_DONE);
         ctx->expect_operand = true;
         push_state(ctx, STATE_IN_EXPR);
-      } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
-        AstNode *var_node = pop_node(ctx);
-        AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
-        for_node->as.for_loop.init = var_node;
-        adv(ctx);
       } else {
-        report_error(
-            ctx, ctx->curr,
-            "Expected '=' or ';' after variable declaration in for loop "
-            "at line %u, col %u\n",
-            ctx->lex->line, ctx->lex->col);
-
-        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
-        push_node(ctx, err_node);
-
-        parse_err(ctx, current_state);
-        break;
+        push_node(ctx, NULL); // Emulate empty init_expr safely
       }
     } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
@@ -2099,39 +2087,93 @@ void parse_step(ParseCtx *ctx) {
     var_node->as.var_decl.init = init_expr;
 
     AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
-    for_node->as.for_loop.init = var_node;
 
-    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+    // Append to the init linked-list
+    if (!for_node->as.for_loop.init) {
+      for_node->as.for_loop.init = var_node;
+    } else {
+      AstNode *curr = for_node->as.for_loop.init;
+      while (curr->next)
+        curr = curr->next;
+      curr->next = var_node;
+    }
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',') {
+      adv(ctx);
+      if (ctx->curr.type != TOKEN_IDENTIF) {
+        report_error(
+            ctx, ctx->curr,
+            "Expected identifier after ',' in for-loop declaration at line %u, "
+            "col %u\n",
+            ctx->lex->line, ctx->lex->col);
+
+        AstNode *err_node = new_node(ctx->arena, AST_ERROR);
+        push_node(ctx, err_node);
+        parse_err(ctx, current_state);
+        break;
+      }
+      Token name = ctx->curr;
+      adv(ctx);
+
+      // Re-use the previously parsed base type
+      AstNode *next_var = new_node(ctx->arena, AST_VAR_DECL);
+      next_var->as.var_decl.type = var_node->as.var_decl.type;
+      next_var->as.var_decl.id = name;
+
+      push_node(ctx, next_var);
+      push_state(ctx, STATE_FOR_INIT_DECL_DONE);
+
+      if (ctx->curr.type == TOKEN_ASSIGN) {
+        adv(ctx);
+        ctx->expect_operand = true;
+        push_state(ctx, STATE_IN_EXPR);
+      } else {
+        push_node(ctx, NULL);
+      }
+    } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
     } else {
       report_error(
           ctx, ctx->curr,
-          "Expected ';' after for-loop variable declaration at line %u, "
+          "Expected ';' or ',' after for-loop variable declaration at line %u, "
           "col %u\n",
           ctx->lex->line, ctx->lex->col);
 
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
-
       parse_err(ctx, current_state);
       break;
     }
     break;
   }
 
-  case STATE_FOR_COND_DONE: {
-    AstNode *cond_expr = pop_node(ctx);
+  case STATE_FOR_INIT_DONE: {
+    AstNode *init_expr = pop_node(ctx);
     AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
-    for_node->as.for_loop.check = cond_expr;
 
-    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
+    if (!for_node->as.for_loop.init) {
+      for_node->as.for_loop.init = init_expr;
+    } else {
+      AstNode *curr = for_node->as.for_loop.init;
+      while (curr->next)
+        curr = curr->next;
+      curr->next = init_expr;
+    }
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',') {
+      adv(ctx);
+      push_state(ctx, STATE_FOR_INIT_DONE);
+      ctx->expect_operand = true;
+      push_state(ctx, STATE_IN_EXPR);
+      break;
+    } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ';') {
       adv(ctx);
     } else {
-      report_error(ctx, ctx->curr, "Expected ';' after for-loop condition");
+      report_error(ctx, ctx->curr,
+                   "Expected ';' or ',' after for-loop initialization");
 
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
-
       parse_err(ctx, current_state);
       break;
     }
@@ -2141,16 +2183,31 @@ void parse_step(ParseCtx *ctx) {
   case STATE_FOR_INC_DONE: {
     AstNode *inc_expr = pop_node(ctx);
     AstNode *for_node = ctx->node_stack[ctx->node_count - 1];
-    for_node->as.for_loop.inc = inc_expr;
 
-    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
+    // Append multiple increments
+    if (!for_node->as.for_loop.inc) {
+      for_node->as.for_loop.inc = inc_expr;
+    } else {
+      AstNode *curr = for_node->as.for_loop.inc;
+      while (curr->next)
+        curr = curr->next;
+      curr->next = inc_expr;
+    }
+
+    if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ',') {
+      adv(ctx);
+      push_state(ctx, STATE_FOR_INC_DONE);
+      ctx->expect_operand = true;
+      push_state(ctx, STATE_IN_EXPR);
+      break;
+    } else if (ctx->curr.type == TOKEN_PUNC && *ctx->curr.start == ')') {
       adv(ctx);
     } else {
-      report_error(ctx, ctx->curr, "Expected ')' after for-loop increment");
+      report_error(ctx, ctx->curr,
+                   "Expected ')' or ',' after for-loop increment");
 
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
-
       parse_err(ctx, current_state);
       break;
     }
@@ -2164,17 +2221,9 @@ void parse_step(ParseCtx *ctx) {
 
       AstNode *err_node = new_node(ctx->arena, AST_ERROR);
       push_node(ctx, err_node);
-
       parse_err(ctx, current_state);
       break;
     }
-    break;
-  }
-
-  case STATE_FOR_BODY_DONE: {
-    AstNode *body_block = pop_node(ctx);
-    AstNode *for_node = pop_node(ctx);
-    for_node->as.for_loop.action = body_block;
     break;
   }
 

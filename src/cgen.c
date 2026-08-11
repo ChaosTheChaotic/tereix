@@ -367,12 +367,24 @@ VisitResult gen_enter(AstVisitor *v, AstNode *n) {
   }
 
   case AST_VAR_DECL: {
+    AstNode *parent =
+        ctx->parent_top > 1 ? ctx->parent_stack[ctx->parent_top - 2] : NULL;
+
+    bool is_chained_for_init =
+        (parent && parent->type == AST_FOR && parent->as.for_loop.init != n);
+
     DataType decl_type = n->as.var_decl.type;
     long saved_dims = decl_type.array_dimens;
     decl_type.array_dimens = 0;
-    gen_type(decl_type, sb);
-    decl_type.array_dimens = saved_dims;
 
+    if (!is_chained_for_init) {
+      gen_type(decl_type, sb);
+    } else {
+      for (long i = 0; i < decl_type.ptr_depth; i++)
+        sb_append(sb, "*");
+    }
+
+    decl_type.array_dimens = saved_dims;
     sb_append_len(sb, n->as.var_decl.id.start, n->as.var_decl.id.len);
 
     for (unsigned int i = 0; i < decl_type.array_dimens; i++) {
@@ -426,24 +438,89 @@ VisitResult gen_enter(AstVisitor *v, AstNode *n) {
     ast_traverse(v, n->as.while_loop.action);
     return VISIT_SKIP_CHILDREN;
 
-  case AST_FOR:
-    sb_append(sb, "for (");
-    if (n->as.for_loop.init)
-      ast_traverse(v, n->as.for_loop.init);
-    if (!n->as.for_loop.init || n->as.for_loop.init->type != AST_VAR_DECL)
+  case AST_FOR: {
+    bool multi_type = false;
+    AstNode *init_node = n->as.for_loop.init;
+
+    if (init_node && init_node->type == AST_VAR_DECL) {
+      DataType first_type = init_node->as.var_decl.type;
+      AstNode *curr = init_node->next;
+      while (curr) {
+        if (curr->type == AST_VAR_DECL) {
+          DataType ct = curr->as.var_decl.type;
+          if (ct.name.len != first_type.name.len ||
+              strncmp(ct.name.start, first_type.name.start, ct.name.len) != 0 ||
+              ct.ptr_depth != first_type.ptr_depth) {
+            multi_type = true;
+            break;
+          }
+        }
+        curr = curr->next;
+      }
+    }
+
+    if (multi_type) {
+      sb_append(sb, "{\n");
+
+      AstNode *curr = init_node->next;
+      while (curr) {
+        AstNode spoof_block = {.type = AST_BLOCK};
+        AstNode *old_parent = ctx->parent_stack[ctx->parent_top - 1];
+        ctx->parent_stack[ctx->parent_top - 1] = &spoof_block;
+
+        AstNode *next_temp = curr->next;
+        curr->next = NULL;
+        ast_traverse(v, curr);
+        curr->next = next_temp;
+
+        ctx->parent_stack[ctx->parent_top - 1] = old_parent;
+        sb_append(sb, ";\n");
+
+        curr = curr->next;
+      }
+
+      sb_append(sb, "for (");
+
+      AstNode *next_temp = init_node->next;
+      init_node->next = NULL;
+      ast_traverse(v, init_node);
+      init_node->next = next_temp;
+
       sb_append(sb, "; ");
+    } else {
+      sb_append(sb, "for (");
+      AstNode *curr = init_node;
+      while (curr) {
+        ast_traverse(v, curr);
+        curr = curr->next;
+        if (curr)
+          sb_append(sb, ", ");
+      }
+      sb_append(sb, "; ");
+    }
 
     if (n->as.for_loop.check)
       ast_traverse(v, n->as.for_loop.check);
     sb_append(sb, "; ");
 
-    if (n->as.for_loop.inc)
-      ast_traverse(v, n->as.for_loop.inc);
+    AstNode *inc_node = n->as.for_loop.inc;
+    while (inc_node) {
+      ast_traverse(v, inc_node);
+      inc_node = inc_node->next;
+      if (inc_node)
+        sb_append(sb, ", ");
+    }
     sb_append(sb, ") ");
 
+    // 4. Generate Loop Body
     if (n->as.for_loop.action)
       ast_traverse(v, n->as.for_loop.action);
+
+    if (multi_type) {
+      sb_append(sb, "\n}\n");
+    }
     return VISIT_SKIP_CHILDREN;
+  }
 
   case AST_FUNC_CALL: {
     bool is_ctor = false;
