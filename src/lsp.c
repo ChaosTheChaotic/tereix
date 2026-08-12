@@ -2519,8 +2519,22 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
   Arena tmp_arena = {0};
   ResolvedNode res = {NULL, NULL};
 
-  if (doc->ast_root) {
-    AstNode *ident = find_ident_at_pos(doc->ast_root, ident_line, ident_char);
+  Arena tmp_ast_arena = {0};
+  DiagList tmp_diags;
+  diaglist_init(&tmp_diags, 16);
+
+  AstNode *ast_to_use = doc->ast_root;
+
+  if (doc->compile_pending && doc->txt) {
+    char *abspath = absolute_from_uri(doc->uri);
+    ast_to_use = str_to_ast(&tmp_ast_arena, doc->txt, abspath ? abspath : uri,
+                            &tmp_diags, true);
+    if (abspath)
+      free(abspath);
+  }
+
+  if (ast_to_use) {
+    AstNode *ident = find_ident_at_pos(ast_to_use, ident_line, ident_char);
     res = resolve_node_to_decl(ident, &tmp_arena);
   }
 
@@ -2548,7 +2562,7 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
         snprintf(mod_name, sizeof(mod_name), "%.*s", (int)mod_len,
                  &doc->txt[mod_start]);
 
-        AstNode *top_stmt = doc->ast_root->as.block.first_stmt;
+        AstNode *top_stmt = ast_to_use ? ast_to_use->as.block.first_stmt : NULL;
         while (top_stmt) {
           if (top_stmt->type == AST_USE) {
             char extract_name[256] = {0};
@@ -2709,10 +2723,17 @@ fallback_found:
 
     lsp_send_doc(jdoc);
     arena_free_all(&tmp_arena);
+
+    arena_free_all(&tmp_ast_arena);
+    diaglist_free(&tmp_diags);
+
     return;
   }
 
   arena_free_all(&tmp_arena);
+
+  arena_free_all(&tmp_ast_arena);
+  diaglist_free(&tmp_diags);
 
 empty_response: {
   yyjson_mut_val *root;
