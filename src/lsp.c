@@ -12,6 +12,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
+
+#define DEBOUNCE_DELAY_MS 300
 
 #ifdef ENABLE_THREADS
 #include "thread_pool.h"
@@ -1119,7 +1122,7 @@ typedef struct {
 VisitResult find_type_enter(AstVisitor *visitor, AstNode *node) {
   FindTypeData *data = (FindTypeData *)visitor->user_data;
 
-	// Prevent vars which arent in scope
+  // Prevent vars which arent in scope
   if (node->type == AST_FUNC) {
     return VISIT_SKIP_CHILDREN;
   }
@@ -2271,12 +2274,49 @@ void compile_doc(Doc *doc) {
   free(abspath);
 }
 
+void process_debounced_compiles(void) {
+  uint64_t now = get_time_ms();
+
+#ifdef ENABLE_THREADS
+  pthread_mutex_lock(&lsp_docs_mutex);
+#endif
+
+  for (size_t i = 0; i < server_state.docs.capacity; i++) {
+    HashEntry *entry = server_state.docs.buckets[i];
+    while (entry) {
+      Doc *d = (Doc *)entry->value;
+      if (d && d->compile_pending) {
+        if (now - d->last_change >= DEBOUNCE_DELAY_MS) {
+          d->compile_pending = false;
+
+#ifdef ENABLE_THREADS
+          pthread_mutex_unlock(&lsp_docs_mutex);
+#endif
+
+          compile_doc(d);
+
+#ifdef ENABLE_THREADS
+          pthread_mutex_lock(&lsp_docs_mutex);
+#endif
+        }
+      }
+      entry = entry->next;
+    }
+  }
+
+#ifdef ENABLE_THREADS
+  pthread_mutex_unlock(&lsp_docs_mutex);
+#endif
+}
+
 void handle_did_save(yyjson_val *params) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
   Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
-  if (doc)
+  if (doc) {
+    doc->compile_pending = false;
     compile_doc(doc);
+  }
 }
 
 void handle_did_open(yyjson_val *params) {
@@ -2367,7 +2407,8 @@ void handle_did_change(yyjson_val *params) {
   }
 
   doc->version = version;
-  compile_doc(doc);
+  doc->last_change = get_time_ms();
+  doc->compile_pending = true;
 }
 
 void handle_did_close(yyjson_val *params) {
@@ -2644,7 +2685,18 @@ void start_lsp_server() {
   server_state.state = UNINITIALIZED;
   sem_init(&server_state.proj_sem, &lsp_arena);
 
+  struct pollfd pfd = {.fd = STDIN_FILENO, .events = POLLIN};
+
   while (1) {
+    process_debounced_compiles();
+
+		// Poll stdin
+    int poll_res = poll(&pfd, 1, 50);
+    if (poll_res <= 0) {
+      if (feof(stdin))
+        break;
+      continue; // Timeout
+    }
     int content_length = 0;
     char buffer[256];
 
