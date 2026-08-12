@@ -8,11 +8,11 @@
 #include "util.h"
 #include "worklist.h"
 #include <ctype.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <poll.h>
 
 #define DEBOUNCE_DELAY_MS 300
 
@@ -537,121 +537,6 @@ ResolvedNode resolve_node_to_decl(AstNode *ident, Arena *tmp_arena) {
   return res;
 }
 
-void handle_definition(yyjson_val *params, yyjson_val *id) {
-  yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
-  const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
-  yyjson_val *pos = yyjson_obj_get(params, "position");
-  int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
-  int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
-
-  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
-  if (!doc || !doc->ast_root) {
-    goto empty_response;
-  }
-
-  Arena tmp_arena = {0};
-
-  AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
-  if (ident && ident->type == AST_USE) {
-    Token path_tok = ident->as.use_stmt.path;
-    if (path_tok.len >= 2 && path_tok.start[0] == '"' &&
-        path_tok.start[path_tok.len - 1] == '"') {
-
-      char *rel_path = arena_alloc(&tmp_arena, path_tok.len - 1);
-      strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
-      rel_path[path_tok.len - 2] = '\0';
-
-      char *current_abs = absolute_from_uri(uri);
-      if (current_abs) {
-        char *last_slash = strrchr(current_abs, '/');
-        if (last_slash)
-          *last_slash = '\0';
-        const char *resolved =
-            resolve_module_path(&tmp_arena, current_abs, rel_path);
-        if (resolved) {
-          yyjson_mut_val *root;
-          yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-          yyjson_mut_val *result = yyjson_mut_obj(jdoc);
-
-          char target_uri[8192];
-          snprintf(target_uri, sizeof(target_uri), "file://%s", resolved);
-          yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
-
-          yyjson_mut_val *range = yyjson_mut_obj(jdoc);
-          yyjson_mut_val *start = yyjson_mut_obj(jdoc);
-          yyjson_mut_obj_add_int(jdoc, start, "line", 0);
-          yyjson_mut_obj_add_int(jdoc, start, "character", 0);
-          yyjson_mut_val *end = yyjson_mut_obj(jdoc);
-          yyjson_mut_obj_add_int(jdoc, end, "line", 0);
-          yyjson_mut_obj_add_int(jdoc, end, "character", 0);
-          yyjson_mut_obj_add_val(jdoc, range, "start", start);
-          yyjson_mut_obj_add_val(jdoc, range, "end", end);
-          yyjson_mut_obj_add_val(jdoc, result, "range", range);
-          yyjson_mut_obj_add_val(jdoc, root, "result", result);
-
-          lsp_send_doc(jdoc);
-          free(current_abs);
-          arena_free_all(&tmp_arena);
-          return;
-        }
-        free(current_abs);
-      }
-    }
-    goto empty_response;
-  }
-
-  ResolvedNode res = resolve_node_to_decl(ident, &tmp_arena);
-
-  if (res.decl_node) {
-    AstNode *decl = res.decl_node;
-    Token target_tok = get_decl_token(decl);
-    const char *target_fpath = res.fpath;
-
-    if (target_tok.len > 0) {
-      yyjson_mut_val *root;
-      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-      yyjson_mut_val *result = yyjson_mut_obj(jdoc);
-
-      char target_uri[8192];
-      if (target_fpath) {
-        snprintf(target_uri, sizeof(target_uri), "file://%s", target_fpath);
-      } else {
-        snprintf(target_uri, sizeof(target_uri), "%s", uri);
-      }
-
-      yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
-
-      yyjson_mut_val *range = yyjson_mut_obj(jdoc);
-      yyjson_mut_val *start = yyjson_mut_obj(jdoc);
-      yyjson_mut_obj_add_int(jdoc, start, "line", target_tok.line - 1);
-      yyjson_mut_obj_add_int(jdoc, start, "character", target_tok.col);
-
-      yyjson_mut_val *end = yyjson_mut_obj(jdoc);
-      yyjson_mut_obj_add_int(jdoc, end, "line", target_tok.line - 1);
-      yyjson_mut_obj_add_int(jdoc, end, "character",
-                             target_tok.col + target_tok.len);
-
-      yyjson_mut_obj_add_val(jdoc, range, "start", start);
-      yyjson_mut_obj_add_val(jdoc, range, "end", end);
-      yyjson_mut_obj_add_val(jdoc, result, "range", range);
-      yyjson_mut_obj_add_val(jdoc, root, "result", result);
-
-      lsp_send_doc(jdoc);
-      arena_free_all(&tmp_arena);
-      return;
-    }
-  }
-
-  arena_free_all(&tmp_arena);
-
-empty_response: {
-  yyjson_mut_val *root;
-  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-  yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-  lsp_send_doc(jdoc);
-}
-}
-
 char *get_comments_above(const char *source, Token target) {
   if (!source || target.line <= 1)
     return NULL;
@@ -790,128 +675,6 @@ char *get_comments_above(const char *source, Token target) {
 
   free(comment_lines);
   return result;
-}
-
-void handle_hover(yyjson_val *params, yyjson_val *id) {
-  yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
-  const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
-  yyjson_val *pos = yyjson_obj_get(params, "position");
-  int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
-  int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
-
-  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
-  if (!doc || !doc->ast_root) {
-    goto empty_response;
-  }
-
-  Arena tmp_arena = {0};
-
-  AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
-  ResolvedNode res = resolve_node_to_decl(ident, &tmp_arena);
-
-  if (res.decl_node) {
-    AstNode *decl = res.decl_node;
-    Token t = get_decl_token(decl);
-
-    if (t.len > 0) {
-      char *source_txt = NULL;
-      bool allocated_source = false;
-
-      if (res.fpath) {
-        char target_uri[8192];
-        snprintf(target_uri, sizeof(target_uri), "file://%s", res.fpath);
-        Doc *target_doc =
-            (Doc *)map_get(&server_state.docs, target_uri, strlen(target_uri));
-        if (target_doc) {
-          source_txt = target_doc->txt;
-        } else {
-          Doc *target_doc = get_or_load_doc(target_uri, res.fpath);
-          if (target_doc) {
-            source_txt = target_doc->txt;
-          }
-        }
-      } else {
-        source_txt = doc->txt;
-      }
-
-      char *comments = get_comments_above(source_txt, t);
-      if (allocated_source && source_txt) {
-        free(source_txt);
-      }
-
-      char signature[8192] = {0};
-
-      if (decl->type == AST_VAR_DECL) {
-        snprintf(signature, sizeof(signature), "var %.*s: %.*s", t.len, t.start,
-                 decl->as.var_decl.type.name.len,
-                 decl->as.var_decl.type.name.start);
-      } else if (decl->type == AST_FUNC) {
-        char params_buf[4096] = {0};
-        size_t offset = 0;
-        AstNode *param = decl->as.func_def.params;
-
-        while (param) {
-          Token p_id = param->as.fn_param.id;
-          Token p_type = param->as.fn_param.type.name;
-
-          int written =
-              snprintf(params_buf + offset, sizeof(params_buf) - offset,
-                       "%.*s %.*s%s", p_type.len, p_type.start, p_id.len,
-                       p_id.start, param->next ? ", " : "");
-          if (written > 0) {
-            offset += written;
-          }
-          param = param->next;
-        }
-
-        snprintf(signature, sizeof(signature), "%.*s %.*s(%s)",
-                 decl->as.func_def.ret_type.name.len,
-                 decl->as.func_def.ret_type.name.start, t.len, t.start,
-                 params_buf);
-      } else if (decl->type == AST_STRUCT) {
-        snprintf(signature, sizeof(signature), "struct %.*s", t.len, t.start);
-      } else if (decl->type == AST_UNION) {
-        snprintf(signature, sizeof(signature), "union %.*s", t.len, t.start);
-      } else if (decl->type == AST_ENUM) {
-        snprintf(signature, sizeof(signature), "enum %.*s", t.len, t.start);
-      } else if (decl->type == AST_ENUM_MEMBER) {
-        snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
-      } else {
-        snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
-      }
-
-      char md_buffer[16384];
-      snprintf(md_buffer, sizeof(md_buffer), "```tereix\n%s\n```\n%s",
-               signature, comments ? comments : "");
-
-      if (comments)
-        free(comments);
-
-      yyjson_mut_val *root;
-      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-      yyjson_mut_val *result = yyjson_mut_obj(jdoc);
-
-      yyjson_mut_val *contents = yyjson_mut_obj(jdoc);
-      yyjson_mut_obj_add_str(jdoc, contents, "kind", "markdown");
-      yyjson_mut_obj_add_str(jdoc, contents, "value", md_buffer);
-
-      yyjson_mut_obj_add_val(jdoc, result, "contents", contents);
-      yyjson_mut_obj_add_val(jdoc, root, "result", result);
-
-      lsp_send_doc(jdoc);
-      arena_free_all(&tmp_arena);
-      return;
-    }
-  }
-
-  arena_free_all(&tmp_arena);
-
-empty_response: {
-  yyjson_mut_val *root;
-  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
-  yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
-  lsp_send_doc(jdoc);
-}
 }
 
 void add_completion_item(yyjson_mut_doc *jdoc, yyjson_mut_val *arr,
@@ -1184,12 +947,32 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
     goto empty_response;
   }
 
+  Arena tmp_ast_arena = {0};
+  DiagList tmp_diags;
+  diaglist_init(&tmp_diags, 16);
+
+  AstNode *ast_to_use = doc->ast_root;
+
+  if (doc->compile_pending && doc->txt) {
+    char *abspath = absolute_from_uri(doc->uri);
+    ast_to_use = str_to_ast(&tmp_ast_arena, doc->txt, abspath ? abspath : uri,
+                            &tmp_diags, true);
+    if (abspath)
+      free(abspath);
+  }
+
+  if (!ast_to_use) {
+    arena_free_all(&tmp_ast_arena);
+    diaglist_free(&tmp_diags);
+    goto empty_response;
+  }
+
   yyjson_mut_val *root;
   yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
   yyjson_mut_val *result = yyjson_mut_arr(jdoc);
 
   AstNode *containing_func = NULL;
-  AstNode *stmt = doc->ast_root->as.block.first_stmt;
+  AstNode *stmt = ast_to_use->as.block.first_stmt;
   while (stmt) {
     Token t = get_decl_token(stmt);
     if (t.line > 0 && t.line <= (unsigned int)(line + 1)) {
@@ -1231,7 +1014,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
       AstNode *mod_ast = NULL;
       Arena tmp_arena = {0};
 
-      AstNode *top_stmt = doc->ast_root->as.block.first_stmt;
+      AstNode *top_stmt = ast_to_use->as.block.first_stmt;
       while (top_stmt) {
         if (top_stmt->type == AST_USE) {
           char mod_name[256] = {0};
@@ -1361,7 +1144,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
       }
 
       if (!found_type) {
-        AstNode *gst = doc->ast_root->as.block.first_stmt;
+        AstNode *gst = ast_to_use->as.block.first_stmt;
         while (gst) {
           if (gst->type == AST_VAR_DECL) {
             if (gst->as.var_decl.id.len == ident_len &&
@@ -1384,7 +1167,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             split_qualified_type(type_name, &mod_alias, &simple_name);
 
         if (is_qualified) {
-          AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
+          AstNode *use_stmt = ast_to_use->as.block.first_stmt;
           while (use_stmt && !type_decl) {
             if (use_stmt->type == AST_USE) {
               char mod_name[256] = {0};
@@ -1460,10 +1243,9 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             use_stmt = use_stmt->next;
           }
         } else {
-          type_decl =
-              find_sue_decl(doc->ast_root, type_name.start, type_name.len);
+          type_decl = find_sue_decl(ast_to_use, type_name.start, type_name.len);
           if (!type_decl) {
-            AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
+            AstNode *use_stmt = ast_to_use->as.block.first_stmt;
             while (use_stmt && !type_decl) {
               if (use_stmt->type == AST_USE) {
                 Token pt = use_stmt->as.use_stmt.path;
@@ -1603,7 +1385,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
     for (size_t i = 0; i < typelistlen; i++)
       add_completion_item(jdoc, result, typelist[i], 14, "type", NULL, NULL);
 
-    AstNode *ext_stmt = doc->ast_root->as.block.first_stmt;
+    AstNode *ext_stmt = ast_to_use->as.block.first_stmt;
     while (ext_stmt) {
       AstNode *target_stmt = ext_stmt;
       bool in_extern = false;
@@ -1657,7 +1439,7 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
       ext_stmt = ext_stmt->next;
     }
 
-    AstNode *use_stmt = doc->ast_root->as.block.first_stmt;
+    AstNode *use_stmt = ast_to_use->as.block.first_stmt;
     while (use_stmt) {
       if (use_stmt->type == AST_USE) {
         char mod_name[256] = {0};
@@ -1679,6 +1461,9 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
       add_local_completions(jdoc, result, containing_func, line + 1);
     }
   }
+
+  arena_free_all(&tmp_ast_arena);
+  diaglist_free(&tmp_diags);
 
   yyjson_mut_obj_add_val(jdoc, root, "result", result);
   lsp_send_doc(jdoc);
@@ -2309,6 +2094,255 @@ void process_debounced_compiles(void) {
 #endif
 }
 
+void handle_definition(yyjson_val *params, yyjson_val *id) {
+  yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
+  const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
+  yyjson_val *pos = yyjson_obj_get(params, "position");
+  int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
+  int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
+
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
+
+  if (doc && doc->compile_pending) {
+    doc->compile_pending = false;
+    compile_doc(doc);
+  }
+
+  if (!doc || !doc->ast_root) {
+    goto empty_response;
+  }
+
+  Arena tmp_arena = {0};
+
+  AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
+  if (ident && ident->type == AST_USE) {
+    Token path_tok = ident->as.use_stmt.path;
+    if (path_tok.len >= 2 && path_tok.start[0] == '"' &&
+        path_tok.start[path_tok.len - 1] == '"') {
+
+      char *rel_path = arena_alloc(&tmp_arena, path_tok.len - 1);
+      strncpy(rel_path, path_tok.start + 1, path_tok.len - 2);
+      rel_path[path_tok.len - 2] = '\0';
+
+      char *current_abs = absolute_from_uri(uri);
+      if (current_abs) {
+        char *last_slash = strrchr(current_abs, '/');
+        if (last_slash)
+          *last_slash = '\0';
+        const char *resolved =
+            resolve_module_path(&tmp_arena, current_abs, rel_path);
+        if (resolved) {
+          yyjson_mut_val *root;
+          yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+          yyjson_mut_val *result = yyjson_mut_obj(jdoc);
+
+          char target_uri[8192];
+          snprintf(target_uri, sizeof(target_uri), "file://%s", resolved);
+          yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
+
+          yyjson_mut_val *range = yyjson_mut_obj(jdoc);
+          yyjson_mut_val *start = yyjson_mut_obj(jdoc);
+          yyjson_mut_obj_add_int(jdoc, start, "line", 0);
+          yyjson_mut_obj_add_int(jdoc, start, "character", 0);
+          yyjson_mut_val *end = yyjson_mut_obj(jdoc);
+          yyjson_mut_obj_add_int(jdoc, end, "line", 0);
+          yyjson_mut_obj_add_int(jdoc, end, "character", 0);
+          yyjson_mut_obj_add_val(jdoc, range, "start", start);
+          yyjson_mut_obj_add_val(jdoc, range, "end", end);
+          yyjson_mut_obj_add_val(jdoc, result, "range", range);
+          yyjson_mut_obj_add_val(jdoc, root, "result", result);
+
+          lsp_send_doc(jdoc);
+          free(current_abs);
+          arena_free_all(&tmp_arena);
+          return;
+        }
+        free(current_abs);
+      }
+    }
+    goto empty_response;
+  }
+
+  ResolvedNode res = resolve_node_to_decl(ident, &tmp_arena);
+
+  if (res.decl_node) {
+    AstNode *decl = res.decl_node;
+    Token target_tok = get_decl_token(decl);
+    const char *target_fpath = res.fpath;
+
+    if (target_tok.len > 0) {
+      yyjson_mut_val *root;
+      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+      yyjson_mut_val *result = yyjson_mut_obj(jdoc);
+
+      char target_uri[8192];
+      if (target_fpath) {
+        snprintf(target_uri, sizeof(target_uri), "file://%s", target_fpath);
+      } else {
+        snprintf(target_uri, sizeof(target_uri), "%s", uri);
+      }
+
+      yyjson_mut_obj_add_str(jdoc, result, "uri", target_uri);
+
+      yyjson_mut_val *range = yyjson_mut_obj(jdoc);
+      yyjson_mut_val *start = yyjson_mut_obj(jdoc);
+      yyjson_mut_obj_add_int(jdoc, start, "line", target_tok.line - 1);
+      yyjson_mut_obj_add_int(jdoc, start, "character", target_tok.col);
+
+      yyjson_mut_val *end = yyjson_mut_obj(jdoc);
+      yyjson_mut_obj_add_int(jdoc, end, "line", target_tok.line - 1);
+      yyjson_mut_obj_add_int(jdoc, end, "character",
+                             target_tok.col + target_tok.len);
+
+      yyjson_mut_obj_add_val(jdoc, range, "start", start);
+      yyjson_mut_obj_add_val(jdoc, range, "end", end);
+      yyjson_mut_obj_add_val(jdoc, result, "range", range);
+      yyjson_mut_obj_add_val(jdoc, root, "result", result);
+
+      lsp_send_doc(jdoc);
+      arena_free_all(&tmp_arena);
+      return;
+    }
+  }
+
+  arena_free_all(&tmp_arena);
+
+empty_response: {
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
+  lsp_send_doc(jdoc);
+}
+}
+
+void handle_hover(yyjson_val *params, yyjson_val *id) {
+  yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
+  const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
+  yyjson_val *pos = yyjson_obj_get(params, "position");
+  int line = yyjson_get_int(yyjson_obj_get(pos, "line"));
+  int character = yyjson_get_int(yyjson_obj_get(pos, "character"));
+
+  Doc *doc = (Doc *)map_get(&server_state.docs, uri, strlen(uri));
+
+  if (doc && doc->compile_pending) {
+    doc->compile_pending = false;
+    compile_doc(doc);
+  }
+
+  if (!doc || !doc->ast_root) {
+    goto empty_response;
+  }
+
+  Arena tmp_arena = {0};
+
+  AstNode *ident = find_ident_at_pos(doc->ast_root, line, character);
+  ResolvedNode res = resolve_node_to_decl(ident, &tmp_arena);
+
+  if (res.decl_node) {
+    AstNode *decl = res.decl_node;
+    Token t = get_decl_token(decl);
+
+    if (t.len > 0) {
+      char *source_txt = NULL;
+      bool allocated_source = false;
+
+      if (res.fpath) {
+        char target_uri[8192];
+        snprintf(target_uri, sizeof(target_uri), "file://%s", res.fpath);
+        Doc *target_doc =
+            (Doc *)map_get(&server_state.docs, target_uri, strlen(target_uri));
+        if (target_doc) {
+          source_txt = target_doc->txt;
+        } else {
+          Doc *target_doc = get_or_load_doc(target_uri, res.fpath);
+          if (target_doc) {
+            source_txt = target_doc->txt;
+          }
+        }
+      } else {
+        source_txt = doc->txt;
+      }
+
+      char *comments = get_comments_above(source_txt, t);
+      if (allocated_source && source_txt) {
+        free(source_txt);
+      }
+
+      char signature[8192] = {0};
+
+      if (decl->type == AST_VAR_DECL) {
+        snprintf(signature, sizeof(signature), "var %.*s: %.*s", t.len, t.start,
+                 decl->as.var_decl.type.name.len,
+                 decl->as.var_decl.type.name.start);
+      } else if (decl->type == AST_FUNC) {
+        char params_buf[4096] = {0};
+        size_t offset = 0;
+        AstNode *param = decl->as.func_def.params;
+
+        while (param) {
+          Token p_id = param->as.fn_param.id;
+          Token p_type = param->as.fn_param.type.name;
+
+          int written =
+              snprintf(params_buf + offset, sizeof(params_buf) - offset,
+                       "%.*s %.*s%s", p_type.len, p_type.start, p_id.len,
+                       p_id.start, param->next ? ", " : "");
+          if (written > 0) {
+            offset += written;
+          }
+          param = param->next;
+        }
+
+        snprintf(signature, sizeof(signature), "%.*s %.*s(%s)",
+                 decl->as.func_def.ret_type.name.len,
+                 decl->as.func_def.ret_type.name.start, t.len, t.start,
+                 params_buf);
+      } else if (decl->type == AST_STRUCT) {
+        snprintf(signature, sizeof(signature), "struct %.*s", t.len, t.start);
+      } else if (decl->type == AST_UNION) {
+        snprintf(signature, sizeof(signature), "union %.*s", t.len, t.start);
+      } else if (decl->type == AST_ENUM) {
+        snprintf(signature, sizeof(signature), "enum %.*s", t.len, t.start);
+      } else if (decl->type == AST_ENUM_MEMBER) {
+        snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
+      } else {
+        snprintf(signature, sizeof(signature), "%.*s", t.len, t.start);
+      }
+
+      char md_buffer[16384];
+      snprintf(md_buffer, sizeof(md_buffer), "```tereix\n%s\n```\n%s",
+               signature, comments ? comments : "");
+
+      if (comments)
+        free(comments);
+
+      yyjson_mut_val *root;
+      yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+      yyjson_mut_val *result = yyjson_mut_obj(jdoc);
+
+      yyjson_mut_val *contents = yyjson_mut_obj(jdoc);
+      yyjson_mut_obj_add_str(jdoc, contents, "kind", "markdown");
+      yyjson_mut_obj_add_str(jdoc, contents, "value", md_buffer);
+
+      yyjson_mut_obj_add_val(jdoc, result, "contents", contents);
+      yyjson_mut_obj_add_val(jdoc, root, "result", result);
+
+      lsp_send_doc(jdoc);
+      arena_free_all(&tmp_arena);
+      return;
+    }
+  }
+
+  arena_free_all(&tmp_arena);
+
+empty_response: {
+  yyjson_mut_val *root;
+  yyjson_mut_doc *jdoc = lsp_start_response(id, &root);
+  yyjson_mut_obj_add_val(jdoc, root, "result", yyjson_mut_null(jdoc));
+  lsp_send_doc(jdoc);
+}
+}
+
 void handle_did_save(yyjson_val *params) {
   yyjson_val *text_doc = yyjson_obj_get(params, "textDocument");
   const char *uri = yyjson_get_str(yyjson_obj_get(text_doc, "uri"));
@@ -2540,9 +2574,20 @@ void handle_signature_help(yyjson_val *params, yyjson_val *id) {
                     snprintf(target_uri, sizeof(target_uri), "file://%s",
                              resolved);
                     AstNode *mod_ast = NULL;
-                    Doc *imported_doc = get_or_load_doc(target_uri, resolved);
-                    if (imported_doc && imported_doc->ast_root) {
-                      mod_ast = imported_doc->ast_root;
+
+                    Module *imported_mod =
+                        map_get(&server_state.proj_sem.mod_cache, resolved,
+                                strlen(resolved));
+                    if (imported_mod && imported_mod->ast_root) {
+                      mod_ast = imported_mod->ast_root;
+                    } else {
+                      Doc *imported_doc = (Doc *)map_get(
+                          &server_state.docs, target_uri, strlen(target_uri));
+                      if (imported_doc && imported_doc->ast_root) {
+                        mod_ast = imported_doc->ast_root;
+                      } else {
+                        mod_ast = file_to_ast(&tmp_arena, resolved, true);
+                      }
                     }
 
                     if (mod_ast) {
@@ -2690,7 +2735,7 @@ void start_lsp_server() {
   while (1) {
     process_debounced_compiles();
 
-		// Poll stdin
+    // Poll stdin
     int poll_res = poll(&pfd, 1, 50);
     if (poll_res <= 0) {
       if (feof(stdin))
