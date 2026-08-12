@@ -972,12 +972,31 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
   yyjson_mut_val *result = yyjson_mut_arr(jdoc);
 
   AstNode *containing_func = NULL;
+  AstNode *containing_sue = NULL;
   AstNode *stmt = ast_to_use->as.block.first_stmt;
+
   while (stmt) {
     Token t = get_decl_token(stmt);
     if (t.line > 0 && t.line <= (unsigned int)(line + 1)) {
       if (stmt->type == AST_FUNC) {
         containing_func = stmt;
+        containing_sue = NULL;
+      } else if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
+                 stmt->type == AST_ENUM) {
+        AstNode *member =
+            (stmt->type == AST_STRUCT)  ? stmt->as.struct_def.contents
+            : (stmt->type == AST_UNION) ? stmt->as.union_def.contents
+                                        : stmt->as.enum_def.contents;
+        while (member) {
+          if (member->type == AST_FUNC) {
+            Token mt = get_decl_token(member);
+            if (mt.line > 0 && mt.line <= (unsigned int)(line + 1)) {
+              containing_func = member;
+              containing_sue = stmt;
+            }
+          }
+          member = member->next;
+        }
       }
     }
     stmt = stmt->next;
@@ -1123,7 +1142,11 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
       Token type_name = {0};
       bool found_type = false;
 
-      if (containing_func) {
+      if (containing_sue && ident_len == 4 &&
+          strncmp(base_name, "self", 4) == 0) {
+        type_name = get_decl_token(containing_sue);
+        found_type = true;
+      } else if (containing_func) {
         AstNode *param = containing_func->as.func_def.params;
         while (param) {
           if (param->as.fn_param.id.len == ident_len &&
@@ -1451,6 +1474,10 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
     }
 
     if (containing_func) {
+      if (containing_sue) {
+        add_completion_item(jdoc, result, "self", 14, "keyword",
+                            "Instance reference", NULL);
+      }
       const char *local_kws[] = {
           "if",   "else",  "while",    "for",    "ret",  "defer", "switch",
           "case", "break", "continue", "sizeof", "true", "false", "null"};
