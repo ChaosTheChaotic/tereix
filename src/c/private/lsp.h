@@ -16,6 +16,9 @@ typedef struct {
   Arena *ast_arena;
   AstNode *ast_root;
   DiagList diags;
+
+	uint64_t last_change;
+	bool compile_pending;
 } Doc;
 
 typedef struct {

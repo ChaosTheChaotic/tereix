@@ -37,4 +37,6 @@ const char *resolve_module_path(Arena *arena,
                                 const char *importing_file_abs_path,
                                 const char *import_path);
 
+uint64_t get_time_ms();
+
 #endif // !UTIL_H

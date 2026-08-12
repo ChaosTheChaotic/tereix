@@ -1,8 +1,10 @@
 #include "util.h"
 #include "arena.h"
+#include <bits/time.h>
 #include <limits.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 const char *resolve_alloc(Arena *arena, const char *rel_path) {
   char temp[PATH_MAX];
@@ -256,4 +258,10 @@ const char *resolve_module_path(Arena *arena,
   }
 
   return NULL;
+}
+
+uint64_t get_time_ms() {
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec * 1000 + (ts.tv_nsec / 1000000);
 }
