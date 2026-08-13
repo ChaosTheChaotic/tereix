@@ -369,8 +369,8 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
                            "Error in %s at %u:%u: Duplicate mod import name "
                            "'%.*s'. Use an "
                            "'as' alias.\n",
-                           current_mod->abs_path, stmt->as.use_stmt.path.line,
-                           stmt->as.use_stmt.path.col, (int)key_len,
+                           current_mod->abs_path, (int)stmt->as.use_stmt.path.line,
+                           (int)stmt->as.use_stmt.path.col, (int)key_len,
                            import_key);
                 return false;
               }
@@ -486,7 +486,7 @@ bool collect_mod_symbols(Arena *arena, Module *mod, SemCtx *ctx) {
         if (!is_existing_opaque) {
           sem_report(ctx, DIAG_ERROR, name,
                      "Error: Symbol '%.*s' already defined in module %s",
-                     name.len, name.start, mod->mod_name);
+                     (int)name.len, name.start, mod->mod_name);
           return false;
         }
       }
@@ -592,7 +592,7 @@ VisitResult resolve_scopes_enter(AstVisitor *visitor, AstNode *node) {
     if (!scope_declare(ss, node->as.func_def.fn_name, func_sym)) {
       sem_report(ctx, DIAG_ERROR, node->as.func_def.fn_name,
                  "Error: Duplicate function name '%.*s'\n",
-                 node->as.func_def.fn_name.len,
+                 (int)node->as.func_def.fn_name.len,
                  node->as.func_def.fn_name.start);
     }
     push_scope(ss);
@@ -605,7 +605,7 @@ VisitResult resolve_scopes_enter(AstVisitor *visitor, AstNode *node) {
     if (!scope_declare(ss, node->as.fn_param.id, param_sym)) {
       sem_report(ctx, DIAG_ERROR, node->as.fn_param.id,
                  "Error: Duplicate parameter name '%.*s'\n",
-                 node->as.fn_param.id.len, node->as.fn_param.id.start);
+                 (int)node->as.fn_param.id.len, node->as.fn_param.id.start);
     }
     break;
   }
@@ -625,7 +625,7 @@ VisitResult resolve_scopes_enter(AstVisitor *visitor, AstNode *node) {
     Token id = node->as.identif.val;
     Sym *found = scope_lookup(ss, id.start, id.len);
     if (!found) {
-      sem_report(ctx, DIAG_ERROR, id, "Undeclared identifier '%.*s'", id.len,
+      sem_report(ctx, DIAG_ERROR, id, "Undeclared identifier '%.*s'", (int)id.len,
                  id.start);
     } else {
       node->as.identif.res_sm = found;
@@ -1739,8 +1739,8 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       } else {
         sem_report(ctx, DIAG_ERROR, n->as.member.name,
                    "Member '%.*s' not found in type '%.*s'",
-                   n->as.member.name.len, n->as.member.name.start,
-                   base_t.name.len, base_t.name.start);
+                   (int)n->as.member.name.len, n->as.member.name.start,
+                   (int)base_t.name.len, base_t.name.start);
       }
 
       n->eval_type.is_mut = base_t.is_mut;
