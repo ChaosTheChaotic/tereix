@@ -1038,6 +1038,7 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
           return sym->decl_node;
       }
     }
+    return NULL;
   }
 
   DataType base_t = base->eval_type;
@@ -1051,7 +1052,7 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
     underlying.array_dimens = 0;
   }
 
-  if (!underlying.is_custom || underlying.name.len == 0)
+  if (underlying.name.len == 0)
     return NULL;
 
   Sym *type_sym = NULL;
@@ -1078,13 +1079,15 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
   if (!type_sym || !type_sym->decl_node)
     return NULL;
 
+  AstNode *decl = type_sym->decl_node;
+  if (decl->type != AST_STRUCT && decl->type != AST_UNION)
+    return NULL;
+
   AstNode *contents = NULL;
-  if (type_sym->decl_node->type == AST_STRUCT)
-    contents = type_sym->decl_node->as.struct_def.contents;
-  else if (type_sym->decl_node->type == AST_UNION)
-    contents = type_sym->decl_node->as.union_def.contents;
+  if (decl->type == AST_STRUCT)
+    contents = decl->as.struct_def.contents;
   else
-    return NULL; // enums dont have fields
+    contents = decl->as.union_def.contents;
 
   AstNode *curr = contents;
   while (curr) {
