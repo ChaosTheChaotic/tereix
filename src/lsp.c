@@ -793,19 +793,68 @@ AstNode *find_sue_decl(AstNode *root, const char *target_name,
                        size_t target_len) {
   if (!root)
     return NULL;
-  AstNode *stmt = root->as.block.first_stmt;
-  while (stmt) {
-    if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
-        stmt->type == AST_ENUM) {
-      Token t = get_decl_token(stmt);
-      if (t.len == target_len &&
-          strncmp(t.start, target_name, target_len) == 0) {
-        return stmt;
+
+  size_t stack_cap = 32;
+  AstNode **stack = malloc(stack_cap * sizeof(AstNode *));
+  if (!stack)
+    return NULL;
+  size_t stack_len = 0;
+
+  stack[stack_len++] = root->as.block.first_stmt;
+  AstNode *found = NULL;
+
+  while (stack_len > 0) {
+    AstNode *stmt = stack[--stack_len];
+    while (stmt) {
+      if (stmt->type == AST_STRUCT || stmt->type == AST_UNION ||
+          stmt->type == AST_ENUM) {
+        Token t = get_decl_token(stmt);
+        if (t.len == target_len &&
+            strncmp(t.start, target_name, target_len) == 0) {
+          found = stmt;
+          break;
+        }
+
+				// Find nested sues
+        AstNode *contents =
+            (stmt->type == AST_STRUCT)  ? stmt->as.struct_def.contents
+            : (stmt->type == AST_UNION) ? stmt->as.union_def.contents
+                                        : stmt->as.enum_def.contents;
+        if (contents) {
+          if (stack_len >= stack_cap) {
+            stack_cap *= 2;
+            AstNode **new_stack = realloc(stack, stack_cap * sizeof(AstNode *));
+            if (!new_stack) {
+              free(stack);
+              return found;
+            }
+            stack = new_stack;
+          }
+          stack[stack_len++] = contents;
+        }
+      } else if (stmt->type == AST_FUNC) {
+        if (stmt->as.func_def.block &&
+            stmt->as.func_def.block->as.block.first_stmt) {
+          if (stack_len >= stack_cap) {
+            stack_cap *= 2;
+            AstNode **new_stack = realloc(stack, stack_cap * sizeof(AstNode *));
+            if (!new_stack) {
+              free(stack);
+              return found;
+            }
+            stack = new_stack;
+          }
+          stack[stack_len++] = stmt->as.func_def.block->as.block.first_stmt;
+        }
       }
+      stmt = stmt->next;
     }
-    stmt = stmt->next;
+    if (found)
+      break;
   }
-  return NULL;
+
+  free(stack);
+  return found;
 }
 
 int get_index_from_pos(const char *txt, int line, int character) {
@@ -872,6 +921,173 @@ bool split_qualified_type(Token qualified, Token *mod_alias,
   simple_name->type = TOKEN_IDENTIF;
 
   return true;
+}
+
+AstNode *type_name_to_decl(Token type_name, AstNode *ast_to_use,
+                                          const char *uri,
+                                          const char **decl_src_txt,
+                                          Arena *tmp_arena) {
+  AstNode *type_decl = NULL;
+  Token mod_alias = {0}, simple_name = {0};
+  bool is_qualified = split_qualified_type(type_name, &mod_alias, &simple_name);
+
+  if (is_qualified) {
+    AstNode *use_stmt = ast_to_use->as.block.first_stmt;
+    while (use_stmt && !type_decl) {
+      if (use_stmt->type == AST_USE) {
+        Token pt = use_stmt->as.use_stmt.path;
+        char *mod_name = NULL;
+        size_t mod_len = 0;
+
+        Token alias = use_stmt->as.use_stmt.alias;
+        if (alias.len > 0) {
+          mod_name = (char *)alias.start;
+          mod_len = alias.len;
+        } else if (pt.len >= 2) {
+          const char *start = pt.start + 1;
+          const char *end = pt.start + pt.len - 1;
+          const char *base = end;
+          while (base > start && *(base - 1) != '/')
+            base--;
+          const char *dot = memchr(base, '.', end - base);
+          mod_len = dot ? (size_t)(dot - base) : (size_t)(end - base);
+          mod_name = (char *)base;
+        }
+
+        if (mod_len == mod_alias.len &&
+            strncmp(mod_name, mod_alias.start, mod_alias.len) == 0) {
+          if (pt.len >= 2) {
+            char *rel_path = arena_alloc(tmp_arena, pt.len - 1);
+            strncpy(rel_path, pt.start + 1, pt.len - 2);
+            rel_path[pt.len - 2] = '\0';
+            const char *normalized = normalize_module_path(tmp_arena, rel_path);
+            char *current_abs = absolute_from_uri(uri);
+            if (current_abs) {
+              char *last_slash = strrchr(current_abs, '/');
+              if (last_slash)
+                *last_slash = '\0';
+
+              size_t full_len = strlen(current_abs) + strlen(normalized) + 2;
+              char *full_path = arena_alloc(tmp_arena, full_len);
+              if (normalized[0] == '/')
+                snprintf(full_path, full_len, "%s", normalized);
+              else
+                snprintf(full_path, full_len, "%s/%s", current_abs, normalized);
+
+              char *resolved = realpath(full_path, NULL);
+              if (resolved) {
+                char target_uri[8192];
+                snprintf(target_uri, sizeof(target_uri), "file://%s", resolved);
+                Doc *imported_doc = (Doc *)map_get(
+                    &server_state.docs, target_uri, strlen(target_uri));
+                if (imported_doc && imported_doc->ast_root) {
+                  type_decl = find_sue_decl(imported_doc->ast_root,
+                                            simple_name.start, simple_name.len);
+                  if (type_decl)
+                    *decl_src_txt = imported_doc->txt;
+                } else {
+                  AstNode *mod_ast = file_to_ast(tmp_arena, resolved, true);
+                  if (mod_ast) {
+                    type_decl = find_sue_decl(mod_ast, simple_name.start,
+                                              simple_name.len);
+                    if (type_decl) {
+                      FILE *f = fopen(resolved, "rb");
+                      if (f) {
+                        fseek(f, 0, SEEK_END);
+                        long flen = ftell(f);
+                        fseek(f, 0, SEEK_SET);
+                        if (flen >= 0) {
+                          char *stxt = arena_alloc(tmp_arena, flen + 1);
+                          if (fread(stxt, 1, flen, f) == (size_t)flen) {
+                            stxt[flen] = '\0';
+                            *decl_src_txt = stxt;
+                          }
+                        }
+                        fclose(f);
+                      }
+                    }
+                  }
+                }
+                free(resolved);
+              }
+              free(current_abs);
+            }
+          }
+          break;
+        }
+      }
+      use_stmt = use_stmt->next;
+    }
+  } else {
+    type_decl = find_sue_decl(ast_to_use, type_name.start, type_name.len);
+    if (!type_decl) {
+      AstNode *use_stmt = ast_to_use->as.block.first_stmt;
+      while (use_stmt && !type_decl) {
+        if (use_stmt->type == AST_USE) {
+          Token pt = use_stmt->as.use_stmt.path;
+          if (pt.len >= 2) {
+            char *rel_path = arena_alloc(tmp_arena, pt.len - 1);
+            strncpy(rel_path, pt.start + 1, pt.len - 2);
+            rel_path[pt.len - 2] = '\0';
+            const char *normalized = normalize_module_path(tmp_arena, rel_path);
+            char *current_abs = absolute_from_uri(uri);
+            if (current_abs) {
+              char *last_slash = strrchr(current_abs, '/');
+              if (last_slash)
+                *last_slash = '\0';
+
+              size_t full_len = strlen(current_abs) + strlen(normalized) + 2;
+              char *full_path = arena_alloc(tmp_arena, full_len);
+              if (normalized[0] == '/')
+                snprintf(full_path, full_len, "%s", normalized);
+              else
+                snprintf(full_path, full_len, "%s/%s", current_abs, normalized);
+
+              char *resolved = realpath(full_path, NULL);
+              if (resolved) {
+                char target_uri[8192];
+                snprintf(target_uri, sizeof(target_uri), "file://%s", resolved);
+                Doc *imported_doc = (Doc *)map_get(
+                    &server_state.docs, target_uri, strlen(target_uri));
+                if (imported_doc && imported_doc->ast_root) {
+                  type_decl = find_sue_decl(imported_doc->ast_root,
+                                            type_name.start, type_name.len);
+                  if (type_decl)
+                    *decl_src_txt = imported_doc->txt;
+                } else {
+                  AstNode *mod_ast = file_to_ast(tmp_arena, resolved, true);
+                  if (mod_ast) {
+                    type_decl =
+                        find_sue_decl(mod_ast, type_name.start, type_name.len);
+                    if (type_decl) {
+                      FILE *f = fopen(resolved, "rb");
+                      if (f) {
+                        fseek(f, 0, SEEK_END);
+                        long flen = ftell(f);
+                        fseek(f, 0, SEEK_SET);
+                        if (flen >= 0) {
+                          char *stxt = arena_alloc(tmp_arena, flen + 1);
+                          if (fread(stxt, 1, flen, f) == (size_t)flen) {
+                            stxt[flen] = '\0';
+                            *decl_src_txt = stxt;
+                          }
+                        }
+                        fclose(f);
+                      }
+                    }
+                  }
+                }
+                free(resolved);
+              }
+              free(current_abs);
+            }
+          }
+        }
+        use_stmt = use_stmt->next;
+      }
+    }
+  }
+  return type_decl;
 }
 
 typedef struct {
@@ -1014,38 +1230,95 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
 
   if (is_dot_trigger) {
     p--;
-    while (p >= 0 && isspace((unsigned char)doc->txt[p]))
-      p--;
 
-    unsigned int ident_end = p;
-    while (p >= 0 &&
-           (isalnum((unsigned char)doc->txt[p]) || doc->txt[p] == '_'))
-      p--;
-    unsigned int ident_start = p + 1;
-    unsigned int ident_len = ident_end - ident_start + 1;
+    typedef struct {
+      const char *start;
+      size_t len;
+    } IdentPart;
 
-    if (ident_len > 0) {
-      char base_name[256];
-      snprintf(base_name, sizeof(base_name), "%.*s", (int)ident_len,
-               &doc->txt[ident_start]);
+    IdentPart *parts = NULL;
+    size_t parts_cap = 0;
+    size_t parts_count = 0;
+
+    int curr_p = p;
+    while (curr_p >= 0) {
+      while (curr_p >= 0 && isspace((unsigned char)doc->txt[curr_p]))
+        curr_p--;
+
+      int id_end = curr_p;
+      while (curr_p >= 0 && (isalnum((unsigned char)doc->txt[curr_p]) ||
+                             doc->txt[curr_p] == '_'))
+        curr_p--;
+      int id_start = curr_p + 1;
+      int id_len = id_end - id_start + 1;
+
+      if (id_len > 0) {
+        if (parts_count >= parts_cap) {
+          parts_cap = parts_cap == 0 ? 8 : parts_cap * 2;
+          parts = realloc(parts, parts_cap * sizeof(IdentPart));
+        }
+        parts[parts_count].start = &doc->txt[id_start];
+        parts[parts_count].len = id_len;
+        parts_count++;
+      } else {
+        break;
+      }
+
+      while (curr_p >= 0 && isspace((unsigned char)doc->txt[curr_p]))
+        curr_p--;
+
+      if (curr_p >= 0 && doc->txt[curr_p] == '.') {
+        curr_p--;
+      } else {
+        break;
+      }
+    }
+
+    if (parts_count > 0) {
+      IdentPart base = parts[parts_count - 1];
 
       bool is_module_access = false;
       AstNode *mod_ast = NULL;
       Arena tmp_arena = {0};
 
+      char *base_name = arena_alloc(&tmp_arena, base.len + 1);
+      memcpy(base_name, base.start, base.len);
+      base_name[base.len] = '\0';
+
+      // Dynamic Module lookup logic
       AstNode *top_stmt = ast_to_use->as.block.first_stmt;
       while (top_stmt) {
         if (top_stmt->type == AST_USE) {
-          char mod_name[256] = {0};
-          extract_use_namespace(top_stmt, mod_name, sizeof(mod_name));
+          Token alias = top_stmt->as.use_stmt.alias;
+          const char *mod_name_start = NULL;
+          size_t mod_name_len = 0;
 
-          if (strlen(mod_name) == ident_len &&
-              strncmp(base_name, mod_name, ident_len) == 0) {
-            is_module_access = true;
-
+          if (alias.len > 0) {
+            mod_name_start = alias.start;
+            mod_name_len = alias.len;
+          } else {
             Token pt = top_stmt->as.use_stmt.path;
             if (pt.len >= 2) {
-              char rel_path[PATH_MAX];
+              const char *tmp_path = pt.start + 1;
+              size_t tmp_len = pt.len - 2;
+              const char *base_ptr = tmp_path + tmp_len;
+              while (base_ptr > tmp_path && *(base_ptr - 1) != '/')
+                base_ptr--;
+              size_t mod_len = (tmp_path + tmp_len) - base_ptr;
+              const char *dot_ptr = memchr(base_ptr, '.', mod_len);
+              if (dot_ptr)
+                mod_len = dot_ptr - base_ptr;
+              mod_name_start = base_ptr;
+              mod_name_len = mod_len;
+            }
+          }
+
+          if (mod_name_len == base.len &&
+              strncmp(base.start, mod_name_start, base.len) == 0) {
+            is_module_access = true;
+            Token pt = top_stmt->as.use_stmt.path;
+            if (pt.len >= 2) {
+              char *rel_path = arena_alloc(&tmp_arena, pt.len - 1);
               strncpy(rel_path, pt.start + 1, pt.len - 2);
               rel_path[pt.len - 2] = '\0';
 
@@ -1054,12 +1327,13 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
                 char *last_slash = strrchr(current_abs, '/');
                 if (last_slash)
                   *last_slash = '\0';
+
                 const char *resolved =
                     resolve_module_path(&tmp_arena, current_abs, rel_path);
                 if (resolved) {
-                  char target_uri[8192];
-                  snprintf(target_uri, sizeof(target_uri), "file://%s",
-                           resolved);
+                  size_t uri_len = strlen(resolved) + 8;
+                  char *target_uri = arena_alloc(&tmp_arena, uri_len);
+                  snprintf(target_uri, uri_len, "file://%s", resolved);
 
                   Module *imported_mod =
                       map_get(&server_state.proj_sem.mod_cache, resolved,
@@ -1082,7 +1356,13 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
         top_stmt = top_stmt->next;
       }
 
-      if (is_module_access) {
+      Token type_name = {0};
+      bool found_type = false;
+      AstNode *type_decl = NULL;
+      const char *decl_src_txt = doc->txt;
+
+      if (is_module_access && parts_count == 1) {
+        // Module contents resolution
         if (mod_ast) {
           AstNode *ext_stmt = mod_ast->as.block.first_stmt;
           while (ext_stmt) {
@@ -1097,31 +1377,30 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             while (target_stmt) {
               Token t = get_decl_token(target_stmt);
               if (t.len > 0) {
-                char m_name[256];
-                snprintf(m_name, sizeof(m_name), "%.*s", (int)t.len, t.start);
+                char *m_name = arena_alloc(&tmp_arena, t.len + 1);
+                snprintf(m_name, t.len + 1, "%.*s", (int)t.len, t.start);
 
-                char detail_buf[1024] = {0};
-                char insert_buf[512] = {0};
-                int kind = 1; // Default
+                char *detail_buf = arena_alloc(&tmp_arena, 1024);
+                char *insert_buf = arena_alloc(&tmp_arena, 512);
+                int kind = 1;
 
                 if (target_stmt->type == AST_FUNC) {
                   kind = 3;
-                  format_func_signature(target_stmt, detail_buf,
-                                        sizeof(detail_buf));
-                  snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
+                  format_func_signature(target_stmt, detail_buf, 1024);
+                  snprintf(insert_buf, 512, "%s($1)", m_name);
                 } else if (target_stmt->type == AST_VAR_DECL) {
                   kind = 6;
                   format_type_to_buf(target_stmt->as.var_decl.type, detail_buf,
-                                     sizeof(detail_buf));
+                                     1024);
                 } else if (target_stmt->type == AST_STRUCT ||
                            target_stmt->type == AST_UNION) {
                   kind = 22;
-                  snprintf(detail_buf, sizeof(detail_buf), "%s",
+                  snprintf(detail_buf, 1024, "%s",
                            target_stmt->type == AST_STRUCT ? "struct"
                                                            : "union");
                 } else if (target_stmt->type == AST_ENUM) {
                   kind = 13;
-                  snprintf(detail_buf, sizeof(detail_buf), "enum");
+                  snprintf(detail_buf, 1024, "enum");
                 }
                 add_completion_item(jdoc, result, m_name, kind,
                                     detail_buf[0] != '\0' ? detail_buf : NULL,
@@ -1133,212 +1412,134 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             ext_stmt = ext_stmt->next;
           }
         }
+        if (parts)
+          free(parts);
         arena_free_all(&tmp_arena);
         yyjson_mut_obj_add_val(jdoc, root, "result", result);
         lsp_send_doc(jdoc);
         return;
       }
 
-      Token type_name = {0};
-      bool found_type = false;
+      int start_idx = parts_count - 1;
 
-      if (containing_sue && ident_len == 4 &&
-          strncmp(base_name, "self", 4) == 0) {
-        type_name = get_decl_token(containing_sue);
-        found_type = true;
-      } else if (containing_func) {
-        AstNode *param = containing_func->as.func_def.params;
-        while (param) {
-          if (param->as.fn_param.id.len == ident_len &&
-              strncmp(param->as.fn_param.id.start, base_name, ident_len) == 0) {
-            type_name = param->as.fn_param.type.name;
-            found_type = true;
-            break;
+      if (is_module_access) {
+        start_idx = parts_count - 2;
+        if (mod_ast && start_idx >= 0) {
+          IdentPart next_part = parts[start_idx];
+          AstNode *ext_stmt = mod_ast->as.block.first_stmt;
+          while (ext_stmt) {
+            AstNode *target_stmt = ext_stmt;
+            bool in_extern = false;
+            if (ext_stmt->type == AST_EXTERN &&
+                ext_stmt->as.extern_block.contents) {
+              target_stmt = ext_stmt->as.extern_block.contents;
+              in_extern = true;
+            }
+            while (target_stmt) {
+              Token t = get_decl_token(target_stmt);
+              if (t.len == next_part.len &&
+                  strncmp(t.start, next_part.start, next_part.len) == 0) {
+                if (target_stmt->type == AST_VAR_DECL) {
+                  type_name = target_stmt->as.var_decl.type.name;
+                  found_type = true;
+                }
+                break;
+              }
+              target_stmt = in_extern ? target_stmt->next : NULL;
+            }
+            if (found_type)
+              break;
+            ext_stmt = ext_stmt->next;
           }
-          param = param->next;
+        }
+      } else {
+        if (containing_sue && base.len == 4 &&
+            strncmp(base.start, "self", 4) == 0) {
+          type_name = get_decl_token(containing_sue);
+          found_type = true;
+        } else if (containing_func) {
+          AstNode *param = containing_func->as.func_def.params;
+          while (param) {
+            if (param->as.fn_param.id.len == base.len &&
+                strncmp(param->as.fn_param.id.start, base.start, base.len) ==
+                    0) {
+              type_name = param->as.fn_param.type.name;
+              found_type = true;
+              break;
+            }
+            param = param->next;
+          }
+          if (!found_type && containing_func->as.func_def.block) {
+            if (perform_ast_type_lookup(containing_func, line, base_name,
+                                        base.len, &type_name)) {
+              found_type = true;
+            }
+          }
         }
 
-        if (!found_type && containing_func->as.func_def.block) {
-          if (perform_ast_type_lookup(containing_func, line, base_name,
-                                      ident_len, &type_name)) {
-            found_type = true;
+        if (!found_type) {
+          AstNode *gst = ast_to_use->as.block.first_stmt;
+          while (gst) {
+            if (gst->type == AST_VAR_DECL) {
+              if (gst->as.var_decl.id.len == base.len &&
+                  strncmp(gst->as.var_decl.id.start, base.start, base.len) ==
+                      0) {
+                type_name = gst->as.var_decl.type.name;
+                found_type = true;
+                break;
+              }
+            }
+            gst = gst->next;
           }
         }
       }
 
-      if (!found_type) {
-        AstNode *gst = ast_to_use->as.block.first_stmt;
-        while (gst) {
-          if (gst->type == AST_VAR_DECL) {
-            if (gst->as.var_decl.id.len == ident_len &&
-                strncmp(gst->as.var_decl.id.start, base_name, ident_len) == 0) {
-              type_name = gst->as.var_decl.type.name;
+			// Resolve nested sue chains
+      for (int i = start_idx; i > 0; i--) {
+        if (!found_type || type_name.len == 0)
+          break;
+
+        type_decl = type_name_to_decl(type_name, ast_to_use, uri,
+                                              &decl_src_txt, &tmp_arena);
+        if (!type_decl)
+          break;
+
+        IdentPart next_member = parts[i - 1];
+        found_type = false;
+
+        AstNode *member =
+            (type_decl->type == AST_STRUCT)  ? type_decl->as.struct_def.contents
+            : (type_decl->type == AST_UNION) ? type_decl->as.union_def.contents
+            : (type_decl->type == AST_ENUM)  ? type_decl->as.enum_def.contents
+                                             : NULL;
+
+        while (member) {
+          if (member->type == AST_VAR_DECL) {
+            if (member->as.var_decl.id.len == next_member.len &&
+                strncmp(member->as.var_decl.id.start, next_member.start,
+                        next_member.len) == 0) {
+              type_name = member->as.var_decl.type.name;
+              found_type = true;
+              break;
+            }
+          } else if (member->type == AST_STRUCT || member->type == AST_UNION ||
+                     member->type == AST_ENUM) {
+            Token mt = get_decl_token(member);
+            if (mt.len == next_member.len &&
+                strncmp(mt.start, next_member.start, next_member.len) == 0) {
+              type_name = mt;
               found_type = true;
               break;
             }
           }
-          gst = gst->next;
+          member = member->next;
         }
       }
 
-      AstNode *type_decl = NULL;
-      const char *decl_src_txt = doc->txt;
-
+			// Get completions for rightmost member
       if (found_type && type_name.len > 0) {
-        Token mod_alias = {0}, simple_name = {0};
-        bool is_qualified =
-            split_qualified_type(type_name, &mod_alias, &simple_name);
-
-        if (is_qualified) {
-          AstNode *use_stmt = ast_to_use->as.block.first_stmt;
-          while (use_stmt && !type_decl) {
-            if (use_stmt->type == AST_USE) {
-              char mod_name[256] = {0};
-              extract_use_namespace(use_stmt, mod_name, sizeof(mod_name));
-              if (strlen(mod_name) == mod_alias.len &&
-                  strncmp(mod_name, mod_alias.start, mod_alias.len) == 0) {
-                Token pt = use_stmt->as.use_stmt.path;
-                if (pt.len >= 2) {
-                  char rel_path[PATH_MAX];
-                  strncpy(rel_path, pt.start + 1, pt.len - 2);
-                  rel_path[pt.len - 2] = '\0';
-                  const char *normalized =
-                      normalize_module_path(&tmp_arena, rel_path);
-                  char *current_abs = absolute_from_uri(uri);
-                  if (current_abs) {
-                    char *last_slash = strrchr(current_abs, '/');
-                    if (last_slash)
-                      *last_slash = '\0';
-                    char full_path[PATH_MAX * 2];
-                    if (normalized[0] == '/')
-                      snprintf(full_path, sizeof(full_path), "%s", normalized);
-                    else
-                      snprintf(full_path, sizeof(full_path), "%s/%s",
-                               current_abs, normalized);
-                    char *resolved = realpath(full_path, NULL);
-                    if (resolved) {
-                      char target_uri[8192];
-                      snprintf(target_uri, sizeof(target_uri), "file://%s",
-                               resolved);
-                      Doc *imported_doc = (Doc *)map_get(
-                          &server_state.docs, target_uri, strlen(target_uri));
-                      if (imported_doc && imported_doc->ast_root) {
-                        type_decl =
-                            find_sue_decl(imported_doc->ast_root,
-                                          simple_name.start, simple_name.len);
-                        if (type_decl)
-                          decl_src_txt = imported_doc->txt;
-                      } else {
-                        AstNode *mod_ast =
-                            file_to_ast(&tmp_arena, resolved, true);
-                        if (mod_ast) {
-                          type_decl = find_sue_decl(mod_ast, simple_name.start,
-                                                    simple_name.len);
-                          if (type_decl) {
-                            FILE *f = fopen(resolved, "rb");
-                            if (f) {
-                              fseek(f, 0, SEEK_END);
-                              long flen = ftell(f);
-                              fseek(f, 0, SEEK_SET);
-                              if (flen >= 0) {
-                                char *stxt = arena_alloc(&tmp_arena, flen + 1);
-                                size_t read_bytes = fread(stxt, 1, flen, f);
-                                if (read_bytes == (size_t)flen) {
-                                  stxt[flen] = '\0';
-                                  decl_src_txt = stxt;
-                                } else {
-                                  decl_src_txt = NULL;
-                                }
-                              }
-                              fclose(f);
-                            }
-                          }
-                        }
-                      }
-                      free(resolved);
-                    }
-                    free(current_abs);
-                  }
-                }
-                break;
-              }
-            }
-            use_stmt = use_stmt->next;
-          }
-        } else {
-          type_decl = find_sue_decl(ast_to_use, type_name.start, type_name.len);
-          if (!type_decl) {
-            AstNode *use_stmt = ast_to_use->as.block.first_stmt;
-            while (use_stmt && !type_decl) {
-              if (use_stmt->type == AST_USE) {
-                Token pt = use_stmt->as.use_stmt.path;
-                if (pt.len >= 2) {
-                  char rel_path[PATH_MAX];
-                  strncpy(rel_path, pt.start + 1, pt.len - 2);
-                  rel_path[pt.len - 2] = '\0';
-                  const char *normalized =
-                      normalize_module_path(&tmp_arena, rel_path);
-                  char *current_abs = absolute_from_uri(uri);
-                  if (current_abs) {
-                    char *last_slash = strrchr(current_abs, '/');
-                    if (last_slash)
-                      *last_slash = '\0';
-                    char full_path[PATH_MAX * 2];
-                    if (normalized[0] == '/')
-                      snprintf(full_path, sizeof(full_path), "%s", normalized);
-                    else
-                      snprintf(full_path, sizeof(full_path), "%s/%s",
-                               current_abs, normalized);
-                    char *resolved = realpath(full_path, NULL);
-                    if (resolved) {
-                      char target_uri[8192];
-                      snprintf(target_uri, sizeof(target_uri), "file://%s",
-                               resolved);
-                      Doc *imported_doc = (Doc *)map_get(
-                          &server_state.docs, target_uri, strlen(target_uri));
-                      if (imported_doc && imported_doc->ast_root) {
-                        type_decl =
-                            find_sue_decl(imported_doc->ast_root,
-                                          type_name.start, type_name.len);
-                        if (type_decl)
-                          decl_src_txt = imported_doc->txt;
-                      } else {
-                        AstNode *mod_ast =
-                            file_to_ast(&tmp_arena, resolved, true);
-                        if (mod_ast) {
-                          type_decl = find_sue_decl(mod_ast, type_name.start,
-                                                    type_name.len);
-                          if (type_decl) {
-                            FILE *f = fopen(resolved, "rb");
-                            if (f) {
-                              fseek(f, 0, SEEK_END);
-                              long flen = ftell(f);
-                              fseek(f, 0, SEEK_SET);
-                              if (flen >= 0) {
-                                char *stxt = arena_alloc(&tmp_arena, flen + 1);
-                                size_t read_bytes = fread(stxt, 1, flen, f);
-                                if (read_bytes == (size_t)flen) {
-                                  stxt[flen] = '\0';
-                                  decl_src_txt = stxt;
-                                } else {
-                                  decl_src_txt = NULL;
-                                }
-                              }
-                              fclose(f);
-                            }
-                          }
-                        }
-                      }
-                      free(resolved);
-                    }
-                    free(current_abs);
-                  }
-                }
-              }
-              use_stmt = use_stmt->next;
-            }
-          }
-        }
+        type_decl = type_name_to_decl(type_name, ast_to_use, uri,
+                                              &decl_src_txt, &tmp_arena);
       }
 
       if (type_decl) {
@@ -1354,14 +1555,17 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             member = member->next;
             continue;
           }
-          char m_name[256] = {0};
-          if (token_to_buf(mt, m_name, sizeof(m_name)) == 0) {
+
+          char *m_name = arena_alloc(&tmp_arena, mt.len + 1);
+          if (token_to_buf(mt, m_name, mt.len + 1) == 0) {
             member = member->next;
             continue;
           }
 
-          char detail_buf[1024] = {0};
-          char insert_buf[256] = {0};
+          char *detail_buf = arena_alloc(&tmp_arena, 1024);
+          char *insert_buf = arena_alloc(&tmp_arena, 256);
+          memset(detail_buf, 0, 1024);
+          memset(insert_buf, 0, 256);
 
           char *docs =
               decl_src_txt ? get_comments_above(decl_src_txt, mt) : NULL;
@@ -1369,18 +1573,17 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
 
           if (member->type == AST_FUNC) {
             kind = 2;
-            format_func_signature(member, detail_buf, sizeof(detail_buf));
-            snprintf(insert_buf, sizeof(insert_buf), "%s($1)", m_name);
+            format_func_signature(member, detail_buf, 1024);
+            snprintf(insert_buf, 256, "%s($1)", m_name);
           } else if (member->type == AST_VAR_DECL) {
-            format_type_to_buf(member->as.var_decl.type, detail_buf,
-                               sizeof(detail_buf));
+            format_type_to_buf(member->as.var_decl.type, detail_buf, 1024);
           } else if (member->type == AST_ENUM_MEMBER) {
             kind = 20;
-            snprintf(detail_buf, sizeof(detail_buf), "enum member");
+            snprintf(detail_buf, 1024, "enum member");
           } else if (member->type == AST_STRUCT || member->type == AST_UNION ||
                      member->type == AST_ENUM) {
             kind = (member->type == AST_ENUM) ? 13 : 22;
-            snprintf(detail_buf, sizeof(detail_buf), "nested %s",
+            snprintf(detail_buf, 1024, "nested %s",
                      member->type == AST_STRUCT
                          ? "struct"
                          : (member->type == AST_UNION ? "union" : "enum"));
@@ -1394,11 +1597,17 @@ void handle_completion(yyjson_val *params, yyjson_val *id) {
             free(docs);
           member = member->next;
         }
+
+        if (parts)
+          free(parts);
         arena_free_all(&tmp_arena);
         yyjson_mut_obj_add_val(jdoc, root, "result", result);
         lsp_send_doc(jdoc);
         return;
       }
+
+      if (parts)
+        free(parts);
       arena_free_all(&tmp_arena);
     }
   } else {
