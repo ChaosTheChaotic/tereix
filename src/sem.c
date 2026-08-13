@@ -1027,7 +1027,6 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
   if (!base)
     return NULL;
 
-  // Check for module access
   if (base->type == AST_IDENTIF && base->as.identif.res_sm &&
       base->as.identif.res_sm->is_imported_mod) {
     const char *mod_path = base->as.identif.res_sm->fpath;
@@ -1041,67 +1040,74 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
     }
   }
 
-  // Check if su access
   DataType base_t = base->eval_type;
-  if (base_t.is_custom && base_t.name.len > 0) {
-    Sym *type_sym = NULL;
 
-    // Check the current modules symbols
-    if (sem_current_mod) {
-      type_sym = map_get(&sem_current_mod->local_symbols, base_t.name.start,
-                         base_t.name.len);
+  if (base_t.name.len == 3 && strncmp(base_t.name.start, "any", 3) == 0)
+    return NULL;
 
-      // Check imported modules
-      if (!type_sym) {
-        for (size_t i = 0; i < sem_current_mod->imported_mods.capacity; i++) {
-          HashEntry *entry = sem_current_mod->imported_mods.buckets[i];
-          while (entry) {
-            Module *imp = (Module *)entry->value;
-            type_sym = map_get(&imp->local_symbols, base_t.name.start,
-                               base_t.name.len);
-            if (type_sym)
-              break;
-            entry = entry->next;
-          }
+  DataType underlying = base_t;
+  if (underlying.ptr_depth > 0 || underlying.array_dimens > 0) {
+    underlying.ptr_depth = 0;
+    underlying.array_dimens = 0;
+  }
+
+  if (!underlying.is_custom || underlying.name.len == 0)
+    return NULL;
+
+  Sym *type_sym = NULL;
+  if (sem_current_mod) {
+    type_sym = map_get(&sem_current_mod->local_symbols, underlying.name.start,
+                       underlying.name.len);
+    if (!type_sym) {
+      for (size_t i = 0; i < sem_current_mod->imported_mods.capacity; i++) {
+        HashEntry *entry = sem_current_mod->imported_mods.buckets[i];
+        while (entry) {
+          Module *imp = (Module *)entry->value;
+          type_sym = map_get(&imp->local_symbols, underlying.name.start,
+                             underlying.name.len);
           if (type_sym)
             break;
+          entry = entry->next;
         }
-      }
-    }
-
-    // Iter contents if su is found
-    if (type_sym && type_sym->decl_node) {
-      AstNode *contents = NULL;
-      if (type_sym->decl_node->type == AST_STRUCT) {
-        contents = type_sym->decl_node->as.struct_def.contents;
-      } else if (type_sym->decl_node->type == AST_UNION) {
-        contents = type_sym->decl_node->as.union_def.contents;
-      }
-
-      AstNode *curr = contents;
-      while (curr) {
-        Token decl_name = {0};
-        if (curr->type == AST_VAR_DECL)
-          decl_name = curr->as.var_decl.id;
-        else if (curr->type == AST_FUNC)
-          decl_name = curr->as.func_def.fn_name;
-        else if (curr->type == AST_ENUM)
-          decl_name = curr->as.enum_def.enumn;
-        else if (curr->type == AST_STRUCT)
-          decl_name = curr->as.struct_def.structn;
-        else if (curr->type == AST_UNION)
-          decl_name = curr->as.union_def.unionn;
-
-        if (decl_name.len == name.len &&
-            strncmp(decl_name.start, name.start, name.len) == 0) {
-          return curr;
-        }
-        curr = curr->next;
+        if (type_sym)
+          break;
       }
     }
   }
 
-  return NULL;
+  if (!type_sym || !type_sym->decl_node)
+    return NULL;
+
+  AstNode *contents = NULL;
+  if (type_sym->decl_node->type == AST_STRUCT)
+    contents = type_sym->decl_node->as.struct_def.contents;
+  else if (type_sym->decl_node->type == AST_UNION)
+    contents = type_sym->decl_node->as.union_def.contents;
+  else
+    return NULL; // enums dont have fields
+
+  AstNode *curr = contents;
+  while (curr) {
+    Token decl_name = {0};
+    if (curr->type == AST_VAR_DECL)
+      decl_name = curr->as.var_decl.id;
+    else if (curr->type == AST_FUNC)
+      decl_name = curr->as.func_def.fn_name;
+    else if (curr->type == AST_ENUM)
+      decl_name = curr->as.enum_def.enumn;
+    else if (curr->type == AST_STRUCT)
+      decl_name = curr->as.struct_def.structn;
+    else if (curr->type == AST_UNION)
+      decl_name = curr->as.union_def.unionn;
+
+    if (decl_name.len > 0 && decl_name.len == name.len &&
+        strncmp(decl_name.start, name.start, name.len) == 0) {
+      return curr;
+    }
+    curr = curr->next;
+  }
+
+  return NULL; // member not found
 }
 
 bool check_custom_type(DataType t, Token err_tok, SemCtx *ctx) {
@@ -1737,10 +1743,14 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
           n->eval_type.is_custom = true;
         }
       } else {
-        sem_report(ctx, DIAG_ERROR, n->as.member.name,
-                   "Member '%.*s' not found in type '%.*s'",
-                   (int)n->as.member.name.len, n->as.member.name.start,
-                   (int)base_t.name.len, base_t.name.start);
+        bool is_any_type =
+            (base_t.name.len == 3 && strncmp(base_t.name.start, "any", 3) == 0);
+        if (!is_any_type) {
+          sem_report(ctx, DIAG_ERROR, n->as.member.name,
+                     "Member '%.*s' not found in type '%.*s'",
+                     (int)n->as.member.name.len, n->as.member.name.start,
+                     (int)base_t.name.len, base_t.name.start);
+        }
       }
 
       n->eval_type.is_mut = base_t.is_mut;
