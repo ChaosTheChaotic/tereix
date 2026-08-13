@@ -955,6 +955,8 @@ typedef struct {
   Arena *arena;
   Token sue_stack[256];
   int sue_top;
+  AstNode *hoisted_sues_head;
+  AstNode *hoisted_sues_tail;
 } FlattenData;
 
 VisitResult flatten_enter(AstVisitor *visitor, AstNode *n) {
@@ -1070,6 +1072,19 @@ void flatten_exit(AstVisitor *visitor, AstNode *n) {
         AstNode *after_sue = n->next;
         n->next = child;
         child->next = after_sue;
+      } else if (child->type == AST_STRUCT || child->type == AST_UNION ||
+                 child->type == AST_ENUM) {
+        *prev_ptr = child->next;
+
+        child->is_nested_sue = false;
+        child->next = NULL;
+
+        if (!data->hoisted_sues_head) {
+          data->hoisted_sues_head = child;
+        } else {
+          data->hoisted_sues_tail->next = child;
+        }
+        data->hoisted_sues_tail = child;
       } else {
         prev_ptr = &child->next;
       }
@@ -1081,7 +1096,7 @@ void flatten_sues(AstNode *root, Arena *arena) {
   if (!root || root->type != AST_PROGRAM)
     return;
 
-  FlattenData data = {arena, {{0}}, 0};
+  FlattenData data = {arena, {{0}}, 0, NULL, NULL};
   AstVisitor visitor = {0};
   visitor.user_data = &data;
   visitor.enter_node = flatten_enter;
@@ -1092,6 +1107,10 @@ void flatten_sues(AstNode *root, Arena *arena) {
 
   if (setjmp(panic_env) == 0) {
     ast_traverse(&visitor, root);
+    if (data.hoisted_sues_head) {
+      data.hoisted_sues_tail->next = root->as.block.first_stmt;
+      root->as.block.first_stmt = data.hoisted_sues_head;
+    }
   } else {
     fprintf(stderr, "OOM encountered whilst flattening SUEs.\n");
   }
