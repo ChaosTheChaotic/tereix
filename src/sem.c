@@ -1233,6 +1233,46 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
   case AST_VAR_DECL:
     check_custom_type(n->as.var_decl.type, n->as.var_decl.type.name, ctx);
     if (n->as.var_decl.init) {
+      if (n->as.var_decl.init->type == AST_BLOCK) {
+        AstNode *first = n->as.var_decl.init->as.block.first_stmt;
+        if (first && first->next == NULL && first->type == AST_NUM_LIT) {
+          DataType decl_type = n->as.var_decl.type;
+          bool is_struct_or_union = false;
+          if (decl_type.ptr_depth == 0 && decl_type.array_dimens == 0 &&
+              decl_type.name.len > 0) {
+            Sym *type_sym = NULL;
+            if (sem_current_mod) {
+              type_sym = map_get(&sem_current_mod->local_symbols,
+                                 decl_type.name.start, decl_type.name.len);
+              if (!type_sym) {
+                for (size_t i = 0; i < sem_current_mod->imported_mods.capacity;
+                     i++) {
+                  HashEntry *entry = sem_current_mod->imported_mods.buckets[i];
+                  while (entry) {
+                    Module *imp = (Module *)entry->value;
+                    type_sym =
+                        map_get(&imp->local_symbols, decl_type.name.start,
+                                decl_type.name.len);
+                    if (type_sym)
+                      break;
+                    entry = entry->next;
+                  }
+                  if (type_sym)
+                    break;
+                }
+              }
+            }
+            if (type_sym &&
+                (type_sym->kind == SYM_STRUCT || type_sym->kind == SYM_UNION)) {
+              is_struct_or_union = true;
+            }
+          }
+          if (is_struct_or_union) {
+            n->as.var_decl.init->eval_type = decl_type;
+          }
+        }
+      }
+
       if (!is_type_compatible(n->as.var_decl.type,
                               n->as.var_decl.init->eval_type, false)) {
         sem_report(ctx, DIAG_WARNING, n->as.var_decl.id,
@@ -1326,6 +1366,45 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       if ((s[0] == '<' && s[1] == '<' && s[2] == '=') ||
           (s[0] == '>' && s[1] == '>' && s[2] == '='))
         is_assign = true;
+    }
+
+    if (is_assign && right && right->type == AST_BLOCK) {
+      AstNode *first = right->as.block.first_stmt;
+      if (first && first->next == NULL && first->type == AST_NUM_LIT) {
+        bool is_struct_or_union = false;
+        if (left_t.ptr_depth == 0 && left_t.array_dimens == 0 &&
+            left_t.name.len > 0) {
+          Sym *type_sym = NULL;
+          if (sem_current_mod) {
+            type_sym = map_get(&sem_current_mod->local_symbols,
+                               left_t.name.start, left_t.name.len);
+            if (!type_sym) {
+              for (size_t i = 0; i < sem_current_mod->imported_mods.capacity;
+                   i++) {
+                HashEntry *entry = sem_current_mod->imported_mods.buckets[i];
+                while (entry) {
+                  Module *imp = (Module *)entry->value;
+                  type_sym = map_get(&imp->local_symbols, left_t.name.start,
+                                     left_t.name.len);
+                  if (type_sym)
+                    break;
+                  entry = entry->next;
+                }
+                if (type_sym)
+                  break;
+              }
+            }
+          }
+          if (type_sym &&
+              (type_sym->kind == SYM_STRUCT || type_sym->kind == SYM_UNION)) {
+            is_struct_or_union = true;
+          }
+        }
+        if (is_struct_or_union) {
+          right->eval_type = left_t;
+          right_t = left_t;
+        }
+      }
     }
 
     if (is_assign && right && right->type == AST_ARRAY_LIT) {
