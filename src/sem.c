@@ -365,13 +365,13 @@ bool resolve_imports(Arena *arena, SemCtx *sem) {
 
               if (map_get(&current_mod->imported_mods, import_key, key_len) !=
                   NULL) {
-                sem_report(sem, DIAG_ERROR, stmt->as.use_stmt.path,
-                           "Error in %s at %u:%u: Duplicate mod import name "
-                           "'%.*s'. Use an "
-                           "'as' alias.\n",
-                           current_mod->abs_path, (int)stmt->as.use_stmt.path.line,
-                           (int)stmt->as.use_stmt.path.col, (int)key_len,
-                           import_key);
+                sem_report(
+                    sem, DIAG_ERROR, stmt->as.use_stmt.path,
+                    "Error in %s at %u:%u: Duplicate mod import name "
+                    "'%.*s'. Use an "
+                    "'as' alias.\n",
+                    current_mod->abs_path, (int)stmt->as.use_stmt.path.line,
+                    (int)stmt->as.use_stmt.path.col, (int)key_len, import_key);
                 return false;
               }
 
@@ -625,8 +625,8 @@ VisitResult resolve_scopes_enter(AstVisitor *visitor, AstNode *node) {
     Token id = node->as.identif.val;
     Sym *found = scope_lookup(ss, id.start, id.len);
     if (!found) {
-      sem_report(ctx, DIAG_ERROR, id, "Undeclared identifier '%.*s'", (int)id.len,
-                 id.start);
+      sem_report(ctx, DIAG_ERROR, id, "Undeclared identifier '%.*s'",
+                 (int)id.len, id.start);
     } else {
       node->as.identif.res_sm = found;
     }
@@ -1080,7 +1080,8 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
     return NULL;
 
   AstNode *decl = type_sym->decl_node;
-  if (decl->type != AST_STRUCT && decl->type != AST_UNION)
+  if (decl->type != AST_STRUCT && decl->type != AST_UNION &&
+      decl->type != AST_ENUM)
     return NULL;
 
   AstNode *contents = NULL;
@@ -1102,6 +1103,8 @@ AstNode *resolve_member_decl(SemCtx *ctx, AstNode *member_node) {
       decl_name = curr->as.struct_def.structn;
     else if (curr->type == AST_UNION)
       decl_name = curr->as.union_def.unionn;
+    else if (curr->type == AST_ENUM_MEMBER)
+      decl_name = curr->as.enum_member.name;
 
     if (decl_name.len > 0 && decl_name.len == name.len &&
         strncmp(decl_name.start, name.start, name.len) == 0) {
@@ -1316,14 +1319,21 @@ void tc_exit(AstVisitor *visitor, AstNode *n) {
       const char *s = op.start;
       if ((s[0] == '+' || s[0] == '-' || s[0] == '*' || s[0] == '/' ||
            s[0] == '%' || s[0] == '&' || s[0] == '|' || s[0] == '^') &&
-          s[1] == '=') {
+          s[1] == '=')
         is_assign = true;
-      }
     } else if (op.len == 3) {
       const char *s = op.start;
       if ((s[0] == '<' && s[1] == '<' && s[2] == '=') ||
-          (s[0] == '>' && s[1] == '>' && s[2] == '=')) {
+          (s[0] == '>' && s[1] == '>' && s[2] == '='))
         is_assign = true;
+    }
+
+    if (is_assign && right && right->type == AST_ARRAY_LIT) {
+      // If left is sue then treat literal as an init
+      bool left_is_num = is_numeric_type(left_t);
+      if (!left_is_num && left_t.ptr_depth == 0 && left_t.array_dimens == 0) {
+        right->eval_type = left_t;
+        right_t = left_t;
       }
     }
 
