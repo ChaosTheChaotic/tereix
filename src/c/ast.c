@@ -35,6 +35,7 @@ AstNode *new_node(Arena *arena, ASTN_TYPE type) {
     return NULL;
   memset(node, 0, sizeof(AstNode));
   node->type = type;
+  node->is_dirty = true;
   return node;
 }
 
