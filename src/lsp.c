@@ -2617,6 +2617,7 @@ void handle_did_open(yyjson_val *params) {
   server_state.doc_count++;
 
   compile_doc(doc);
+  publish_diagnostics_from_list(doc->uri, &doc->diags);
 }
 
 void handle_did_change(yyjson_val *params) {
